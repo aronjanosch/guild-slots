@@ -195,12 +195,12 @@ local function statusText()
 	return string.format(L.SET_OK, (canonical:gsub("^GSLOTS1;", ""):gsub(";", "  ")))
 end
 
+-- One short line per purchase: who gets tokens (officer side) or who they came from.
 local function who(p)
-	local name = tostring(p.player)
 	if p.role == "player" then
-		name = name .. " <- " .. tostring(p.officer)
+		return string.format(L.P_FROM, tostring(p.officer))
 	end
-	return name
+	return string.format(L.P_TO, tostring(p.player))
 end
 
 local function statusLabel(p)
@@ -298,6 +298,7 @@ local function grant()
 	local tokens = raw:match("^%d+$") and tonumber(raw) or nil
 	local id, code = s:grant(player, tokens)
 	if id then
+		W.grantId = id
 		note(W.grantNote, string.format(L.GRANT_SENT, player), c.goldLight)
 	else
 		note(W.grantNote, lookup("ERR_", code), c.lose)
@@ -499,7 +500,17 @@ local function build()
 	f:SetPoint("CENTER", UIParent, "CENTER", O.home[1], O.home[2])
 
 	if main() then
-		main().subscribe(function()
+		main().subscribe(function(name, data)
+			-- The note under the grant button follows the purchase it started.
+			if name == "purchase" and type(data) == "table" and data.role == "officer"
+				and data.buyId == W.grantId and W.grantNote then
+				local c = Theme.colors
+				if data.status == "done" then
+					note(W.grantNote, string.format(L.GRANT_DONE, tostring(data.player), tostring(data.tokens)), c.goldLight)
+				elseif data.status == "timeout" or data.status == "failed" then
+					note(W.grantNote, string.format(L.GRANT_FAILED, tostring(data.player), statusLabel(data)), c.lose)
+				end
+			end
 			if f:IsShown() then
 				OfficerFrame.refresh()
 			end
