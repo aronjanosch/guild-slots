@@ -6,15 +6,17 @@
 
 local failures = 0
 
-local LINE = "GSLOTS1;L=0;R=1;E=10,50,100;G=3"
+local LINE = "GSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T2"
+local LINE_T1 = "GSLOTS1;L=0;R=1;E=10,50,100;G=3"
 
--- Fresh globals and a loaded addon. opts: guild (name or false), rank, selfTest.
+-- Fresh globals and a loaded addon. opts: guild (name or false), rank, line (false: none).
 local function boot(locale, opts)
 	GuildSlotsDB = nil
 	local stub = dofile("tests/wowstub.lua")
 	stub.locale = locale
 	stub.guildName = opts.guild ~= false and (opts.guild or "Test Guild") or nil
-	stub.infoText = "Welcome to the guild\n" .. LINE .. "\nRaids on Friday"
+	local line = opts.line == nil and LINE or opts.line
+	stub.infoText = "Welcome to the guild\n" .. (line or "") .. "\nRaids on Friday"
 	stub.roster = stub.guildName and {
 		{ name = "Alice Smith", rankIndex = opts.rank or 0, online = true },
 		{ name = "Bob Jones", rankIndex = 4, online = true },
@@ -124,14 +126,17 @@ local function officerFlow(locale, unknown)
 	assert(O.frame:IsShown(), "officer window open")
 	assert(O.status:GetText():find("E=10,50,100", 1, true), "parsed settings shown")
 	assert(O.grantPart:IsShown() and O.formPart:IsShown(), "officer sees form and grant")
-	assert(O.line:GetText() == "GSLOTS1;L=0;W=2;R=1;E=10,50,100;G=3;C=0;T=T1;X=1000", "line prefilled from the guild info")
+	assert(O.line:GetText() == "GSLOTS1;L=0;W=2;R=1;E=10,50,100;G=3;C=0;T=T2;X=1000", "line prefilled from the guild info")
 
 	-- Form: a bad field names the field, a good one gives the line back.
 	stub.type(O.fields.E, "10,abc")
 	assert(O.line:GetText() == "", "no line for invalid input")
 	assert(O.formNote:GetText():find(L.F_E, 1, true), "invalid field named")
-	stub.type(O.fields.E, "5,100")
-	assert(O.line:GetText():find("E=5,100", 1, true), "line rebuilt")
+	stub.type(O.fields.E, "15,100")
+	assert(O.line:GetText() == "", "T2 needs stakes in multiples of 10")
+	assert(O.formNote:GetText():find(L.F_E, 1, true), "the stakes field is named")
+	stub.type(O.fields.E, "10,200")
+	assert(O.line:GetText():find("E=10,200", 1, true), "line rebuilt")
 	assert(O.formNote:GetText() == L.WARN_SPREAD, "spread warning at level 0")
 	stub.type(O.fields.L, "2")
 	assert(O.formNote:GetText():find(L.NOTE_LEVEL, 1, true), "level note")
@@ -176,7 +181,7 @@ local function officerFlow(locale, unknown)
 	-- A spin through the window.
 	local spins = env.count("SPIN")
 	W.spin:Click()
-	assert(S.phase == "spinning", "spinning in guild mode")
+	assert(S.phase == "round", "round running in guild mode")
 	settle(env)
 	assert(env.count("SPIN") == spins + 1, "SPIN sent")
 	assert(W.balance:GetText() == fmt(ns, session:game().balance), "shown balance matches the account")
@@ -192,6 +197,7 @@ local function officerFlow(locale, unknown)
 		local before = env.count("SPIN")
 		W.spin:Click()
 		W.spin:Click() -- quick stop
+		W.spin:Click() -- skip the presentation
 		local t0 = GetTime()
 		settle(env)
 		if W.offerRow:IsShown() then
@@ -250,7 +256,7 @@ local function officerFlow(locale, unknown)
 	local n = env.count("SPIN")
 	W.spin:Click()
 	env.pump(5)
-	assert(S.phase == "spinning", "spinning before the switch")
+	assert(S.phase == "round", "round running before the switch")
 	W.mode:Click()
 	assert(S.phase == "idle" and S.mode == "solo", "settled and switched")
 	W.mode:Click()
@@ -329,12 +335,58 @@ local function noGuildFlow(locale, unknown)
 	unknownMethods(stub, unknown)
 end
 
+-- 4. A guild on table T1: the account works, the window explains it cannot play it.
+local function t1Flow(locale, unknown)
+	local env = boot(locale, { line = LINE_T1 })
+	local ns, stub, L = env.ns, env.stub, env.L
+	local W, S = ns.SlotFrame.widgets, ns.SlotFrame.state
+	local session = ns.Main.session()
+	env.pump(20)
+	ns.Main.setSelfTest(true)
+	assert(session:grant("Alice Smith", 300), "grant to self")
+	env.pump(30)
+	assert(session:game().balance == 300 and session:game().tbl.id == "T1", "T1 account with 300 tokens")
+	stub.slash("/gs", "guild")
+	assert(S.mode == "guild", "guild mode")
+	assert(W.win:GetText() == L.UNSUPPORTED_TABLE, "unsupported table line")
+	local spins = env.count("SPIN")
+	W.spin:Click()
+	env.pump(2)
+	assert(S.phase == "idle" and env.count("SPIN") == spins, "no spin on a T1 account")
+	assert(W.win:GetText() == L.UNSUPPORTED_TABLE, "line repeated on spin")
+	W.payToggle:Click()
+	assert(W.ptUnsupported:IsShown() and not W.ptContent:IsShown(), "paytable explains it too")
+	W.payToggle:Click()
+	-- Solo still plays T2.
+	stub.slash("/gs", "solo")
+	W.spin:Click()
+	assert(S.phase == "round", "solo plays")
+	settle(env)
+	unknownMethods(stub, unknown)
+end
+
+-- 5. No settings line: the officer form proposes T2.
+local function noLineFlow(locale, unknown)
+	local env = boot(locale, { line = false })
+	local ns, stub, L = env.ns, env.stub, env.L
+	stub.slash("/gs", "officer")
+	local O = ns.OfficerFrame.widgets
+	assert(O.status:GetText() == L.SET_MISSING, "no line")
+	assert(O.fields.T:GetText() == "T2", "table field prefilled with T2")
+	assert(O.line:GetText():find(";T=T2;", 1, true), "line for T2")
+	stub.type(O.fields.E, "10,25")
+	assert(O.line:GetText() == "" and O.formNote:GetText():find(L.F_E, 1, true), "25 is not a T2 stake")
+	unknownMethods(stub, unknown)
+end
+
 for _, locale in ipairs({ "enUS", "deDE" }) do
 	local unknown = {}
 	local ok, err = xpcall(function()
 		officerFlow(locale, unknown)
 		memberFlow(locale, unknown)
 		noGuildFlow(locale, unknown)
+		t1Flow(locale, unknown)
+		noLineFlow(locale, unknown)
 	end, debug.traceback)
 	if ok then
 		local list = {}

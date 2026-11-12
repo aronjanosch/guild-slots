@@ -130,9 +130,14 @@ local function updateForm()
 	end
 end
 
--- Fills the form from the guild info, or the defaults.
+-- Fills the form from the guild info, or the defaults with table T2 (the table this version
+-- plays).
 local function prefill()
-	local s = Roster.settings() or Settings.defaults()
+	local s = Roster.settings()
+	if not s then
+		s = Settings.defaults()
+		s.T = "T2"
+	end
 	W.filling = true
 	for _, k in ipairs(FIELDS) do
 		local v = s[k]
