@@ -1242,9 +1242,11 @@ local function updateFlip()
 		showLastCards()
 		if res.won then
 			setWinText(L.GAMBLE_WON .. "  " .. winLine(res.amount * 2), Theme.tones.win)
+			setTotalShown(res.amount * 2) -- the win display follows the gamble
 			playSound("gambleWin")
 		else
 			setWinText(L.GAMBLE_LOST, Theme.tones.lose)
+			setTotalShown(nil)
 			playSound("gambleLose")
 		end
 		countTo("balance", S.balanceShown, restBalance(), t.countUp)
