@@ -1166,10 +1166,9 @@ local function showLastCards()
 	W.lastCardsLabel:SetShown(#S.cards > 0)
 end
 
-function SlotFrame.gamble()
-	if S.phase ~= "idle" or S.game:state() ~= "gamble" then
-		return
-	end
+-- Shows the card face down with the amount now at risk. Also used after a won step, so the
+-- player can pick again without leaving the card.
+local function openCard(silent)
 	local p = S.game.pending
 	S.phase = "pick"
 	S.messageUntil = nil
@@ -1182,9 +1181,18 @@ function SlotFrame.gamble()
 	W.black:Show()
 	showLastCards()
 	W.cardOverlay:Show()
-	setWinText(L.GAMBLE_HINT, Theme.tones.win)
-	playSound("click")
+	if not silent then
+		setWinText(L.GAMBLE_HINT, Theme.tones.win)
+		playSound("click")
+	end
 	refresh()
+end
+
+function SlotFrame.gamble()
+	if S.phase ~= "idle" or S.game:state() ~= "gamble" then
+		return
+	end
+	openCard()
 end
 
 -- color: "red" or "black".
@@ -1243,8 +1251,13 @@ local function updateFlip()
 		saveGame()
 	end
 	if dt >= t.gambleFlip + t.gambleHold then
-		hideCard()
 		S.flip = nil
+		if res.won and res.canGamble and S.game:state() == "gamble" then
+			-- Won and more steps allowed: the card stays for the next pick.
+			openCard(true)
+			return
+		end
+		hideCard()
 		S.phase = "idle"
 		S.offer = res.canGamble
 		if not res.won then
@@ -1307,14 +1320,14 @@ local function settle()
 	if S.phase == "round" then
 		settleRound()
 	end
+	if S.phase == "flip" then
+		S.flip.t0 = S.now - 100
+		updateFlip()
+	end
 	if S.phase == "pick" then
 		S.phase = "idle"
 		hideCard()
 		S.offer = S.game:state() == "gamble"
-	end
-	if S.phase == "flip" then
-		S.flip.t0 = S.now - 100
-		updateFlip()
 	end
 	S.counts = {}
 	setBalanceShown(restBalance())

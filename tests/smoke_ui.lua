@@ -85,7 +85,7 @@ local function scenario(locale, lean)
 			stub.tick(1 / 60)
 			guard = guard + 1
 			assert(guard < 20000, "animation never settles (phase " .. S.phase .. ")")
-		until S.phase == "idle" and next(S.counts) == nil
+		until (S.phase == "idle" or S.phase == "pick") and next(S.counts) == nil
 	end
 	local function step()
 		return S.plan and S.plan.steps[S.si] or nil
@@ -259,12 +259,12 @@ local function scenario(locale, lean)
 	assert(flipped() == Theme.tex.cardRed, "won: the picked colour")
 	assert(W.lastCards[1]:IsShown() and W.lastCards[1]:GetTexture() == Theme.tex.cardRed, "last cards")
 	settle()
-	assert(not W.cardOverlay:IsShown(), "card gone after the hold")
+	assert(S.phase == "pick" and W.cardOverlay:IsShown(), "after a won step the card stays for the next pick")
+	assert(W.card:GetTexture() == Theme.tex.cardBack and W.red:IsShown() and W.black:IsShown(), "face down again")
+	assert(W.gambleLine:GetText():find(fmt(120), 1, true), "the doubled amount is now at stake")
 	assert(S.game.balance == 1030 + 30, "won gamble adds 30")
-	assert(W.offerRow:IsShown(), "gamble offered again")
 	assert(W.take.label:GetText():find(fmt(60), 1, true), "take shows 60")
 	shownMatches("after gamble win")
-	W.gamble:Click()
 	queue(1)
 	W.red:Click()
 	assert(flipped() == Theme.tex.cardBlack, "lost: the other colour")

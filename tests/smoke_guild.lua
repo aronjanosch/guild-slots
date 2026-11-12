@@ -83,7 +83,7 @@ local function settle(env)
 		env.pump(1)
 		guard = guard + 1
 		assert(guard < 2000, "animation never settles (phase " .. S.phase .. ")")
-	until S.phase == "idle" and next(S.counts) == nil
+	until (S.phase == "idle" or S.phase == "pick") and next(S.counts) == nil
 end
 
 local function unknownMethods(stub, into)
@@ -246,6 +246,10 @@ local function officerFlow(locale, unknown)
 			assert(S.phase == "pick", "the card waits for a colour")
 			W.black:Click()
 			settle(env)
+			if S.phase == "pick" then -- won: the card stays open; take the doubled amount
+				W.take:Click()
+				settle(env)
+			end
 		end
 		assert(W.balance:GetText() == fmt(ns, resting(session:game())), "balance matches after spin " .. i)
 	end
