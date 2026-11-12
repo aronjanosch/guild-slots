@@ -45,7 +45,7 @@ end
 local function chat(text)
 	local frame = DEFAULT_CHAT_FRAME
 	if frame and frame.AddMessage then
-		frame:AddMessage("|cfff2c14e" .. L.TITLE .. "|r: " .. tostring(text))
+		frame:AddMessage(Theme.esc(Theme.colors.gold) .. L.TITLE .. "|r: " .. tostring(text))
 	end
 end
 
@@ -146,7 +146,7 @@ local function applyPosition()
 	if type(p) == "table" and type(p[1]) == "string" then
 		f:SetPoint(p[1], UIParent, p[2], tonumber(p[3]) or 0, tonumber(p[4]) or 0)
 	else
-		f:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+		f:SetPoint("CENTER", UIParent, "CENTER", Theme.layout.home[1], Theme.layout.home[2])
 	end
 end
 
@@ -211,7 +211,7 @@ end
 local function winLine(amount, stake)
 	local s = L.WIN .. " " .. fmt(amount)
 	if stake then
-		s = s .. "  |cffc9ad7c×" .. multiplierText(amount, stake) .. "|r"
+		s = s .. "  " .. Theme.esc(Theme.colors.muted) .. "×" .. multiplierText(amount, stake) .. "|r"
 	end
 	return s
 end
@@ -444,7 +444,7 @@ local function sparkleCell(r, row, k)
 	local f = Lay.reels
 	local x = f[1] + r * Lay.cell - Lay.sparkle / 2
 	local y = f[2] + (row - 1) * Lay.cell + Lay.sparkle / 2
-	W.sparkles:play(x, y, S.now, (k - 1) * 0.08)
+	W.sparkles:play(x, y, S.now, (k - 1) * Theme.timing.sparkleStagger)
 end
 
 -- Line li drawn across the reels, its markers lit, its first `count` cells highlighted.
@@ -861,7 +861,13 @@ H.intro = {
 		clearShow()
 		dimAll()
 		markBooks(S.window)
-		setWinText("")
+		local books = 0
+		for r = 1, REELS do
+			for row = 1, ROWS do
+				if S.window[r][row] == T2.scatter.symbol then books = books + 1 end
+			end
+		end
+		setWinText(string.format(L.FREE_TRIGGER, books, step.freeOf), Theme.tones.free)
 		S.introStage = 0
 		S.introSilent = silent
 		sfx("freeStart", silent)
@@ -894,7 +900,8 @@ H.intro = {
 			if u >= tm.introShuffle and S.introStage == 1 then
 				S.introStage = 2
 				Skin.rect(W.bannerSub, W.frame, Theme.layout.introPanel)
-				W.bannerSub:SetText(string.format(L.EXPANDING, symbolName(step.symbol)))
+				W.bannerSub:SetText(string.format(L.EXPANDING,
+					Theme.esc(Theme.colors.goldLight) .. symbolName(step.symbol) .. "|r"))
 				W.introPanel:Show()
 				playSound("expand")
 			end
@@ -940,7 +947,8 @@ H.big = {
 		sfx("bigWin", silent)
 	end,
 	update = function(step, t)
-		W.bannerTitle:SetAlpha(0.75 + 0.25 * Anim.pulse(t, Theme.timing.pulseFreq))
+		local a = Theme.alpha.bigTitle
+		W.bannerTitle:SetAlpha(a[1] + (a[2] - a[1]) * Anim.pulse(t, Theme.timing.pulseFreq))
 		return t >= step.dur
 	end,
 	finish = function()
@@ -955,7 +963,7 @@ H["end"] = {
 		if step.total > 0 then
 			local s = winLine(step.total, S.result.stake)
 			if step.capped then
-				s = s .. "  |cffc9ad7c" .. L.CAPPED .. "|r"
+				s = s .. "  " .. Theme.esc(Theme.colors.muted) .. L.CAPPED .. "|r"
 			end
 			setWinText(s, Theme.tones.win)
 		end
@@ -1156,7 +1164,9 @@ function SlotFrame.gamble()
 	S.messageUntil = nil
 	setCardFace(W.card, nil)
 	W.card:SetWidth(Theme.layout.card[3])
-	W.gambleLine:SetText(string.format(L.GAMBLE_STAKE, fmt(p), fmt(2 * p)))
+	local c = Theme.colors
+	W.gambleLine:SetText(string.format(L.GAMBLE_STAKE, Theme.esc(c.number) .. fmt(p) .. "|r",
+		Theme.esc(c.goldLight) .. fmt(2 * p) .. "|r"))
 	W.red:Show()
 	W.black:Show()
 	showLastCards()
@@ -1599,7 +1609,10 @@ local function buildStatus(f)
 	Skin.rect(icon, f, Lay.statusIcon)
 	Skin.color(icon, c.gold)
 	W.statusTitle = Skin.textIn(panel, f, Lay.statusTitle, "title", fs.statusTitle, c.text, "CENTER")
-	W.statusSub = Skin.textIn(panel, f, Lay.statusSub, "label", fs.statusSub, c.muted, "CENTER")
+	W.statusSub = Skin.text(panel, "label", fs.statusSub, c.muted, "CENTER")
+	Skin.rect(W.statusSub, f, Lay.statusSub)
+	Skin.call(W.statusSub, "SetJustifyV", "TOP")
+	Skin.call(W.statusSub, "SetWordWrap", true)
 	so:Hide()
 end
 
@@ -1711,7 +1724,7 @@ local function buildDisplays(f)
 	W.baseBar = base
 	local d1 = buildDisplay(base, f, Lay.displays[1])
 	W.balanceLabel, W.balance = d1.label, d1.value
-	W.balanceLabel:SetText(string.upper(L.BALANCE))
+	W.balanceLabel:SetText(Skin.upper(L.BALANCE))
 	local coin = d1.frame:CreateTexture(nil, "ARTWORK")
 	coin:SetTexture(Theme.icons.coin)
 	Skin.rect(coin, d1.frame, Lay.dIcon)
@@ -1719,10 +1732,10 @@ local function buildDisplays(f)
 	Skin.rect(W.balance, d1.frame, { Lay.dValue[1] + Lay.dIconShift, Lay.dValue[2], Lay.dValue[3] - Lay.dIconShift,
 		Lay.dValue[4] })
 	local d2 = buildDisplay(base, f, Lay.displays[2])
-	d2.label:SetText(string.upper(L.LAST_WIN))
+	d2.label:SetText(Skin.upper(L.LAST_WIN))
 	W.winAmount = d2.value
 	local d3 = buildDisplay(base, f, Lay.displays[3])
-	d3.label:SetText(string.upper(L.TOTAL_STAKE))
+	d3.label:SetText(Skin.upper(L.TOTAL_STAKE))
 	W.stakeValue = d3.value
 	W.stakeSub = addSub(d3)
 
@@ -1730,15 +1743,15 @@ local function buildDisplays(f)
 	free:SetAllPoints(f)
 	W.freeBar = free
 	local e1 = buildDisplay(free, f, Lay.displays[1])
-	e1.label:SetText(string.upper(L.FREE_GAME))
+	e1.label:SetText(Skin.upper(L.FREE_GAME))
 	W.freeCounter = e1.value
 	Skin.color(W.freeCounter, c.freeHint)
 	local e2 = buildDisplay(free, f, Lay.displays[2])
-	e2.label:SetText(string.upper(L.FREE_WIN))
+	e2.label:SetText(Skin.upper(L.FREE_WIN))
 	W.freeTotal = e2.value
 	Skin.color(W.freeTotal, c.goldLight)
 	local e3 = buildDisplay(free, f, Lay.displays[3])
-	e3.label:SetText(string.upper(L.EXP_SYMBOL))
+	e3.label:SetText(Skin.upper(L.EXP_SYMBOL))
 	W.expName = e3.value
 	Skin.font(W.expName, "number", fs.expName)
 	W.badge = e3.frame:CreateTexture(nil, "ARTWORK")
@@ -1852,7 +1865,7 @@ local function build()
 	W.stakeRow = CreateFrame("Frame", nil, f)
 	W.stakeRow:SetAllPoints(f)
 	W.stakeLabel = Skin.textIn(W.stakeRow, f, Lay.stakeLabel, "label", fs.label, c.muted, "LEFT")
-	W.stakeLabel:SetText(string.upper(string.format(L.STAKE_LINES, #T2.lines)))
+	W.stakeLabel:SetText(Skin.upper(string.format(L.STAKE_LINES, #T2.lines)))
 	W.pillSets = {}
 	buildPills()
 	W.offerRow = CreateFrame("Frame", nil, f)
@@ -1892,7 +1905,7 @@ local function build()
 	W.footBalanceValue:SetPoint("RIGHT", fb, "RIGHT", 0, 0)
 	local fbl = Skin.text(fb, "label", fs.small, c.muted, "RIGHT")
 	fbl:SetPoint("RIGHT", W.footBalanceValue, "LEFT", -6, 0)
-	fbl:SetText(string.upper(L.BALANCE))
+	fbl:SetText(Skin.upper(L.BALANCE))
 	W.footBalanceLabel = fbl
 	fb:Hide()
 
@@ -1957,8 +1970,8 @@ local function applyGame()
 	buildPills()
 	SlotFrame.updatePaytable()
 	SlotFrame.layout()
-	W.balanceLabel:SetText(string.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
-	W.footBalanceLabel:SetText(string.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
+	W.balanceLabel:SetText(Skin.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
+	W.footBalanceLabel:SetText(Skin.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
 	S.counts = {}
 	setBalanceShown(S.game.balance)
 	setTotalShown(nil)

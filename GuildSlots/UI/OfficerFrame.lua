@@ -53,7 +53,7 @@ end
 
 local function heading(parent, r, str)
 	local fs = Skin.textIn(parent, parent, r, "label", Theme.fontSize.section, Theme.colors.goldLight, "LEFT")
-	fs:SetText(string.upper(str))
+	fs:SetText(Skin.upper(str))
 	return fs
 end
 
@@ -90,7 +90,7 @@ local function listRow(parent, rel, r, onClick)
 	b.selected = false
 	local function paint()
 		b.band:SetShown(b.selected or b.hover)
-		b.band:SetAlpha(b.selected and 1 or 0.5)
+		b.band:SetAlpha(b.selected and 1 or Theme.alpha.rowHover)
 		b.lineTop:SetShown(b.selected)
 		b.lineBottom:SetShown(b.selected)
 		Skin.color(b.label, b.selected and c.number or c.text)
@@ -339,9 +339,9 @@ local function buildGrant(parent)
 
 	-- Player, tokens, Grant.
 	local pl = Skin.textIn(part, part, G.playerLabel, "label", fs.label, c.muted, "LEFT")
-	pl:SetText(string.upper(L.PLAYER))
+	pl:SetText(Skin.upper(L.PLAYER))
 	local tl = Skin.textIn(part, part, G.tokensLabel, "label", fs.label, c.muted, "LEFT")
-	tl:SetText(string.upper(L.TOKENS))
+	tl:SetText(Skin.upper(L.TOKENS))
 	W.player = Skin.editBox(part, G.player[3], G.player[4], "label", fs.listName)
 	Skin.rect(W.player.holder, part, G.player)
 	W.player:SetScript("OnTextChanged", function(_, userInput)
@@ -372,7 +372,7 @@ local function buildGrant(parent)
 	-- Recent purchases with status badges.
 	heading(part, G.purchasesHead, L.PURCHASES)
 	local pp = Skin.panel(part, part, G.purchases, "inset")
-	W.noPurchases = Skin.textIn(pp, part, { G.pName[1], G.pRow, 380, G.pRowH }, "label", fs.small, c.muted, "LEFT")
+	W.noPurchases = Skin.textIn(pp, part, { G.none[1], G.pRow, G.none[3], G.pRowH }, "label", fs.small, c.muted, "LEFT")
 	W.noPurchases:SetText(L.NO_PURCHASES)
 	for i = 1, G.pRows do
 		local y = G.pRow + (i - 1) * G.pRowH
@@ -496,7 +496,7 @@ local function build()
 		table.insert(UISpecialFrames, FRAME_NAME)
 	end
 	f:Hide()
-	f:SetPoint("CENTER", UIParent, "CENTER", 420, 20)
+	f:SetPoint("CENTER", UIParent, "CENTER", O.home[1], O.home[2])
 
 	if main() then
 		main().subscribe(function()

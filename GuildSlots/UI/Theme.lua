@@ -75,7 +75,7 @@ Theme.reelShadeAlpha = 0.8
 Theme.alpha = {
 	introGlow = 0.55, rays = 0.85, shine = 0.6, cellGlow = 0.9, expandGlow = 0.95,
 	breatheMin = 0.15, breatheMax = 0.6, landFlash = 0.7, tease = { 0.3, 1 },
-	linePulse = { 0.55, 1 }, restingLines = 0.55,
+	linePulse = { 0.55, 1 }, restingLines = 0.55, bigTitle = { 0.75, 1 }, rowHover = 0.5,
 }
 
 Theme.icons = {
@@ -175,6 +175,12 @@ Theme.colors = {
 		hex("ffa94d"), hex("38d9a9"), hex("f783ac"), hex("a9e34b"), hex("74c0fc"),
 	},
 }
+-- Colour escape for text inside a string ("|cffrrggbb").
+function Theme.esc(c)
+	return string.format("|cff%02x%02x%02x", math.floor(c[1] * 255 + 0.5), math.floor(c[2] * 255 + 0.5),
+		math.floor(c[3] * 255 + 0.5))
+end
+
 -- Message line tones.
 Theme.tones = {
 	muted = Theme.colors.muted, win = Theme.colors.goldLight, lose = Theme.colors.lose,
@@ -196,7 +202,7 @@ Theme.fontSize = {
 	title = 28, banner = 34, spin = 28, heading = 20, gambleTitle = 22, officerTitle = 22,
 	label = 11, message = 15, button = 14, display = 24, displaySub = 13, expName = 22,
 	stake = 20, offer = 17, card = 20, big = 72, footer = 11, marker = 11, markerLit = 12,
-	gambleLine = 14, gambleNumber = 18, introSub = 16, statusTitle = 22, statusSub = 16,
+	gambleLine = 14, gambleNumber = 18, introSub = 16, statusTitle = 22, statusSub = 15,
 	payHead = 12, payName = 15, payValue = 16, payNote = 11, payLine = 13,
 	section = 12, listHead = 10, listName = 14, listNumber = 15, formLabel = 13, field = 17,
 	lineField = 14, badge = 13, small = 12, cardsLabel = 10,
@@ -207,6 +213,7 @@ Theme.fontSize = {
 
 Theme.layout = {
 	width = 600, height = 672,
+	home = { 0, 20 }, -- default position: offset of the window centre from the screen centre
 	title = { 30, 22, 260, 44 },
 	solo = { 318, 29, 78, 32 },
 	guild = { 398, 29, 78, 32 },
@@ -256,7 +263,7 @@ Theme.layout = {
 	statusPanel = { 150, 226, 300, 144 },
 	statusIcon = { 280, 240, 40, 40 },
 	statusTitle = { 150, 284, 300, 34 },
-	statusSub = { 150, 318, 300, 26 },
+	statusSub = { 160, 320, 280, 44 }, -- up to two lines (long guild status texts)
 	introGlow = { 150, 170, 300, 300 },
 	introBanner = { 64, 132, 472, 118 },
 	introTitle = { 64, 150, 472, 66 },
@@ -290,6 +297,7 @@ Theme.layout = {
 -- Officer window (state 11, 448 wide; the height follows what is shown, 728 for an officer).
 Theme.officer = {
 	width = 448, maxHeight = 728, pad = 22,
+	home = { 420, 20 },
 	title = { 30, 22, 300, 42 },
 	close = { 384, 29, 34, 32 },
 	divider = { 22, 68, 404, 12 },
@@ -390,6 +398,7 @@ Theme.timing = {
 	coinBurst = 1.2, -- coins start spread over this time
 	breathe = 0.45, -- primary button glow while idle (Hz)
 	landFlash = 0.3, -- flash on a reel when it lands
+	sparkleStagger = 0.08, -- sparkles on a line start one reel after the other
 }
 
 ---------------------------------------------------------------------------------------------

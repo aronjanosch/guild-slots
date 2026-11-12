@@ -26,6 +26,13 @@ function Skin.add(tex)
 	return Skin.call(tex, "SetBlendMode", "ADD")
 end
 
+-- string.upper for labels: Lua only upper-cases ASCII, so the German umlauts are mapped by hand
+-- (UTF-8).
+local UMLAUTS = { ["\195\164"] = "\195\132", ["\195\182"] = "\195\150", ["\195\188"] = "\195\156" }
+function Skin.upper(s)
+	return (string.upper(s):gsub("\195[\164\182\188]", UMLAUTS))
+end
+
 function Skin.color(region, c, a)
 	local kind = region:GetObjectType()
 	if kind == "Texture" or kind == "Line" then
