@@ -4,7 +4,7 @@ One character is enough: with the self test switch an officer grants tokens to t
 whole purchase runs over the GUILD echo.
 
 1. Enable Lua errors: `/console scriptErrors 1`, then `/reload`.
-2. As officer, paste a settings line into the guild info, e.g. `GSLOTS1;L=0;R=1;E=10,50,100;G=3`,
+2. As officer, paste a settings line into the guild info, e.g. `GSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T2`,
    then `/reload`. (`R` is the highest rank index that counts as officer; the guild leader is 0.)
 3. `/gs officer`: the settings status shows the parsed values, the form is prefilled, the line box
    gives the same line; clicking the line selects it and Ctrl+C copies it.

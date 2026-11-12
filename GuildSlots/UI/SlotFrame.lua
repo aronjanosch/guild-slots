@@ -1907,10 +1907,26 @@ local function onMainEvent(name, data)
 	end
 end
 
+-- Scripted draws for the next solo spin ("/gs demo"): a way to look at rare rounds without
+-- waiting for them. Solo is play money, so this changes nothing that matters.
+local demoDraws = {}
+local DEMOS = {
+	-- three books, expanding symbol M, first free game retriggers and expands (docs/table-t2-spec.md)
+	free = { 40, 35, 52, 0, 0, 5, 33, 55, 50, 5, 29 },
+}
+
+local function soloRng(n)
+	local v = table.remove(demoDraws, 1)
+	if v then
+		return v % n
+	end
+	return ns.random(n)
+end
+
 local function ensure()
 	initDB()
 	if not S.solo then
-		S.solo = ns.Solo.new({ rng = ns.random, balance = db.soloBalance })
+		S.solo = ns.Solo.new({ rng = soloRng, balance = db.soloBalance })
 		S.game, S.mode = S.solo, "solo"
 	end
 	if not S.subscribed and ns.Main then
@@ -1959,6 +1975,15 @@ local function slash(msg)
 	elseif msg == "officer" then
 		if ns.OfficerFrame then
 			ns.OfficerFrame.toggle()
+		end
+	elseif msg == "demo" then
+		ensure()
+		SlotFrame.setMode("solo")
+		demoDraws = {}
+		for i, v in ipairs(DEMOS.free) do demoDraws[i] = v end
+		chat(L.DEMO_READY)
+		if not W.frame:IsShown() then
+			W.frame:Show()
 		end
 	elseif msg == "reset" then
 		initDB()

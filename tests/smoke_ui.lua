@@ -409,6 +409,15 @@ local function scenario(locale)
 		shownMatches("random round " .. i)
 	end
 
+	-- /gs demo scripts the next solo spin to a free-game round.
+	if W.offerRow:IsShown() then W.take:Click() end
+	W.refill:Click()
+	stub.slash("/gs", "demo")
+	W.spin:Click()
+	assert(S.result and S.result.round and S.result.round.free, "demo round has free games")
+	settle()
+	shownMatches("demo round")
+
 	local unknown = {}
 	for k in pairs(stub.unknown) do unknown[#unknown + 1] = k end
 	table.sort(unknown)

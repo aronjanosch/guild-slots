@@ -65,7 +65,7 @@ L.SOUND_ON = "Sound on"
 L.SOUND_OFF = "Sound off"
 L.SPACE_ON = "Space spins while the mouse is over the window"
 L.SPACE_OFF = "Space key off"
-L.HELP = "/gslots or /gs: open/close. /gs solo, /gs guild (mode), /gs officer, /gs sound, /gs space, /gs reset (window position)"
+L.HELP = "/gslots or /gs: open/close. /gs solo, /gs guild (mode), /gs officer, /gs sound, /gs space, /gs demo, /gs reset (window position)"
 L.RESET_DONE = "Window position reset"
 
 -- Guild mode
@@ -124,3 +124,4 @@ L.ERR_bad_tokens = "Enter a whole number of tokens (1 to 1,000,000,000)."
 L.ERR_bad_player = "Invalid player (yourself only with the self test)."
 L.ERR_busy = "A purchase for this player is still open."
 L.ERR_send = "Could not send. Try again."
+L.DEMO_READY = "Demo: the next solo spin brings free games."

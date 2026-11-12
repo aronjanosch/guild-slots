@@ -66,7 +66,7 @@ L.SOUND_ON = "Ton an"
 L.SOUND_OFF = "Ton aus"
 L.SPACE_ON = "Leertaste dreht, solange die Maus über dem Fenster ist"
 L.SPACE_OFF = "Leertaste aus"
-L.HELP = "/gslots oder /gs: öffnen/schließen. /gs solo, /gs guild (Modus), /gs officer, /gs sound, /gs space, /gs reset (Fensterposition)"
+L.HELP = "/gslots oder /gs: öffnen/schließen. /gs solo, /gs guild (Modus), /gs officer, /gs sound, /gs space, /gs demo, /gs reset (Fensterposition)"
 L.RESET_DONE = "Fensterposition zurückgesetzt"
 
 -- Gildenmodus
@@ -125,3 +125,4 @@ L.ERR_bad_tokens = "Ganze Zahl an Tokens eingeben (1 bis 1.000.000.000)."
 L.ERR_bad_player = "Ungültiger Spieler (dich selbst nur mit Selbsttest)."
 L.ERR_busy = "Für diesen Spieler läuft noch ein Kauf."
 L.ERR_send = "Senden fehlgeschlagen. Nochmal versuchen."
+L.DEMO_READY = "Demo: Der nächste Solo-Dreh bringt Freispiele."
