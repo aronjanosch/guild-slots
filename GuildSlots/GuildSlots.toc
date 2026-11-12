@@ -16,6 +16,7 @@ Locale\deDE.lua
 
 Game\Solo.lua
 
+Net\Queue.lua
 Net\Comm.lua
 Guild\Roster.lua
 
