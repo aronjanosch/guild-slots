@@ -2576,7 +2576,9 @@ end
 
 -- The mode the player asked for, as far as a session allows it.
 local function wantedMode()
-	return db.mode == "guild" and currentSession() and "guild" or "solo"
+	-- Guild mode is the main mode: it is the default whenever a guild session exists, unless
+	-- the player chose solo.
+	return db.mode ~= "solo" and currentSession() and "guild" or "solo"
 end
 
 function SlotFrame.setMode(mode)
