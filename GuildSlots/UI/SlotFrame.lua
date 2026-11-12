@@ -5,11 +5,15 @@ local addonName, ns = ...
 -- rounds they return: ns.Plan turns a round into timed steps, the step handlers below show them.
 -- S.solo is the solo game, S.game the one shown. Only lines tables (T2) are rendered.
 --
--- Layout: header, top bar (balance, free-game counter, win), reel panel (5 x 3 with line
--- markers left and right), message line, take/gamble row, stake pills and SPIN, paytable
--- toggle, footer. Every size, colour and time comes from UI/Theme.lua.
+-- Look: the "tavern" design (design/gildenslots-v2). Layout, colours, fonts and timings come from
+-- UI/Theme.lua, widgets from UI/Skin.lua, effects from UI/Fx.lua, line geometry from
+-- UI/Layout.lua, the paytable from UI/Paytable.lua.
+--
+-- Phases: "idle" (an open take/gamble offer is S.offer), "round" (a plan plays), "pick" (the
+-- gamble card waits for red or black), "flip" (the card turns over).
 
 local L, Theme, Anim, Reel, Plan = ns.L, ns.Theme, ns.Anim, ns.Reel, ns.Plan
+local Skin, Fx, Layout, Paytable = ns.Skin, ns.Fx, ns.Layout, ns.Paytable
 
 local SlotFrame = {}
 ns.SlotFrame = SlotFrame
@@ -24,7 +28,8 @@ end
 
 local db -- GuildSlotsDB, set on ADDON_LOADED (or on first use)
 local W = {} -- widgets
-local S = { now = 0, phase = "idle", counts = {}, offer = false, mode = "solo" } -- animation state
+local S = { now = 0, phase = "idle", counts = {}, offer = false, mode = "solo", cards = {}, lit = {}, litN = 0,
+	landAt = {} } -- animation state
 SlotFrame.widgets, SlotFrame.state = W, S
 
 -- The table the window draws (strips, lines): always T2.
@@ -37,18 +42,10 @@ local function fmt(n)
 	return Anim.formatNumber(n, L.THOUSANDS)
 end
 
-local function rgb(c)
-	return c[1], c[2], c[3]
-end
-
-local function paint(tex, c, a)
-	tex:SetColorTexture(c[1], c[2], c[3], a or c[4] or 1)
-end
-
 local function chat(text)
-	local chat = DEFAULT_CHAT_FRAME
-	if chat and chat.AddMessage then
-		chat:AddMessage("|cff00e701" .. L.TITLE .. "|r: " .. tostring(text))
+	local frame = DEFAULT_CHAT_FRAME
+	if frame and frame.AddMessage then
+		frame:AddMessage("|cfff2c14e" .. L.TITLE .. "|r: " .. tostring(text))
 	end
 end
 
@@ -60,6 +57,11 @@ local function clamp01(u)
 	if u < 0 then return 0 end
 	if u > 1 then return 1 end
 	return u
+end
+
+-- All effects, or only lines, pulses and count-ups ("/gs fx").
+local function fxOn()
+	return not db or db.fx ~= false
 end
 
 -- A Theme.sounds entry is a soundkit name, a soundkit id, or a file under the addon folder
@@ -107,110 +109,8 @@ local function startSpinSound()
 	spinSound = playSound("reelSpin")
 end
 
-local function font(fs, size, flags)
-	local ok, res = pcall(fs.SetFont, fs, Theme.fonts.face, size, flags or "")
-	if not ok or res == false then
-		local obj = _G[Theme.fonts.fallbackObject]
-		if obj then
-			fs:SetFontObject(obj)
-		end
-	end
-end
-
-local function text(parent, size, color, layer)
-	local fs = parent:CreateFontString(nil, layer or "OVERLAY")
-	font(fs, size)
-	fs:SetTextColor(rgb(color or Theme.colors.text))
-	return fs
-end
-
--- A flat panel: 1 px border colour, inner fill.
-local function panel(parent, fill, border)
-	local f = CreateFrame("Frame", nil, parent)
-	f.border = f:CreateTexture(nil, "BACKGROUND")
-	f.border:SetAllPoints(f)
-	paint(f.border, border or fill)
-	f.fill = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-	f.fill:SetPoint("TOPLEFT", f, "TOPLEFT", 1, -1)
-	f.fill:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -1, 1)
-	paint(f.fill, fill)
-	return f
-end
-
--- Button styles: "accent" (main action), "panel", "outline" (accent border), "pill", "ghost".
-local function paintButton(b)
-	local c = Theme.colors
-	local style, hover = b.style, b.hover and b.enabled
-	local fill, border, label
-	if style == "accent" then
-		fill, border, label = hover and c.accentHover or c.accent, c.accent, c.accentText
-	elseif style == "outline" then
-		fill, border, label = hover and c.panelHover or c.panel, c.accent, c.accent
-	elseif style == "pill" then
-		if b.selected then
-			fill, border, label = c.border, c.accent, c.text
-		else
-			fill, border, label = hover and c.panelHover or c.panel, c.border, c.muted
-		end
-	elseif style == "ghost" then
-		fill, border, label = nil, nil, hover and c.text or c.muted
-	else
-		fill, border, label = hover and c.panelHover or c.panel, c.border, c.text
-	end
-	if fill then
-		paint(b.border, border)
-		paint(b.fill, fill)
-		b.border:Show()
-		b.fill:Show()
-	else
-		b.border:Hide()
-		b.fill:Hide()
-	end
-	b.label:SetTextColor(rgb(label))
-	b:SetAlpha(b.enabled and 1 or c.disabledAlpha)
-end
-
-local function button(parent, w, h, style, size, onClick)
-	local b = CreateFrame("Button", nil, parent)
-	b:SetSize(w, h)
-	b.style, b.enabled, b.hover, b.selected, b.onClick = style, true, false, false, onClick
-	b.border = b:CreateTexture(nil, "BACKGROUND")
-	b.border:SetAllPoints(b)
-	b.fill = b:CreateTexture(nil, "BACKGROUND", nil, 1)
-	b.fill:SetPoint("TOPLEFT", b, "TOPLEFT", 1, -1)
-	b.fill:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -1, 1)
-	b.label = text(b, size or Theme.fonts.button)
-	b.label:SetPoint("CENTER", b, "CENTER", 0, 0)
-	b:SetScript("OnEnter", function()
-		b.hover = true
-		paintButton(b)
-	end)
-	b:SetScript("OnLeave", function()
-		b.hover = false
-		paintButton(b)
-	end)
-	b:SetScript("OnClick", function()
-		if b.enabled and b.onClick then
-			b.onClick()
-		end
-	end)
-	b.setEnabled = function(_, on)
-		b.enabled = on and true or false
-		paintButton(b)
-	end
-	b.setSelected = function(_, on)
-		b.selected = on and true or false
-		paintButton(b)
-	end
-	paintButton(b)
-	return b
-end
-
--- Shared with UI/OfficerFrame.lua so both windows look the same.
-SlotFrame.ui = {
-	fmt = fmt, rgb = rgb, paint = paint, font = font, text = text, panel = panel, button = button,
-	chat = chat, playSound = playSound,
-}
+-- Shared with UI/OfficerFrame.lua.
+SlotFrame.ui = { fmt = fmt, chat = chat, playSound = playSound }
 
 ---------------------------------------------------------------------------------------------
 -- Saved state
@@ -225,6 +125,7 @@ local function initDB()
 	db = GuildSlotsDB
 	if db.sound == nil then db.sound = true end
 	if db.space == nil then db.space = true end
+	if db.fx == nil then db.fx = true end
 end
 
 local function savePosition()
@@ -245,7 +146,7 @@ local function applyPosition()
 	if type(p) == "table" and type(p[1]) == "string" then
 		f:SetPoint(p[1], UIParent, p[2], tonumber(p[3]) or 0, tonumber(p[4]) or 0)
 	else
-		f:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
+		f:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
 	end
 end
 
@@ -256,21 +157,29 @@ local function saveGame()
 end
 
 ---------------------------------------------------------------------------------------------
--- Display
+-- Displays
 
 local function setBalanceShown(v)
 	S.balanceShown = v
 	W.balance:SetText(fmt(v))
+	W.footBalanceValue:SetText(fmt(v))
 end
 
 local function setTotalShown(v)
 	S.totalShown = v
-	W.winAmount:SetText(v and fmt(v) or "")
+	local c = Theme.colors
+	if v and v > 0 then
+		W.winAmount:SetText(fmt(v))
+		Skin.color(W.winAmount, c.goldLight)
+	else
+		W.winAmount:SetText("–")
+		Skin.color(W.winAmount, c.empty)
+	end
 end
 
 local function setFreeWinShown(v)
 	S.freeWinShown = v
-	W.freeTotal:SetText(string.format(L.FREE_TOTAL, fmt(v)))
+	W.freeTotal:SetText(fmt(v))
 end
 
 local function setBannerAmount(v)
@@ -288,7 +197,7 @@ end
 
 local function setWinText(str, color)
 	W.win:SetText(str or "")
-	W.win:SetTextColor(rgb(color or Theme.colors.accent))
+	Skin.color(W.win, color or Theme.tones.win)
 end
 
 local function multiplierText(win, stake)
@@ -302,13 +211,13 @@ end
 local function winLine(amount, stake)
 	local s = L.WIN .. " " .. fmt(amount)
 	if stake then
-		s = s .. "  |cffb1bad3x" .. multiplierText(amount, stake) .. "|r"
+		s = s .. "  |cffc9ad7c×" .. multiplierText(amount, stake) .. "|r"
 	end
 	return s
 end
 
 local function message(str, color)
-	setWinText(str, color or Theme.colors.muted)
+	setWinText(str, color or Theme.tones.muted)
 	S.messageUntil = S.now + Theme.timing.message
 end
 
@@ -317,25 +226,35 @@ local function supported()
 	return tbl ~= nil and tbl.kind == "lines"
 end
 
--- What the window shows while idle in guild mode when the game cannot be played.
+-- What the window shows while idle in guild mode when the game cannot be played: message line,
+-- and title / text of the status panel over the reels.
 local STATUS_LINES = { no_account = "ST_NO_ACCOUNT", level = "ST_LEVEL", broken = "ST_BROKEN" }
 
 local function statusLine()
 	if S.mode ~= "guild" then
 		return nil
 	end
-	local key = STATUS_LINES[S.game:status()]
+	local st = S.game:status()
+	local key = STATUS_LINES[st]
 	if key then
-		return L[key]
+		if st == "no_account" then
+			return L[key], L.NO_TOKENS_TITLE, L.ASK_OFFICER
+		end
+		return L[key], L.CANNOT_PLAY, L[key]
 	end
 	if not supported() then
-		return L.UNSUPPORTED_TABLE
+		return L.UNSUPPORTED_TABLE, L.CANNOT_PLAY, L.UNSUPPORTED_TABLE
 	end
 	return nil
 end
 
 local function idleText()
-	setWinText(statusLine() or "", Theme.colors.muted)
+	local line = statusLine()
+	if line then
+		setWinText(line, Theme.tones.lose)
+	else
+		setWinText(string.format(L.IDLE_HINT, #T2.lines), Theme.tones.muted)
+	end
 end
 
 -- The short line for a code from spin() or gamble().
@@ -360,44 +279,112 @@ local function currentStep()
 	return S.plan and S.plan.steps[S.si] or nil
 end
 
+local function isOfficer()
+	return ns.Main and ns.Main.isOfficer() or false
+end
+
+-- Buttons, displays and overlays for the current phase.
 local function refresh()
 	local game, phase = S.game, S.phase
-	local busy = phase == "round" or phase == "flip"
+	local Lay = Theme.layout
+	local busy = phase ~= "idle"
+	local status = phase == "idle" and statusLine() or nil
+
 	local label = L.SPIN
 	if phase == "round" then
 		local step = currentStep()
-		label = (step and step.kind == "spin" and step.game == 0 and not S.quick) and L.STOP or L.SKIP
+		if step and step.kind == "spin" and step.game == 0 and not S.quick then
+			label = L.STOP
+		elseif step and step.kind == "intro" then
+			label = L.START
+		else
+			label = L.SKIP
+		end
 	end
 	W.spin.label:SetText(label)
-	W.spin:setEnabled(phase ~= "flip")
-	for _, pill in ipairs(W.pills) do
-		pill:setSelected(pill.stake == game.stake)
-		pill:setEnabled(not busy)
-	end
-	W.refill:setEnabled(not busy)
-	W.refill:SetShown(S.mode == "solo")
-	W.mode.label:SetText(S.mode == "guild" and L.GUILD or L.SOLO)
-	local officer = ns.Main and ns.Main.isOfficer() or false
-	W.officer:SetShown(officer)
-	local offer = S.offer and game:state() == "gamble" and not busy
-	if offer then
-		W.take.label:SetText(string.format(L.TAKE, fmt(game.pending)))
-		W.gamble.label:SetText(string.format(L.GAMBLE, fmt(game.pending)))
+	W.spin:setEnabled(phase == "round" or (phase == "idle" and not status))
+
+	-- Stakes, or the take / gamble buttons that replace them.
+	local offer = phase == "idle" and S.offer and game:state() == "gamble"
+	local card = phase == "pick" or phase == "flip"
+	local offerRow = offer or card
+	if offerRow then
+		W.take.label:SetText(string.format(L.TAKE, fmt(game.pending or 0)))
+		Skin.rect(W.take, W.frame, card and Lay.takeWide or Lay.take)
+		W.take:setEnabled(phase ~= "flip")
+		W.gamble:SetShown(offer)
 		W.offerRow:Show()
 	else
 		W.offerRow:Hide()
 	end
-	W.sound.label:SetText(db.sound and L.SOUND_ON or L.SOUND_OFF)
+	W.stakeRow:SetShown(not offerRow)
+	for _, pill in ipairs(W.pills) do
+		pill:setSelected(pill.stake == game.stake)
+		pill:setEnabled(not busy and not status)
+	end
+	W.stakeValue:SetText(fmt(game.stake))
+	W.stakeSub:SetText(string.format(L.STAKE_SUB, #T2.lines, fmt(game.stake / #T2.lines)))
+
+	-- Header.
+	W.soloBtn:setSelected(S.mode == "solo")
+	W.guildBtn:setSelected(S.mode == "guild")
+	W.soloBtn:setEnabled(not busy)
+	W.guildBtn:setEnabled(not busy)
+	W.sound:setIcon(db.sound and Theme.icons.soundOn or Theme.icons.soundOff)
+
+	-- Secondary row: paytable, officer, refill (solo) or the balance (free games).
+	local officer = isOfficer()
+	W.officer:SetShown(officer)
+	W.refill:SetShown(S.mode == "solo" and not S.free)
+	Skin.rect(W.refill, W.frame, officer and Lay.refill or Lay.officer)
+	W.refill:setEnabled(not busy)
+	W.footBalance:SetShown(S.free and true or false)
+
+	-- Guild status over the reels (state 10).
+	if status then
+		local _, title, sub = statusLine()
+		W.statusTitle:SetText(title)
+		W.statusSub:SetText(sub)
+		W.statusOverlay:Show()
+	else
+		W.statusOverlay:Hide()
+	end
 end
 
 ---------------------------------------------------------------------------------------------
 -- Reel overlays: dimmed and highlighted cells, drawn lines, line markers, expansions.
 -- All textures exist from build() on; these only show, hide and colour them.
 
-local function setEdges(cell, c)
-	for _, e in ipairs(cell.edges) do
-		paint(e, c)
-		e:Show()
+local function setLine(li, c, a)
+	for _, seg in ipairs(W.lineSegs[li]) do
+		if W.realLines then
+			seg:SetVertexColor(c[1], c[2], c[3], 1)
+		else
+			seg:SetColorTexture(c[1], c[2], c[3], 1)
+		end
+		seg:SetAlpha(a)
+		seg:Show()
+	end
+end
+
+local function setLineAlpha(li, a)
+	for _, seg in ipairs(W.lineSegs[li]) do
+		seg:SetAlpha(a)
+	end
+end
+
+local function setMarker(li, lit)
+	local list = W.markers[li]
+	list.lit = lit
+	local c = Theme.colors
+	for _, m in ipairs(list) do
+		m.normal:SetShown(not lit)
+		m.glow:SetShown(lit)
+		if lit then
+			Skin.color(m.glow, c.lines[li])
+		end
+		Skin.color(m.label, lit and c.dark or c.muted)
+		Skin.shadow(m.label, lit and 0 or 1, lit and 0 or -1)
 	end
 end
 
@@ -407,20 +394,19 @@ local function clearShow()
 		for row = 1, ROWS do
 			local cell = W.cells[r][row]
 			cell.dim:Hide()
-			for _, e in ipairs(cell.edges) do e:Hide() end
+			cell.win:Hide()
+			cell.glow:Hide()
+			cell.isLit = false
 		end
 	end
 	for li = 1, #W.lineSegs do
 		for _, seg in ipairs(W.lineSegs[li]) do seg:Hide() end
 	end
 	for li = 1, #W.markers do
-		W.markers[li].lit = false
-		for _, m in ipairs(W.markers[li]) do
-			paint(m.bg, Theme.colors.border)
-			m.label:SetTextColor(rgb(Theme.colors.muted))
-		end
+		if W.markers[li].lit then setMarker(li, false) end
 	end
-	W.overlay:SetAlpha(1)
+	S.litN = 0
+	W.sparkles:stop()
 end
 
 local function dimAll()
@@ -431,32 +417,47 @@ local function dimAll()
 	end
 end
 
+-- A winning cell: the _win art over the reel, its glow in colour c, not dimmed.
 local function markCell(r, row, c)
 	local cell = W.cells[r][row]
 	cell.dim:Hide()
-	setEdges(cell, c)
+	local sym = S.window and S.window[r] and S.window[r][row]
+	if sym and Theme.symbolsWin[sym] then
+		cell.win:SetTexture(Theme.symbolsWin[sym])
+		cell.win:Show()
+	end
+	cell.glow:SetVertexColor(c[1], c[2], c[3], 1)
+	cell.glow:SetAlpha(Theme.alpha.cellGlow)
+	cell.glow:Show()
+	if not cell.isLit then
+		cell.isLit = true
+		S.litN = S.litN + 1
+		S.lit[S.litN] = cell
+	end
 end
 
-local function lightMarker(li, c)
-	W.markers[li].lit = true
-	for _, m in ipairs(W.markers[li]) do
-		paint(m.bg, c)
-		m.label:SetTextColor(rgb(Theme.colors.accentText))
+local function sparkleCell(r, row, k)
+	if not fxOn() then
+		return
 	end
+	local Lay = Theme.layout
+	local f = Lay.reels
+	local x = f[1] + r * Lay.cell - Lay.sparkle / 2
+	local y = f[2] + (row - 1) * Lay.cell + Lay.sparkle / 2
+	W.sparkles:play(x, y, S.now, (k - 1) * 0.08)
 end
 
 -- Line li drawn across the reels, its markers lit, its first `count` cells highlighted.
-local function showLine(li, count)
+local function showLine(li, count, alpha, sparkle)
 	local c = Theme.colors.lines[li]
-	for _, seg in ipairs(W.lineSegs[li]) do
-		paint(seg, c)
-		seg:SetAlpha(1)
-		seg:Show()
-	end
-	lightMarker(li, c)
+	setLine(li, c, alpha or 1)
+	setMarker(li, true)
 	local rows = T2.lines[li]
 	for r = 1, count do
 		markCell(r, rows[r] + 1, c)
+		if sparkle then
+			sparkleCell(r, rows[r] + 1, r)
+		end
 	end
 end
 
@@ -467,9 +468,18 @@ local function markBooks(window)
 		local col = window[r]
 		for row = 1, ROWS do
 			if col[row] == wild then
-				markCell(r, row, Theme.colors.gold)
+				markCell(r, row, Theme.colors.free)
 			end
 		end
+	end
+end
+
+-- Pulses the glow of the marked cells.
+local function pulseLit(t)
+	local a = Theme.alpha.linePulse
+	local v = a[1] + (a[2] - a[1]) * Anim.pulse(t, Theme.timing.pulseFreq)
+	for i = 1, S.litN do
+		S.lit[i].glow:SetAlpha(v)
 	end
 end
 
@@ -483,11 +493,14 @@ local function setExpand(r, u)
 	local e = W.expand[r]
 	if u <= 0 then
 		e.bg:Hide()
+		e.glow:Hide()
 		for _, ic in ipairs(e.icons) do ic:Hide() end
 		return
 	end
-	e.bg:SetHeight(math.max(0.01, u * ROWS * Theme.size.cell))
+	e.bg:SetHeight(math.max(0.01, u * ROWS * Theme.layout.cell))
 	e.bg:Show()
+	e.glow:SetAlpha(Theme.alpha.expandGlow * u)
+	e.glow:Show()
 	for row, ic in ipairs(e.icons) do
 		-- the middle cell first, then top and bottom
 		local a = clamp01(row == 2 and u * 2 or u * 2 - 1)
@@ -499,7 +512,7 @@ end
 local function setExpandSymbol(sym)
 	for r = 1, REELS do
 		for _, ic in ipairs(W.expand[r].icons) do
-			ic:SetTexture(Theme.symbols[sym])
+			ic:SetTexture(Theme.symbolsWin[sym])
 		end
 	end
 end
@@ -516,68 +529,78 @@ local function hideTease()
 	end
 end
 
----------------------------------------------------------------------------------------------
--- Banner (free-game intro, retrigger, summary, big win), particles, window flash
+local function hideLandFlashes()
+	for r = 1, REELS do
+		S.landAt[r] = nil
+		W.landFlash[r]:Hide()
+	end
+end
 
+---------------------------------------------------------------------------------------------
+-- Banners (free-game intro, retrigger, summary, big win) and their effects
+
+-- kind: "free" (banner_freespins at the top of the reels) or "big" (banner_bigwin in the
+-- middle). The banner pops in with all effects on.
+local function showBanner(kind, title, animate)
+	local Lay, c = Theme.layout, Theme.colors
+	local free = kind == "free"
+	local r = free and Lay.introBanner or Lay.bigBanner
+	local tr = free and Lay.introTitle or Lay.bigTitle
+	local pop = W.bannerPop
+	Skin.rect(pop.holder, W.frame, r)
+	pop.frame:SetSize(r[3], r[4])
+	W.bannerArt:SetTexture(free and Theme.tex.bannerFree or Theme.tex.bannerBig)
+	Skin.rect(W.bannerTitle, pop.frame, { tr[1] - r[1], tr[2] - r[2], tr[3], tr[4] })
+	W.bannerTitle:SetText(title)
+	Skin.color(W.bannerTitle, free and c.white or c.bannerGold)
+	Skin.shadow(W.bannerTitle, 2, -2, free and c.freeTitleShadow or c.bigTitleShadow)
+	W.bannerTitle:SetAlpha(1)
+	pop:start(S.now, animate and fxOn())
+	if fxOn() and animate then
+		W.shine.w = r[3]
+		W.shine.tex:SetHeight(r[4])
+		W.shine:start(S.now)
+	end
+end
+
+-- Everything the banners and celebrations show, hidden at once.
 local function hideBanner()
-	W.banner:Hide()
-	W.bannerShade:Hide()
+	W.bannerPop:stop()
+	W.shine:stop()
+	W.rays:stop()
+	W.rain:stop()
+	W.stageShade:Hide()
+	W.reelShade:Hide()
+	W.introGlow:Hide()
+	W.book:Hide()
+	W.bookFrom = nil
 	W.bannerIcon:Hide()
+	W.introPanel:Hide()
 	W.bannerSub:SetText("")
 	W.bannerAmount:SetText("")
-	W.bannerTitle:SetAlpha(1)
 end
 
-local function showBanner(title, color, shade)
-	W.banner:Show()
-	W.bannerShade:SetShown(shade and true or false)
-	W.bannerTitle:SetText(title)
-	W.bannerTitle:SetTextColor(rgb(color or Theme.colors.gold))
-end
-
-local function hideParticles()
-	S.particlesFrom = nil
-	for _, p in ipairs(W.particles) do p:Hide() end
-end
-
-local function updateParticles()
-	local t0 = S.particlesFrom
-	if not t0 then
-		return
-	end
-	local life, list = Theme.timing.particleLife, W.particles
-	local n = #list
-	local t = S.now - t0
-	local size = Theme.size
-	local spreadX, spreadY = size.width * 0.42, size.cell * 2
-	for i = 1, n do
-		local p = list[i]
-		local shifted = t + (i - 1) * life / n
-		local cycle = math.floor(shifted / life)
-		local x, y, a = Anim.particle(i + cycle * 37, shifted - cycle * life, life)
-		p:ClearAllPoints()
-		p:SetPoint("CENTER", W.reelPanel, "CENTER", x * spreadX, y * spreadY)
-		p:SetAlpha(a)
-		p:Show()
-	end
-end
-
-local function setFlash(on)
-	S.flashing = on
-	if not on then
-		W.flash:Hide()
-	end
+local function setBookFrame(i)
+	local Lay = Theme.layout
+	local l, r, t, b = Anim.gridCoord(i, Theme.sheets.book.cols, Theme.sheets.book.rows)
+	-- only the part of the frame inside bookClip (the frames have empty space at the top)
+	local h = b - t
+	local top = (Lay.bookClip[2] - Lay.book[2]) / Lay.book[4]
+	local bottom = top + Lay.bookClip[4] / Lay.book[4]
+	W.book:SetTexCoord(l, r, t + h * top, t + h * bottom)
 end
 
 ---------------------------------------------------------------------------------------------
--- Free-game mode: free strips, tint, counter and badge
+-- Free-game mode: free strips, the purple look, counter and symbol
 
-local function setTint(free)
-	local c = Theme.colors
-	paint(W.reelPanel.fill, free and c.freePanel or c.panel)
-	for r = 1, REELS do
-		W.reels[r]:setTint(free and c.freeCell or c.cell)
-	end
+local function setFreeLook(free)
+	local sl, tex = Theme.slices, Theme.tex
+	W.bgTiles:SetTexture(free and tex.bgFree or tex.bg)
+	W.windowFrame:SetTexture(free and sl.windowFree.file or sl.window.file)
+	W.reelBg:SetTexture(free and tex.reelBgFree or tex.reelBg)
+	W.reelFrame:SetTexture(free and sl.reelsFree.file or sl.reels.file)
+	W.baseBar:SetShown(not free)
+	W.freeBar:SetShown(free)
 end
 
 local function setCounter(i, of)
@@ -592,12 +615,12 @@ local function enterFree(symbol, of)
 	for r = 1, REELS do
 		W.reels[r]:setStrip(T2.freeReels[r], 0)
 	end
-	setTint(true)
 	W.badge:SetTexture(Theme.symbols[symbol])
+	W.expName:SetText(symbolName(symbol))
 	setExpandSymbol(symbol)
 	setCounter(0, of)
 	setFreeWinShown(0)
-	W.freeBar:Show()
+	setFreeLook(true)
 end
 
 local function leaveFree()
@@ -610,8 +633,7 @@ local function leaveFree()
 	for r = 1, REELS do
 		W.reels[r]:setStrip(T2.reels[r], stops and stops[r] or 0)
 	end
-	setTint(false)
-	W.freeBar:Hide()
+	setFreeLook(false)
 end
 
 ---------------------------------------------------------------------------------------------
@@ -639,6 +661,7 @@ H.spin = {
 		S.window = step.window
 		if step.free then
 			setCounter(step.game, step.freeOf)
+			setWinText(string.format(L.FREE_HINT, step.game, step.freeOf, fmt(S.result.stake)), Theme.tones.free)
 		end
 		if silent then
 			return
@@ -662,6 +685,9 @@ H.spin = {
 				if hasBook(step.window[r]) then
 					playSound("bookLand")
 				end
+				if fxOn() then
+					S.landAt[r] = now
+				end
 			end
 			if reel:isSpinning() then
 				running = true
@@ -670,7 +696,8 @@ H.spin = {
 		local tease = step.tease
 		if tease then
 			local on = not W.reels[tease - 1]:isSpinning()
-			local a = 0.3 + 0.7 * Anim.pulse(now, Theme.timing.flashFreq)
+			local ta = Theme.alpha.tease
+			local a = ta[1] + (ta[2] - ta[1]) * Anim.pulse(now, Theme.timing.flashFreq)
 			for r = 1, REELS do
 				local glow = W.tease[r]
 				if on and r >= tease and W.reels[r]:isSpinning() then
@@ -697,7 +724,7 @@ H.spin = {
 }
 
 H.allLines = {
-	enter = function(step, silent)
+	enter = function(step)
 		clearShow()
 		dimAll()
 		for _, l in ipairs(step.lines) do
@@ -708,12 +735,12 @@ H.allLines = {
 		end
 	end,
 	update = function(step, t)
-		local a = 0.35 + 0.65 * Anim.pulse(t, Theme.timing.flashFreq)
+		local pa = Theme.alpha.linePulse
+		local a = pa[1] + (pa[2] - pa[1]) * Anim.pulse(t, Theme.timing.flashFreq)
 		for _, l in ipairs(step.lines) do
-			for _, seg in ipairs(W.lineSegs[l.line]) do
-				seg:SetAlpha(a)
-			end
+			setLineAlpha(l.line, a)
 		end
+		pulseLit(t)
 		return t >= step.dur
 	end,
 	finish = function()
@@ -726,12 +753,15 @@ H.line = {
 		local l = step.line
 		clearShow()
 		dimAll()
-		showLine(l.line, l.count)
-		setWinText(string.format(L.LINE_WIN, l.line, l.count, symbolName(l.symbol), fmt(l.win)), Theme.colors.lines[l.line])
+		showLine(l.line, l.count, 1, not silent)
+		setWinText(string.format(L.LINE_WIN, l.line, l.count, symbolName(l.symbol), fmt(l.win)), Theme.tones.win)
 		countStep(step, silent)
 		sfx("lineWin", silent)
 	end,
-	update = timed,
+	update = function(step, t)
+		pulseLit(t)
+		return t >= step.dur
+	end,
 	finish = function()
 		clearShow()
 	end,
@@ -742,12 +772,13 @@ H.scatter = {
 		clearShow()
 		dimAll()
 		markBooks(S.window)
-		setWinText(string.format(L.SCATTER_WIN, step.count, symbolName(T2.scatter.symbol), fmt(step.amount)), Theme.colors.gold)
+		setWinText(string.format(L.SCATTER_WIN, step.count, symbolName(T2.scatter.symbol), fmt(step.amount)),
+			Theme.tones.free)
 		countStep(step, silent)
 		sfx("lineWin", silent)
 	end,
 	update = function(step, t)
-		W.overlay:SetAlpha(0.6 + 0.4 * Anim.pulse(t, Theme.timing.pulseFreq))
+		pulseLit(t)
 		return t >= step.dur
 	end,
 	finish = function()
@@ -757,14 +788,11 @@ H.scatter = {
 
 H.retrigger = {
 	enter = function(step, silent)
-		showBanner(string.format(L.FREE_MORE, step.added), Theme.colors.gold, false)
+		showBanner("free", string.format(L.FREE_MORE, step.added), not silent)
 		setCounter(step.game, step.freeOf)
 		sfx("freeStart", silent)
 	end,
-	update = function(step, t)
-		W.bannerTitle:SetAlpha(0.4 + 0.6 * Anim.pulse(t, Theme.timing.flashFreq))
-		return t >= step.dur
-	end,
+	update = timed,
 	finish = function()
 		hideBanner()
 	end,
@@ -799,10 +827,17 @@ H.expand = {
 H.expandWin = {
 	enter = function(step, silent)
 		clearShow()
-		for li = 1, #W.markers do
-			lightMarker(li, Theme.colors.gold)
+		-- the expanded reels pay on every line: all markers lit, all lines faint, the rest dim
+		for r = 1, REELS do
+			if not W.expand[r].bg:IsShown() then
+				for row = 1, ROWS do W.cells[r][row].dim:Show() end
+			end
 		end
-		setWinText(string.format(L.EXPAND_WIN, symbolName(step.symbol), step.count, fmt(step.amount)), Theme.colors.gold)
+		for li = 1, #W.markers do
+			setLine(li, Theme.colors.lines[li], Theme.alpha.restingLines)
+			setMarker(li, true)
+		end
+		setWinText(string.format(L.EXPAND_WIN, symbolName(step.symbol), step.count, fmt(step.amount)), Theme.tones.win)
 		countStep(step, silent)
 		sfx("lineWin", silent)
 	end,
@@ -819,6 +854,8 @@ local function expandingIndex(sym)
 	return 1
 end
 
+-- Free-game intro (state 05): books pulse; then the window darkens, the banner pops, the tome
+-- opens and the expanding symbol shuffles on it; its name shows in the panel below.
 H.intro = {
 	enter = function(step, silent)
 		clearShow()
@@ -826,28 +863,39 @@ H.intro = {
 		markBooks(S.window)
 		setWinText("")
 		S.introStage = 0
+		S.introSilent = silent
 		sfx("freeStart", silent)
 	end,
 	update = function(step, t)
 		local tm = Theme.timing
 		if t < tm.introPulse then
-			W.overlay:SetAlpha(0.4 + 0.6 * Anim.pulse(t, tm.flashFreq))
+			pulseLit(t)
 			return false
 		end
 		if S.introStage == 0 then
 			S.introStage = 1
-			W.overlay:SetAlpha(1)
-			showBanner(string.format(L.FREE_GAMES, step.freeOf), Theme.colors.gold, true)
+			W.stageShade:Show()
+			if fxOn() then W.introGlow:Show() end
+			showBanner("free", string.format(L.FREE_GAMES, step.freeOf), not S.introSilent)
+			W.book:Show()
+			if fxOn() and not S.introSilent then
+				W.bookFrom = S.now
+				setBookFrame(1)
+			else
+				setBookFrame(Theme.sheets.book.frames)
+			end
 		end
 		if t >= tm.introShuffleAt then
 			local u = t - tm.introShuffleAt
 			local final = expandingIndex(step.symbol)
 			local i = Anim.shuffle(u, tm.introShuffle, #T2.expanding, final)
-			W.bannerIcon:SetTexture(Theme.symbols[T2.expanding[i]])
+			W.bannerIcon:SetTexture(Theme.symbolsWin[T2.expanding[i]])
 			W.bannerIcon:Show()
 			if u >= tm.introShuffle and S.introStage == 1 then
 				S.introStage = 2
+				Skin.rect(W.bannerSub, W.frame, Theme.layout.introPanel)
 				W.bannerSub:SetText(string.format(L.EXPANDING, symbolName(step.symbol)))
+				W.introPanel:Show()
 				playSound("expand")
 			end
 		end
@@ -863,12 +911,14 @@ H.intro = {
 H.summary = {
 	enter = function(step, silent)
 		clearShow()
-		showBanner(L.FREE_OVER, Theme.colors.gold, true)
+		W.reelShade:Show()
+		showBanner("free", L.FREE_OVER, not silent)
+		Skin.rect(W.bannerSub, W.frame, Theme.layout.summarySub)
 		W.bannerSub:SetText(string.format(L.FREE_PLAYED, step.games))
 		countTo("banner", 0, step.freeWin, silent and 0 or step.dur * 0.6)
 		-- Back to the base game's reels under the shade.
 		leaveFree()
-		setWinText(winLine(step.freeWin))
+		setWinText(winLine(step.freeWin), Theme.tones.win)
 	end,
 	update = timed,
 	finish = function()
@@ -876,25 +926,24 @@ H.summary = {
 	end,
 }
 
+-- Big win (state 08): rays turn behind the banner, a shine sweeps over it, coins rain.
 H.big = {
 	enter = function(step, silent)
 		clearShow()
-		showBanner(L["BIG_WIN_" .. step.level], Theme.colors.gold, true)
-		countTo("banner", 0, step.total, silent and 0 or step.dur * 0.8)
-		if not silent then
-			S.particlesFrom = S.now
-			setFlash(true)
+		W.reelShade:Show()
+		if not silent and fxOn() then
+			W.rays:start(S.now)
+			W.rain:start(S.now)
 		end
+		showBanner("big", L["BIG_WIN_" .. step.level], not silent)
+		countTo("banner", 0, step.total, silent and 0 or step.dur * 0.8)
 		sfx("bigWin", silent)
 	end,
 	update = function(step, t)
-		updateParticles()
-		W.bannerTitle:SetAlpha(0.6 + 0.4 * Anim.pulse(t, Theme.timing.pulseFreq))
+		W.bannerTitle:SetAlpha(0.75 + 0.25 * Anim.pulse(t, Theme.timing.pulseFreq))
 		return t >= step.dur
 	end,
 	finish = function()
-		hideParticles()
-		setFlash(false)
 		hideBanner()
 	end,
 }
@@ -906,9 +955,9 @@ H["end"] = {
 		if step.total > 0 then
 			local s = winLine(step.total, S.result.stake)
 			if step.capped then
-				s = s .. "  |cffb1bad3" .. L.CAPPED .. "|r"
+				s = s .. "  |cffc9ad7c" .. L.CAPPED .. "|r"
 			end
-			setWinText(s)
+			setWinText(s, Theme.tones.win)
 		end
 	end,
 	update = function()
@@ -927,9 +976,10 @@ local function showResting()
 	if not round or round.free or round.win <= 0 then
 		return
 	end
+	S.window = round.window
 	dimAll()
 	for _, l in ipairs(round.lines) do
-		showLine(l.line, l.count)
+		showLine(l.line, l.count, Theme.alpha.restingLines)
 	end
 	if round.scatter.win > 0 then
 		markBooks(round.window)
@@ -943,12 +993,12 @@ local function endRound()
 	hideTease()
 	leaveFree()
 	hideBanner()
-	hideParticles()
-	setFlash(false)
 	showResting()
 	countTo("balance", S.balanceShown, S.game.balance, Theme.timing.countUp)
 	S.offer = S.game:state() == "gamble"
-	if not (S.result and S.result.win > 0) then
+	if S.offer then
+		setWinText(string.format(L.OFFER_HINT, fmt(S.game.pending)), Theme.tones.win)
+	elseif not (S.result and S.result.win > 0) then
 		idleText()
 	end
 	saveGame()
@@ -977,6 +1027,7 @@ local function skip(silent)
 	local i = S.si + 1
 	while steps[i] and steps[i].group == group do
 		local step = steps[i]
+		S.si = i
 		H[step.kind].enter(step, true)
 		H[step.kind].finish(step)
 		i = i + 1
@@ -1003,7 +1054,7 @@ end
 local function startRound(r, before)
 	S.result, S.offer, S.counts, S.messageUntil = r, false, {}, nil
 	setWinText("")
-	setTotalShown(0)
+	setTotalShown(nil)
 	clearShow()
 	hideExpansions()
 	setBalanceShown(before - r.stake)
@@ -1025,7 +1076,7 @@ local function quickStop()
 end
 
 function SlotFrame.spin()
-	if S.phase == "flip" then
+	if S.phase == "flip" or S.phase == "pick" then
 		return
 	end
 	if S.phase == "round" then
@@ -1040,7 +1091,7 @@ function SlotFrame.spin()
 		return
 	end
 	if not supported() then
-		message(statusLine() or L.UNSUPPORTED_TABLE, Theme.colors.lose)
+		message(statusLine() or L.UNSUPPORTED_TABLE, Theme.tones.lose)
 		refresh()
 		return
 	end
@@ -1048,47 +1099,138 @@ function SlotFrame.spin()
 	local before = game.balance
 	local r, err = game:spin()
 	if not r then
-		message(codeLine(err), Theme.colors.lose)
+		message(codeLine(err), Theme.tones.lose)
 		refresh()
 		return
 	end
 	startRound(r, before)
 end
 
+local function hideCard()
+	W.cardOverlay:Hide()
+end
+
 function SlotFrame.take()
-	if S.phase ~= "idle" or S.game:state() ~= "gamble" then
+	if not (S.phase == "idle" or S.phase == "pick") or S.game:state() ~= "gamble" then
 		return
 	end
 	local res = S.game:take()
+	S.phase = "idle"
 	S.offer = false
+	hideCard()
 	clearShow()
-	message(L.TAKEN .. " " .. fmt(res.amount), Theme.colors.accent)
+	message(L.TAKEN .. " " .. fmt(res.amount), Theme.tones.win)
 	playSound("click")
 	refresh()
+end
+
+---------------------------------------------------------------------------------------------
+-- Gamble as a card (state 04): GAMBLE shows a face-down card; the player picks red or black;
+-- game:gamble() decides; the card turns over and shows the picked colour when the step was won,
+-- the other one when it was lost. The pick itself is presentation only.
+
+local function setCardFace(tex, color)
+	local t = Theme.tex
+	tex:SetTexture(color == "red" and t.cardRed or color == "black" and t.cardBlack or t.cardBack)
+end
+
+local function showLastCards()
+	for i, tex in ipairs(W.lastCards) do
+		local color = S.cards[i]
+		if color then
+			setCardFace(tex, color)
+			tex:Show()
+		else
+			tex:Hide()
+		end
+	end
+	W.lastCardsLabel:SetShown(#S.cards > 0)
 end
 
 function SlotFrame.gamble()
 	if S.phase ~= "idle" or S.game:state() ~= "gamble" then
 		return
 	end
+	local p = S.game.pending
+	S.phase = "pick"
+	S.messageUntil = nil
+	setCardFace(W.card, nil)
+	W.card:SetWidth(Theme.layout.card[3])
+	W.gambleLine:SetText(string.format(L.GAMBLE_STAKE, fmt(p), fmt(2 * p)))
+	W.red:Show()
+	W.black:Show()
+	showLastCards()
+	W.cardOverlay:Show()
+	setWinText(L.GAMBLE_HINT, Theme.tones.win)
+	playSound("click")
+	refresh()
+end
+
+-- color: "red" or "black".
+function SlotFrame.pick(color)
+	if S.phase ~= "pick" or S.game:state() ~= "gamble" then
+		return
+	end
 	local res, err = S.game:gamble()
 	if not res then
-		message(codeLine(err), Theme.colors.lose)
+		S.phase = "idle"
+		hideCard()
+		S.offer = S.game:state() == "gamble"
+		message(codeLine(err), Theme.tones.lose)
 		refresh()
 		return
 	end
 	S.counts = {}
 	setBalanceShown(S.balanceShown)
-	S.flip = { res = res, t0 = S.now, revealed = false }
+	local other = color == "red" and "black" or "red"
+	S.flip = { res = res, t0 = S.now, face = res.won and color or other, turned = false, revealed = false }
 	S.offer = false
-	S.messageUntil = nil
 	S.phase = "flip"
-	setWinText("")
-	W.coin:SetTexture(Theme.coin.back)
-	W.coinResult:SetText("")
-	W.coinOverlay:Show()
+	W.red:Hide()
+	W.black:Hide()
 	playSound("click")
 	refresh()
+end
+
+local function updateFlip()
+	local f, t = S.flip, Theme.timing
+	local dt = S.now - f.t0
+	local w = Theme.layout.card[3]
+	local scale, front = Anim.flip(dt, t.gambleFlip)
+	W.card:SetWidth(math.max(0.01, scale * w))
+	if front and not f.turned then
+		f.turned = true
+		setCardFace(W.card, f.face)
+	end
+	if dt < t.gambleFlip then
+		return
+	end
+	local res = f.res
+	if not f.revealed then
+		f.revealed = true
+		table.insert(S.cards, 1, f.face)
+		S.cards[Theme.layout.lastCardsCount + 1] = nil
+		showLastCards()
+		if res.won then
+			setWinText(L.GAMBLE_WON .. "  " .. winLine(res.amount * 2), Theme.tones.win)
+			playSound("gambleWin")
+		else
+			setWinText(L.GAMBLE_LOST, Theme.tones.lose)
+			playSound("gambleLose")
+		end
+		countTo("balance", S.balanceShown, S.game.balance, t.countUp)
+		saveGame()
+	end
+	if dt >= t.gambleFlip + t.gambleHold then
+		hideCard()
+		S.flip = nil
+		S.phase = "idle"
+		S.offer = res.canGamble
+		if not res.won then
+			clearShow()
+		end
+		refresh()
+	end
 end
 
 function SlotFrame.refill()
@@ -1120,53 +1262,33 @@ function SlotFrame.setStake(v)
 	refresh()
 end
 
-local function updateFlip()
-	local f, t = S.flip, Theme.timing
-	local dt = S.now - f.t0
-	local size = W.coinSize
-	if dt < t.gambleFlip then
-		-- Coin turns around its vertical axis: width follows |cos|.
-		local w = math.abs(math.cos(math.pi * t.gambleFlipFreq * dt)) * size
-		W.coin:SetWidth(math.max(1, w))
-		return
+-- Stops every effect at once (window hidden, effects switched off).
+local function stopFx()
+	W.rain:stop()
+	W.rays:stop()
+	W.shine:stop()
+	W.sparkles:stop()
+	W.bannerPop.active = false
+	W.bannerPop.frame:SetScale(1)
+	W.bookFrom = nil
+	if W.book:IsShown() then
+		setBookFrame(Theme.sheets.book.frames)
 	end
-	local res = f.res
-	if not f.revealed then
-		f.revealed = true
-		W.coin:SetWidth(size)
-		W.coin:SetTexture(res.won and Theme.coin.win or Theme.coin.lose)
-		if res.won then
-			W.coinResult:SetText(L.GAMBLE_WON)
-			W.coinResult:SetTextColor(rgb(Theme.colors.accent))
-			setWinText(winLine(res.amount * 2))
-			playSound("gambleWin")
-		else
-			W.coinResult:SetText(L.GAMBLE_LOST)
-			W.coinResult:SetTextColor(rgb(Theme.colors.lose))
-			setWinText(L.GAMBLE_LOST, Theme.colors.lose)
-			playSound("gambleLose")
-		end
-		countTo("balance", S.balanceShown, S.game.balance, t.countUp)
-		saveGame()
-	end
-	if dt >= t.gambleFlip + t.gambleHold then
-		W.coinOverlay:Hide()
-		S.flip = nil
-		S.phase = "idle"
-		S.offer = res.canGamble
-		if not res.won then
-			clearShow()
-		end
-		refresh()
-	end
+	hideLandFlashes()
+	W.spinGlow:Hide()
 end
 
--- Finishes everything at once (round, coin flip, count-ups) so no result stays hidden.
+-- Finishes everything at once (round, card, count-ups) so no result stays hidden.
 -- Used when the window closes and before the window changes to another game.
 local function settle()
 	stopSpinSound()
 	if S.phase == "round" then
 		settleRound()
+	end
+	if S.phase == "pick" then
+		S.phase = "idle"
+		hideCard()
+		S.offer = S.game:state() == "gamble"
 	end
 	if S.phase == "flip" then
 		S.flip.t0 = S.now - 100
@@ -1176,12 +1298,50 @@ local function settle()
 	setBalanceShown(S.game.balance)
 end
 
+local function updateEffects(now)
+	local t = Theme.timing
+	W.bannerPop:update(now)
+	W.shine:update(now)
+	W.rays:update(now)
+	W.rain:update(now)
+	W.sparkles:update(now)
+	if W.bookFrom then
+		local sheet = Theme.sheets.book
+		local dt = now - W.bookFrom
+		setBookFrame(Anim.frameAt(dt, sheet.fps, sheet.frames, false))
+		if dt >= sheet.frames / sheet.fps then
+			W.bookFrom = nil
+		end
+	end
+	for r = 1, REELS do
+		local at = S.landAt[r]
+		if at then
+			local u = (now - at) / t.landFlash
+			if u >= 1 then
+				S.landAt[r] = nil
+				W.landFlash[r]:Hide()
+			else
+				W.landFlash[r]:SetAlpha(Theme.alpha.landFlash * (1 - u))
+				W.landFlash[r]:Show()
+			end
+		end
+	end
+	-- The gold button breathes while it waits for a spin.
+	if fxOn() and S.phase == "idle" and W.spin.enabled then
+		local a = Theme.alpha
+		W.spinGlow:SetAlpha(a.breatheMin + (a.breatheMax - a.breatheMin) * Anim.pulse(now, t.breathe))
+		W.spinGlow:Show()
+	else
+		W.spinGlow:Hide()
+	end
+end
+
 local function onUpdate(_, elapsed)
 	-- Absolute-time animation; cap hitches so a long frame does not skip whole phases.
 	elapsed = tonumber(elapsed) or 0
 	if elapsed > 0.25 then elapsed = 0.25 end
 	S.now = S.now + elapsed
-	local now, t = S.now, Theme.timing
+	local now = S.now
 
 	if S.phase == "round" then
 		local step = S.plan.steps[S.si]
@@ -1203,10 +1363,7 @@ local function onUpdate(_, elapsed)
 		updateFlip()
 	end
 
-	if S.flashing then
-		W.flash:SetAlpha(Anim.pulse(now, t.flashFreq))
-		W.flash:Show()
-	end
+	updateEffects(now)
 
 	if S.messageUntil and now >= S.messageUntil then
 		S.messageUntil = nil
@@ -1253,363 +1410,370 @@ end
 ---------------------------------------------------------------------------------------------
 -- Building the window
 
--- Geometry of the reel panel, in pixels from its top left corner (y negative downwards).
-local function reelLeft(r)
-	local size = Theme.size
-	return size.reelPad + size.marker + (r - 1) * (size.cell + size.reelGap)
+local function geometry()
+	local Lay = Theme.layout
+	return { left = Lay.reels[1], top = Lay.reels[2], cell = Lay.cell, xIn = Lay.lineIn, xOut = Lay.lineOut }
 end
 
-local function cellX(r)
-	return reelLeft(r) + Theme.size.cell / 2
-end
-
-local function cellY(row0)
-	local size = Theme.size
-	return -(size.reelPad + row0 * size.cell + size.cell / 2)
-end
-
--- An axis-parallel line segment texture from (x1, y1) to (x2, y2).
-local function segment(parent, x1, y1, x2, y2)
-	local lw = Theme.size.lineWidth
-	-- Above the dims (ARTWORK) and the cell edges (OVERLAY 0).
-	local tex = parent:CreateTexture(nil, "OVERLAY", nil, 1)
-	local left, top = math.min(x1, x2) - lw / 2, math.max(y1, y2) + lw / 2
-	tex:SetPoint("TOPLEFT", parent, "TOPLEFT", left, top)
-	tex:SetSize(math.abs(x2 - x1) + lw, math.abs(y2 - y1) + lw)
-	tex:Hide()
-	return tex
-end
-
--- Line li as segments: from the left marker to reel 1, then per reel gap a step through the
--- middle of the gap, to the right marker.
-local function buildLine(parent, li)
-	local size = Theme.size
+-- One pay line: real lines with the glow texture when the client has CreateLine, else the
+-- staircase of plain segments. Returns the list of parts and whether they are real lines.
+local function buildLine(ov, li, yLeft, yRight)
+	local Lay = Theme.layout
+	local g = geometry()
 	local rows = T2.lines[li]
-	local segs = {}
-	local function add(x1, y1, x2, y2)
-		segs[#segs + 1] = segment(parent, x1, y1, x2, y2)
-	end
-	add(size.reelPad + size.marker - 2, cellY(rows[1]), cellX(1), cellY(rows[1]))
-	for r = 1, REELS - 1 do
-		local y1, y2 = cellY(rows[r]), cellY(rows[r + 1])
-		if y1 == y2 then
-			add(cellX(r), y1, cellX(r + 1), y1)
-		else
-			local gx = reelLeft(r) + size.cell + size.reelGap / 2
-			add(cellX(r), y1, gx, y1)
-			add(gx, y1, gx, y2)
-			add(gx, y2, cellX(r + 1), y2)
+	if type(ov.CreateLine) == "function" then
+		local ok, res = pcall(function()
+			local pts = Layout.linePoints(rows, yLeft[li], yRight[li], g)
+			local parts = {}
+			for i = 1, #pts - 1 do
+				local line = ov:CreateLine(nil, "OVERLAY", nil, 1)
+				line:SetTexture(Theme.tex.lineGlow)
+				line:SetThickness(Lay.lineThickness)
+				line:SetStartPoint("TOPLEFT", ov, pts[i][1], -pts[i][2])
+				line:SetEndPoint("TOPLEFT", ov, pts[i + 1][1], -pts[i + 1][2])
+				Skin.add(line)
+				line:Hide()
+				parts[i] = line
+			end
+			return parts
+		end)
+		if ok and res then
+			return res, true
 		end
 	end
-	local yEnd = cellY(rows[REELS])
-	add(cellX(REELS), yEnd, reelLeft(REELS) + size.cell + 2, yEnd)
-	return segs
+	local lw = Lay.lineFallback
+	local parts = {}
+	for i, s in ipairs(Layout.staircase(rows, g)) do
+		local t = ov:CreateTexture(nil, "OVERLAY", nil, 1)
+		local x, y = math.min(s[1], s[3]) - lw / 2, math.min(s[2], s[4]) - lw / 2
+		t:SetPoint("TOPLEFT", ov, "TOPLEFT", x, -y)
+		t:SetSize(math.abs(s[3] - s[1]) + lw, math.abs(s[4] - s[2]) + lw)
+		t:Hide()
+		parts[i] = t
+	end
+	return parts, false
 end
 
--- Line number markers: left at the row where a line starts, right where it ends; lines that
--- share a row are stacked in it.
-local function buildMarkers(parent)
-	local size, c, fonts = Theme.size, Theme.colors, Theme.fonts
-	local box = size.markerBox
+-- Line number markers at both sides (Layout.markerY).
+local function buildMarkers(ov, yLeft, yRight)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
 	for li = 1, #T2.lines do
-		W.markers[li] = {}
-	end
-	for side = 1, 2 do
-		local reelIndex = side == 1 and 1 or REELS
-		local x = side == 1 and size.reelPad + (size.marker - box) / 2
-			or reelLeft(REELS) + size.cell + (size.marker - box) / 2
-		for row0 = 0, ROWS - 1 do
-			local group = {}
-			for li, rows in ipairs(T2.lines) do
-				if rows[reelIndex] == row0 then group[#group + 1] = li end
-			end
-			local step = box + 2
-			local top = -(size.reelPad + row0 * size.cell + (size.cell - #group * step) / 2)
-			for k, li in ipairs(group) do
-				local m = {}
-				m.bg = parent:CreateTexture(nil, "ARTWORK")
-				m.bg:SetSize(box, box)
-				m.bg:SetPoint("TOPLEFT", parent, "TOPLEFT", x, top - (k - 1) * step)
-				paint(m.bg, c.border)
-				m.label = text(parent, fonts.marker, c.muted)
-				m.label:SetPoint("CENTER", m.bg, "CENTER", 0, 0)
-				m.label:SetText(tostring(li))
-				local list = W.markers[li]
-				list[#list + 1] = m
-			end
+		local list = { lit = false }
+		for side = 1, 2 do
+			local x, y = Lay.markerX[side], side == 1 and yLeft[li] or yRight[li]
+			local m = {}
+			m.normal = ov:CreateTexture(nil, "ARTWORK")
+			m.normal:SetTexture(Theme.tex.markerNormal)
+			m.normal:SetSize(Lay.marker, Lay.marker)
+			m.normal:SetPoint("CENTER", ov, "TOPLEFT", x, -y)
+			m.glow = ov:CreateTexture(nil, "ARTWORK", nil, 1)
+			m.glow:SetTexture(Theme.tex.markerLit)
+			m.glow:SetSize(Lay.markerLit, Lay.markerLit)
+			m.glow:SetPoint("CENTER", ov, "TOPLEFT", x, -y)
+			m.glow:Hide()
+			m.label = Skin.text(ov, "number", fs.marker, c.muted, "CENTER")
+			m.label:SetPoint("CENTER", ov, "TOPLEFT", x, -y)
+			m.label:SetText(tostring(li))
+			list[side] = m
 		end
+		W.markers[li] = list
 	end
 end
 
-local function buildReels(f, y)
-	local size, c, fonts = Theme.size, Theme.colors, Theme.fonts
-	local cell = size.cell
-	local reelsW = 2 * size.reelPad + 2 * size.marker + REELS * cell + (REELS - 1) * size.reelGap
-	local reelsH = ROWS * cell + 2 * size.reelPad
-	local rp = panel(f, c.panel, c.border)
-	rp:SetPoint("TOP", f, "TOP", 0, y)
-	rp:SetSize(reelsW, reelsH)
-	W.reelPanel = rp
+local function frameAt(parent, level, r)
+	local fr = CreateFrame("Frame", nil, parent)
+	if r then
+		Skin.rect(fr, W.frame, r)
+	else
+		fr:SetAllPoints(W.frame)
+	end
+	fr:SetFrameLevel(W.frame:GetFrameLevel() + level)
+	return fr
+end
 
-	W.reels, W.tease = {}, {}
+local LEVEL = { reels = 2, cells = 5, reelFrame = 7, lines = 8, status = 12, card = 12, stage = 14, banner = 16,
+	stageTop = 18, paytable = 30, rain = 40 }
+
+local function buildReels(f)
+	local Lay, c = Theme.layout, Theme.colors
+	local cell = Lay.cell
+	local field = Lay.reels
+
+	local rp = frameAt(f, LEVEL.reels, field)
+	W.reelPanel = rp
+	W.reelBg = rp:CreateTexture(nil, "BACKGROUND")
+	W.reelBg:SetAllPoints(rp)
+	W.reelBg:SetTexture(Theme.tex.reelBg)
+	W.reels = {}
 	for r = 1, REELS do
 		local reel = Reel.new(rp, T2.reels[r])
-		reel.frame:SetPoint("TOPLEFT", rp, "TOPLEFT", reelLeft(r), -size.reelPad)
+		reel.frame:SetPoint("TOPLEFT", rp, "TOPLEFT", (r - 1) * cell, 0)
 		W.reels[r] = reel
-		-- Anticipation glow behind the reel.
-		local glow = rp:CreateTexture(nil, "BACKGROUND", nil, 2)
-		glow:SetPoint("TOPLEFT", reel.frame, "TOPLEFT", -3, 3)
-		glow:SetPoint("BOTTOMRIGHT", reel.frame, "BOTTOMRIGHT", 3, -3)
-		paint(glow, c.gold)
-		glow:Hide()
-		W.tease[r] = glow
 	end
 
-	-- Overlay above the reels: expansions, dims, cell edges, lines, markers.
-	local ov = CreateFrame("Frame", nil, rp)
-	ov:SetAllPoints(rp)
-	ov:SetFrameLevel(rp:GetFrameLevel() + 10)
-	W.overlay = ov
-	local inset = size.iconInset
-	local crop = Theme.iconCrop
-	W.expand = {}
+	-- Above the reels: expansions, dims, winning art, glows, anticipation, landing flashes.
+	local cl = frameAt(f, LEVEL.cells)
+	W.cellLayer = cl
+	W.expand, W.cells, W.tease, W.landFlash = {}, {}, {}, {}
 	for r = 1, REELS do
+		local x = field[1] + (r - 1) * cell
+		local col = { x, field[2], cell, ROWS * cell }
 		local e = { icons = {} }
-		e.bg = ov:CreateTexture(nil, "BACKGROUND")
+		e.bg = cl:CreateTexture(nil, "BACKGROUND")
+		e.bg:SetTexture(Theme.tex.expandColumn)
 		e.bg:SetWidth(cell)
 		e.bg:SetPoint("CENTER", W.reels[r].frame, "CENTER", 0, 0)
-		paint(e.bg, c.expand)
+		local anchor = CreateFrame("Frame", nil, cl)
+		Skin.rect(anchor, f, col)
+		e.glow = Skin.nine(cl, anchor, Theme.slices.glowCell, "ARTWORK", 3, Lay.cellGlowOut)
+		e.glow:SetVertexColor(c.gold[1], c.gold[2], c.gold[3], 1)
+		e.glow:SetAdd()
 		for row = 1, ROWS do
-			local ic = ov:CreateTexture(nil, "BORDER")
-			ic:SetSize(cell - 2 * inset, cell - 2 * inset)
-			ic:SetPoint("TOPLEFT", rp, "TOPLEFT", reelLeft(r) + inset, -(size.reelPad + (row - 1) * cell + inset))
-			ic:SetTexCoord(crop[1], crop[2], crop[3], crop[4])
+			local ic = cl:CreateTexture(nil, "BORDER")
+			Skin.rect(ic, f, { x, field[2] + (row - 1) * cell, cell, cell })
 			e.icons[row] = ic
 		end
 		W.expand[r] = e
 		setExpand(r, 0)
-	end
-	W.cells = {}
-	local edge = size.cellEdge
-	for r = 1, REELS do
+
+		local tease = Skin.nine(cl, anchor, Theme.slices.glowCell, "OVERLAY", 0, Lay.cellGlowOut)
+		tease:SetVertexColor(c.gold[1], c.gold[2], c.gold[3], 1)
+		tease:SetAdd()
+		tease:Hide()
+		W.tease[r] = tease
+		local flash = cl:CreateTexture(nil, "OVERLAY", nil, 1)
+		flash:SetTexture(Theme.tex.white)
+		Skin.rect(flash, f, col)
+		Skin.color(flash, c.goldLight)
+		Skin.add(flash)
+		flash:Hide()
+		W.landFlash[r] = flash
+
 		W.cells[r] = {}
 		for row = 1, ROWS do
-			local x, top = reelLeft(r), -(size.reelPad + (row - 1) * cell)
-			local cellT = { edges = {} }
-			cellT.dim = ov:CreateTexture(nil, "ARTWORK")
-			cellT.dim:SetPoint("TOPLEFT", rp, "TOPLEFT", x, top)
-			cellT.dim:SetSize(cell, cell)
-			paint(cellT.dim, c.dim)
-			cellT.dim:Hide()
-			local parts = {
-				{ x, top, cell, edge }, { x, top - cell + edge, cell, edge },
-				{ x, top, edge, cell }, { x + cell - edge, top, edge, cell },
-			}
-			for k, p in ipairs(parts) do
-				local e = ov:CreateTexture(nil, "OVERLAY")
-				e:SetPoint("TOPLEFT", rp, "TOPLEFT", p[1], p[2])
-				e:SetSize(p[3], p[4])
-				e:Hide()
-				cellT.edges[k] = e
-			end
-			W.cells[r][row] = cellT
+			local rect = { x, field[2] + (row - 1) * cell, cell, cell }
+			local ct = {}
+			ct.dim = Skin.fill(cl, "ARTWORK", c.dim)
+			Skin.rect(ct.dim, f, rect)
+			ct.dim:Hide()
+			local ca = CreateFrame("Frame", nil, cl)
+			Skin.rect(ca, f, rect)
+			ct.glow = Skin.nine(cl, ca, Theme.slices.glowCell, "ARTWORK", 1, Lay.cellGlowOut)
+			ct.glow:SetAdd()
+			ct.glow:Hide()
+			ct.win = cl:CreateTexture(nil, "ARTWORK", nil, 2)
+			Skin.rect(ct.win, f, rect)
+			ct.win:Hide()
+			W.cells[r][row] = ct
 		end
 	end
+
+	-- The reel frame over the edge of the field.
+	local rf = frameAt(f, LEVEL.reelFrame, Lay.reelFrame)
+	W.reelFrame = Skin.nine(rf, rf, Theme.slices.reels, "BORDER")
+
+	-- Lines and markers above the frame; sparkles on top.
+	local ov = frameAt(f, LEVEL.lines)
+	W.overlay = ov
+	local yLeft = Layout.markerY(T2.lines, 1, field[2], cell)
+	local yRight = Layout.markerY(T2.lines, 2, field[2], cell)
 	W.lineSegs, W.markers = {}, {}
 	for li = 1, #T2.lines do
-		W.lineSegs[li] = buildLine(ov, li)
+		W.lineSegs[li], W.realLines = buildLine(ov, li, yLeft, yRight)
 	end
-	buildMarkers(ov)
-
-	-- Banner over the reels.
-	local bn = CreateFrame("Frame", nil, rp)
-	bn:SetAllPoints(rp)
-	bn:SetFrameLevel(rp:GetFrameLevel() + 30)
-	W.banner = bn
-	W.bannerShade = bn:CreateTexture(nil, "BACKGROUND")
-	W.bannerShade:SetAllPoints(bn)
-	paint(W.bannerShade, c.overlay)
-	W.bannerTitle = text(bn, fonts.banner, c.gold)
-	W.bannerTitle:SetPoint("TOP", bn, "TOP", 0, -cell * 0.45)
-	W.bannerIcon = bn:CreateTexture(nil, "ARTWORK")
-	W.bannerIcon:SetSize(size.bannerIcon, size.bannerIcon)
-	W.bannerIcon:SetPoint("CENTER", bn, "CENTER", 0, -8)
-	W.bannerIcon:SetTexCoord(crop[1], crop[2], crop[3], crop[4])
-	W.bannerSub = text(bn, fonts.message, c.text)
-	W.bannerSub:SetPoint("BOTTOM", bn, "BOTTOM", 0, cell * 0.45)
-	W.bannerAmount = text(bn, fonts.banner, c.text)
-	W.bannerAmount:SetPoint("CENTER", bn, "CENTER", 0, -6)
-	hideBanner()
-
-	-- Gamble coin, over the reels.
-	local co = CreateFrame("Frame", nil, rp)
-	co:SetAllPoints(rp)
-	co:SetFrameLevel(rp:GetFrameLevel() + 40)
-	local shade = co:CreateTexture(nil, "BACKGROUND")
-	shade:SetAllPoints(co)
-	paint(shade, c.overlay)
-	W.coinSize = cell * 1.3
-	W.coin = co:CreateTexture(nil, "ARTWORK")
-	W.coin:SetSize(W.coinSize, W.coinSize)
-	W.coin:SetPoint("CENTER", co, "CENTER", 0, 14)
-	W.coin:SetTexCoord(crop[1], crop[2], crop[3], crop[4])
-	W.coinResult = text(co, fonts.win, c.accent)
-	W.coinResult:SetPoint("TOP", W.coin, "BOTTOM", 0, -10)
-	co:Hide()
-	W.coinOverlay = co
-
-	-- Particles for big wins (pooled, above everything in the panel).
-	local pf = CreateFrame("Frame", nil, rp)
-	pf:SetAllPoints(rp)
-	pf:SetFrameLevel(rp:GetFrameLevel() + 35)
-	W.particles = {}
-	for i = 1, size.particles do
-		local p = pf:CreateTexture(nil, "OVERLAY")
-		p:SetSize(size.particle, size.particle)
-		p:SetTexture(Theme.particle)
-		p:SetTexCoord(crop[1], crop[2], crop[3], crop[4])
-		p:Hide()
-		W.particles[i] = p
-	end
-	return reelsH
+	buildMarkers(ov, yLeft, yRight)
+	W.sparkles = Fx.sparkles(ov)
 end
 
--- Paytable overlay: built once for T2, numbers follow the stake (updatePaytable).
-local function buildPaytable(f, y, height)
-	local size, c, fonts = Theme.size, Theme.colors, Theme.fonts
-	local inner = size.width - 2 * size.pad
-	local pt = panel(f, c.bg, c.border)
-	pt:SetPoint("TOPLEFT", f, "TOPLEFT", size.pad, y)
-	pt:SetSize(inner, height)
-	pt:SetFrameLevel(f:GetFrameLevel() + 60)
-	W.paytable = pt
-	local crop = Theme.iconCrop
-	local rowH = size.paytableRow
-	local py = -10
+-- Guild status over the reels (state 10).
+local function buildStatus(f)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	local so = frameAt(f, LEVEL.status, Lay.reels)
+	W.statusOverlay = so
+	local shade = Skin.fill(so, "BACKGROUND", c.shadeStatus)
+	shade:SetAllPoints(so)
+	local panel = Skin.panel(so, f, Lay.statusPanel, "overlay")
+	panel:SetFrameLevel(so:GetFrameLevel() + 1)
+	local icon = panel:CreateTexture(nil, "ARTWORK")
+	icon:SetTexture(Theme.icons.officer)
+	Skin.rect(icon, f, Lay.statusIcon)
+	Skin.color(icon, c.gold)
+	W.statusTitle = Skin.textIn(panel, f, Lay.statusTitle, "title", fs.statusTitle, c.text, "CENTER")
+	W.statusSub = Skin.textIn(panel, f, Lay.statusSub, "label", fs.statusSub, c.muted, "CENTER")
+	so:Hide()
+end
 
-	local function line(str, color, h)
-		local fs = text(pt, fonts.small, color or c.muted)
-		fs:SetPoint("TOPLEFT", pt, "TOPLEFT", 12, py)
-		fs:SetWidth(inner - 24)
-		fs:SetJustifyH("LEFT")
-		fs:SetText(str or "")
-		py = py - (h or 18)
-		return fs
+-- The gamble card over the reels (state 04).
+local function buildCard(f)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	local co = frameAt(f, LEVEL.card, Lay.reels)
+	W.cardOverlay = co
+	local shade = Skin.fill(co, "BACKGROUND", c.shade)
+	shade:SetAllPoints(co)
+	local title = Skin.textIn(co, f, Lay.gambleTitle, "title", fs.gambleTitle, c.gold, "CENTER")
+	title:SetText(L.GAMBLE_TITLE)
+	W.gambleLine = Skin.textIn(co, f, Lay.gambleLine, "label", fs.gambleLine, c.stakeText, "CENTER")
+	local cr = Lay.card
+	W.card = co:CreateTexture(nil, "ARTWORK")
+	W.card:SetSize(cr[3], cr[4])
+	W.card:SetPoint("CENTER", f, "TOPLEFT", cr[1] + cr[3] / 2, -(cr[2] + cr[4] / 2))
+	W.red = Skin.button(co, "danger", Lay.red[3], Lay.red[4], function() SlotFrame.pick("red") end,
+		{ size = fs.card })
+	Skin.rect(W.red, f, Lay.red)
+	W.red.label:SetText(L.RED)
+	W.black = Skin.button(co, "secondary", Lay.black[3], Lay.black[4], function() SlotFrame.pick("black") end,
+		{ face = "number", size = fs.card, color = c.white })
+	Skin.rect(W.black, f, Lay.black)
+	W.black.label:SetText(L.BLACK)
+	W.lastCardsLabel = Skin.textIn(co, f, Lay.lastCardsLabel, "label", fs.cardsLabel, c.muted, "RIGHT")
+	W.lastCardsLabel:SetText(L.LAST_CARDS)
+	W.lastCards = {}
+	local lc = Lay.lastCards
+	for i = 1, Lay.lastCardsCount do
+		local t = co:CreateTexture(nil, "ARTWORK")
+		Skin.rect(t, f, { lc[1] + (i - 1) * Lay.lastCardsStep, lc[2], lc[3], lc[4] })
+		t:Hide()
+		W.lastCards[i] = t
 	end
+	co:Hide()
+end
 
-	W.ptUnsupported = text(pt, fonts.message, c.muted)
-	W.ptUnsupported:SetPoint("CENTER", pt, "CENTER", 0, 0)
-	W.ptUnsupported:SetText(L.UNSUPPORTED_TABLE)
+-- Banners and celebrations (states 05, 08): shades, glow, the tome, rays, the popping banner,
+-- the shuffling symbol, the big amount, coin rain over the whole window.
+local function buildStage(f)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	local st = frameAt(f, LEVEL.stage)
+	W.stage = st
+	W.stageShade = Skin.fill(st, "BACKGROUND", c.shadeIntro)
+	W.stageShade:SetAllPoints(f)
+	W.stageShade:Hide()
+	W.reelShade = Skin.fill(st, "BACKGROUND", c.shadeBig, 1)
+	Skin.rect(W.reelShade, f, Lay.reels)
+	W.reelShade:Hide()
+	local raysFrame = frameAt(st, LEVEL.stage + 1, Lay.reels)
+	W.rays = Fx.rays(raysFrame, Lay.reels[3], Lay.reels[4], "BORDER")
+	W.rays.tex:SetAlpha(Theme.alpha.rays)
+	W.introGlow = st:CreateTexture(nil, "BORDER", nil, 1)
+	W.introGlow:SetTexture(Theme.tex.glowSoft)
+	Skin.rect(W.introGlow, f, Lay.introGlow)
+	Skin.color(W.introGlow, c.free, Theme.alpha.introGlow)
+	Skin.add(W.introGlow)
+	W.introGlow:Hide()
+	W.book = st:CreateTexture(nil, "ARTWORK")
+	W.book:SetTexture(Theme.tex.bookSheet)
+	Skin.rect(W.book, f, Lay.bookClip)
+	W.book:Hide()
 
-	local content = CreateFrame("Frame", nil, pt)
-	content:SetAllPoints(pt)
-	W.ptContent = content
-	local heading = text(content, fonts.label, c.muted)
-	heading:SetPoint("TOPLEFT", content, "TOPLEFT", 12, py)
-	heading:SetText(string.upper(L.PAYS))
-	py = py - 20
+	W.bannerPop = Fx.popper(f, f, Lay.introBanner, f:GetFrameLevel() + LEVEL.banner)
+	W.banner = W.bannerPop.holder
+	local bf = W.bannerPop.frame
+	W.bannerArt = bf:CreateTexture(nil, "ARTWORK")
+	W.bannerArt:SetAllPoints(bf)
+	W.bannerTitle = Skin.text(bf, "title", fs.banner, c.white, "CENTER")
+	Skin.call(W.bannerTitle, "SetJustifyV", "MIDDLE")
+	W.shine = Fx.shine(bf, Lay.introBanner[3], Lay.introBanner[4])
+	W.shine.tex:SetAlpha(Theme.alpha.shine)
 
-	-- Symbols in two columns of five; B last.
-	W.ptRows = {}
-	local colW = (inner - 24) / 2
-	for i, sym in ipairs(T2.order) do
-		local col = i <= 5 and 0 or 1
-		local rowY = py - ((i - 1) % 5) * rowH
-		local x = 12 + col * colW
-		local icon = content:CreateTexture(nil, "ARTWORK")
-		icon:SetSize(rowH - 4, rowH - 4)
-		icon:SetPoint("TOPLEFT", content, "TOPLEFT", x, rowY - 2)
-		icon:SetTexture(Theme.symbols[sym])
-		icon:SetTexCoord(crop[1], crop[2], crop[3], crop[4])
-		local name = text(content, fonts.small, c.text)
-		name:SetPoint("TOPLEFT", content, "TOPLEFT", x + rowH + 2, rowY - 5)
-		name:SetText(symbolName(sym))
-		local cells = {}
-		for k = 2, 5 do
-			local fs = text(content, fonts.small, c.text)
-			fs:SetPoint("TOPRIGHT", content, "TOPLEFT", x + 100 + (k - 1) * 38, rowY - 5)
-			cells[k] = fs
-		end
-		W.ptRows[sym] = cells
-	end
-	py = py - 5 * rowH - 8
+	local top = frameAt(f, LEVEL.stageTop)
+	W.stageTop = top
+	W.bannerIcon = top:CreateTexture(nil, "ARTWORK")
+	Skin.rect(W.bannerIcon, f, Lay.introIcon)
+	W.introPanel = Skin.panel(top, f, Lay.introPanel, "overlay")
+	W.bannerSub = Skin.textIn(top, f, Lay.introPanel, "label", fs.introSub, c.text, "CENTER")
+	W.bannerAmount = Skin.textIn(top, f, Lay.bigAmount, "number", fs.big, c.white, "CENTER")
+	Skin.shadow(W.bannerAmount, 3, -3, c.bigShadow)
 
-	W.ptBook = text(content, fonts.small, c.gold)
-	W.ptBook:SetPoint("TOPLEFT", content, "TOPLEFT", 12, py)
-	W.ptBook:SetWidth(inner - 24)
-	W.ptBook:SetJustifyH("LEFT")
-	if W.ptBook.SetWordWrap then W.ptBook:SetWordWrap(true) end
-	py = py - 46
+	local rainFrame = frameAt(f, LEVEL.rain)
+	W.rain = Fx.rain(rainFrame, Lay.width, Lay.height)
+	hideBanner()
+end
 
-	local linesHead = text(content, fonts.label, c.muted)
-	linesHead:SetPoint("TOPLEFT", content, "TOPLEFT", 12, py)
-	linesHead:SetText(string.upper(L.LINES))
-	py = py - 18
-	local dot = size.lineDot
-	local diagW = REELS * (dot + 1)
-	local stepX = (inner - 24) / #T2.lines
-	for li, rows in ipairs(T2.lines) do
-		local x = 12 + (li - 1) * stepX + (stepX - diagW) / 2
-		local num = text(content, fonts.marker, c.lines[li])
-		num:SetPoint("TOP", content, "TOPLEFT", x + diagW / 2, py)
-		num:SetText(tostring(li))
-		for r = 1, REELS do
-			for row0 = 0, ROWS - 1 do
-				local d = content:CreateTexture(nil, "ARTWORK")
-				d:SetSize(dot, dot)
-				d:SetPoint("TOPLEFT", content, "TOPLEFT", x + (r - 1) * (dot + 1), py - 14 - row0 * (dot + 1))
-				paint(d, rows[r] == row0 and c.lines[li] or c.border)
-			end
-		end
-	end
-	py = py - 14 - ROWS * (dot + 1) - 10
+-- One display (balance, last win, stake; free games: counter, free win, expanding symbol).
+local function buildDisplay(parent, f, r)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	local p = Skin.panel(parent, f, r, "inset")
+	local d = { frame = p }
+	d.label = Skin.textIn(p, p, Lay.dLabel, "label", fs.label, c.muted, "LEFT")
+	d.value = Skin.textIn(p, p, Lay.dValue, "number", fs.display, c.number, "LEFT")
+	return d
+end
 
-	content.rtp = text(content, fonts.small, c.muted)
-	content.rtp:SetPoint("TOPLEFT", content, "TOPLEFT", 12, py)
-	content.gamble = text(content, fonts.small, c.muted)
-	content.gamble:SetPoint("TOPLEFT", content, "TOPLEFT", 12, py - 18)
-	W.ptRtp, W.ptGamble = content.rtp, content.gamble
-	pt:Hide()
+local function addSub(d)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	local sub = Skin.textIn(d.frame, d.frame, Lay.dSub, "numberMedium", fs.displaySub, c.muted, "RIGHT")
+	return sub
+end
+
+local function buildDisplays(f)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	local base = CreateFrame("Frame", nil, f)
+	base:SetAllPoints(f)
+	W.baseBar = base
+	local d1 = buildDisplay(base, f, Lay.displays[1])
+	W.balanceLabel, W.balance = d1.label, d1.value
+	W.balanceLabel:SetText(string.upper(L.BALANCE))
+	local coin = d1.frame:CreateTexture(nil, "ARTWORK")
+	coin:SetTexture(Theme.icons.coin)
+	Skin.rect(coin, d1.frame, Lay.dIcon)
+	Skin.color(coin, c.gold)
+	Skin.rect(W.balance, d1.frame, { Lay.dValue[1] + Lay.dIconShift, Lay.dValue[2], Lay.dValue[3] - Lay.dIconShift,
+		Lay.dValue[4] })
+	local d2 = buildDisplay(base, f, Lay.displays[2])
+	d2.label:SetText(string.upper(L.LAST_WIN))
+	W.winAmount = d2.value
+	local d3 = buildDisplay(base, f, Lay.displays[3])
+	d3.label:SetText(string.upper(L.TOTAL_STAKE))
+	W.stakeValue = d3.value
+	W.stakeSub = addSub(d3)
+
+	local free = CreateFrame("Frame", nil, f)
+	free:SetAllPoints(f)
+	W.freeBar = free
+	local e1 = buildDisplay(free, f, Lay.displays[1])
+	e1.label:SetText(string.upper(L.FREE_GAME))
+	W.freeCounter = e1.value
+	Skin.color(W.freeCounter, c.freeHint)
+	local e2 = buildDisplay(free, f, Lay.displays[2])
+	e2.label:SetText(string.upper(L.FREE_WIN))
+	W.freeTotal = e2.value
+	Skin.color(W.freeTotal, c.goldLight)
+	local e3 = buildDisplay(free, f, Lay.displays[3])
+	e3.label:SetText(string.upper(L.EXP_SYMBOL))
+	W.expName = e3.value
+	Skin.font(W.expName, "number", fs.expName)
+	W.badge = e3.frame:CreateTexture(nil, "ARTWORK")
+	Skin.rect(W.badge, e3.frame, Lay.dBadge)
+	free:Hide()
 end
 
 function SlotFrame.updatePaytable()
 	if not W.paytable then
 		return
 	end
-	local info = S.game:info()
-	if info.kind ~= "lines" then
-		W.ptContent:Hide()
-		W.ptUnsupported:Show()
-		return
-	end
-	W.ptUnsupported:Hide()
-	W.ptContent:Show()
-	for _, sym in ipairs(T2.order) do
-		local cells, pays = W.ptRows[sym], info.pays[sym]
-		for k = 2, 5 do
-			local p = pays and pays[k]
-			cells[k]:SetText(p and fmt(p * info.lineBet) or "-")
-		end
-	end
-	local sp, stake = info.scatter.pays, S.game.stake
-	W.ptBook:SetText(string.format(L.BOOK_RULE, fmt(sp[3] * stake), fmt(sp[4] * stake), fmt(sp[5] * stake)))
-	W.ptRtp:SetText(string.format(L.RTP, info.rtp * 100))
-	W.ptGamble:SetText(string.format(L.GAMBLE_RULE, info.maxGamble))
+	Paytable.update(W, S.game:info(), S.game.stake, fmt)
 end
 
--- Stake pills for the stakes of the current game; one set per stake list, reused.
+-- Stake buttons for the stakes of the current game; one set per stake list, reused.
 local function buildPills()
 	local stakes = S.game.stakes
 	local key = table.concat(stakes, ",")
 	local pills = W.pillSets[key]
 	if not pills then
-		local size, fonts = Theme.size, Theme.fonts
+		local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+		local r = Lay.stakes
+		local n = #stakes
+		local w, step = r[3], Lay.stakeStep
+		if n * step - (step - w) > Lay.stakeArea then
+			step = math.floor((Lay.stakeArea + (step - w)) / n)
+			w = step - (Lay.stakeStep - r[3])
+		end
 		pills = {}
 		for i, v in ipairs(stakes) do
-			local p = button(W.frame, size.pill, size.controls - 10, "pill", fonts.button, function() SlotFrame.setStake(v) end)
+			local p = Skin.button(W.stakeRow, "toggle", w, r[4], function() SlotFrame.setStake(v) end,
+				{ face = "number", size = fs.stake, color = c.stakeText, selectedColor = c.number })
 			p.stake = v
 			p.label:SetText(fmt(v))
-			p:SetPoint("LEFT", W.stakeLabel, "RIGHT", 10 + (i - 1) * (size.pill + 6), 0)
+			Skin.rect(p, W.frame, { r[1] + (i - 1) * step, r[2], w, r[4] })
 			pills[i] = p
 		end
 		W.pillSets[key] = pills
@@ -1621,10 +1785,22 @@ local function buildPills()
 	W.pills = pills
 end
 
+local function iconButton(parent, r, icon, onClick)
+	local b = Skin.button(parent, "icon", r[3], r[4], onClick,
+		{ icon = icon, iconOnly = true, iconSize = Theme.layout.iconSize })
+	Skin.rect(b, W.frame, r)
+	return b
+end
+
+local function secondary(parent, r, icon, text, onClick)
+	local b = Skin.button(parent, "secondary", r[3], r[4], onClick, { icon = icon })
+	Skin.rect(b, W.frame, r)
+	b.label:SetText(text)
+	return b
+end
+
 local function build()
-	local size, c, fonts = Theme.size, Theme.colors, Theme.fonts
-	local pad, gap, width = size.pad, size.gap, size.width
-	local inner = width - 2 * pad
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
 
 	local f = CreateFrame("Frame", FRAME_NAME, UIParent)
 	W.frame = f
@@ -1639,126 +1815,99 @@ local function build()
 		self:StopMovingOrSizing()
 		savePosition()
 	end)
+	f:SetSize(Lay.width, Lay.height)
 
-	-- Window: gold flash (big wins) behind a 1 px border and the background.
-	W.flash = f:CreateTexture(nil, "BACKGROUND")
-	W.flash:SetPoint("TOPLEFT", f, "TOPLEFT", -4, 4)
-	W.flash:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 4, -4)
-	paint(W.flash, c.gold)
-	W.flash:Hide()
-	local border = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-	border:SetAllPoints(f)
-	paint(border, c.border)
-	local bg = f:CreateTexture(nil, "BACKGROUND", nil, 2)
-	bg:SetPoint("TOPLEFT", f, "TOPLEFT", 1, -1)
-	bg:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -1, 1)
-	paint(bg, c.bg)
-
-	local y = -pad
-
-	-- Header
-	local title = text(f, fonts.title, c.text)
-	title:SetPoint("TOPLEFT", f, "TOPLEFT", pad, y - 5)
+	-- Wood, the window frame, the header.
+	W.bgTiles = Skin.tiles(f, Theme.tex.bg, Lay.width, Lay.height, "BACKGROUND")
+	W.windowFrame = Skin.nine(f, f, Theme.slices.window, "BORDER")
+	local title = Skin.textIn(f, f, Lay.title, "title", fs.title, c.gold, "LEFT")
+	Skin.shadow(title, 2, -2, c.titleShadow)
 	title:SetText(L.TITLE)
-	W.mode = button(f, 64, 20, "pill", fonts.small, function() SlotFrame.toggleMode() end)
-	W.mode:SetPoint("LEFT", title, "RIGHT", 8, 0)
-	W.close = button(f, size.header, size.header, "ghost", fonts.title, function() f:Hide() end)
-	W.close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -pad + 8, y)
-	W.close.label:SetText("X")
-	W.sound = button(f, 90, size.header, "ghost", fonts.small, function()
+	W.title = title
+	local toggleOpts = { size = fs.button }
+	W.soloBtn = Skin.button(f, "toggle", Lay.solo[3], Lay.solo[4], function() SlotFrame.setMode("solo") end, toggleOpts)
+	Skin.rect(W.soloBtn, f, Lay.solo)
+	W.soloBtn.label:SetText(L.SOLO)
+	W.guildBtn = Skin.button(f, "toggle", Lay.guild[3], Lay.guild[4], function() SlotFrame.setMode("guild") end,
+		toggleOpts)
+	Skin.rect(W.guildBtn, f, Lay.guild)
+	W.guildBtn.label:SetText(L.GUILD)
+	W.sound = iconButton(f, Lay.sound, Theme.icons.soundOn, function()
 		db.sound = not db.sound
 		refresh()
 	end)
-	W.sound:SetPoint("RIGHT", W.close, "LEFT", -4, 0)
-	W.officer = button(f, 64, size.header, "ghost", fonts.small, function()
-		if ns.OfficerFrame then ns.OfficerFrame.toggle() end
-	end)
-	W.officer:SetPoint("RIGHT", W.sound, "LEFT", -4, 0)
-	W.officer.label:SetText(L.OFFICER)
-	y = y - size.header - gap
+	W.close = iconButton(f, Lay.close, Theme.icons.close, function() f:Hide() end)
+	local divAnchor = CreateFrame("Frame", nil, f)
+	Skin.rect(divAnchor, f, Lay.divider)
+	Skin.nine(f, divAnchor, Theme.slices.divider, "ARTWORK")
 
-	-- Top bar: balance (and refill), free-game counter with the expanding symbol, win.
-	local topY = y
-	local top = panel(f, c.panel, c.border)
-	top:SetPoint("TOPLEFT", f, "TOPLEFT", pad, y)
-	top:SetSize(inner, size.topBar)
-	W.balanceLabel = text(top, fonts.label, c.muted)
-	W.balanceLabel:SetPoint("TOPLEFT", top, "TOPLEFT", 12, -6)
-	W.balanceLabel:SetText(string.upper(L.BALANCE))
-	W.balance = text(top, fonts.number, c.text)
-	W.balance:SetPoint("BOTTOMLEFT", top, "BOTTOMLEFT", 12, 4)
-	W.refill = button(top, 70, 24, "panel", fonts.small, SlotFrame.refill)
-	W.refill:SetPoint("LEFT", top, "LEFT", 150, 0)
-	W.refill.label:SetText(L.REFILL)
-	local winLabel = text(top, fonts.label, c.muted)
-	winLabel:SetPoint("TOPRIGHT", top, "TOPRIGHT", -12, -6)
-	winLabel:SetText(string.upper(L.WIN))
-	W.winAmount = text(top, fonts.number, c.accent)
-	W.winAmount:SetPoint("BOTTOMRIGHT", top, "BOTTOMRIGHT", -12, 4)
-	W.winAmount:SetText("")
-	local fb = CreateFrame("Frame", nil, top)
-	fb:SetPoint("LEFT", top, "LEFT", 236, 0)
-	fb:SetSize(180, size.topBar)
-	W.freeBar = fb
-	W.badge = fb:CreateTexture(nil, "ARTWORK")
-	W.badge:SetSize(size.badge, size.badge)
-	W.badge:SetPoint("LEFT", fb, "LEFT", 0, 0)
-	local crop = Theme.iconCrop
-	W.badge:SetTexCoord(crop[1], crop[2], crop[3], crop[4])
-	W.freeCounter = text(fb, fonts.message, c.gold)
-	W.freeCounter:SetPoint("TOPLEFT", W.badge, "TOPRIGHT", 8, 0)
-	W.freeTotal = text(fb, fonts.small, c.text)
-	W.freeTotal:SetPoint("BOTTOMLEFT", W.badge, "BOTTOMRIGHT", 8, 0)
-	fb:Hide()
-	y = y - size.topBar - gap
+	buildDisplays(f)
+	buildReels(f)
 
-	-- Reels
-	local reelsH = buildReels(f, y)
-	y = y - reelsH - gap / 2
-
-	-- Message line (line wins, short messages)
-	W.win = text(f, fonts.message, c.accent)
-	W.win:SetPoint("TOP", f, "TOP", 0, y - 4)
-	W.win:SetWidth(inner)
+	-- Message line
+	W.win = Skin.textIn(f, f, Lay.message, "label", fs.message, c.muted, "CENTER")
 	W.win:SetText("")
-	y = y - size.message - gap / 2
 
-	-- Gamble offer: TAKE / GAMBLE (space reserved so nothing jumps)
-	local half = (inner - gap) / 2
-	W.offerRow = CreateFrame("Frame", nil, f)
-	W.offerRow:SetPoint("TOPLEFT", f, "TOPLEFT", pad, y)
-	W.offerRow:SetSize(inner, size.gambleRow)
-	W.take = button(W.offerRow, half, size.gambleRow, "panel", fonts.button, SlotFrame.take)
-	W.take:SetPoint("LEFT", W.offerRow, "LEFT", 0, 0)
-	W.gamble = button(W.offerRow, half, size.gambleRow, "outline", fonts.button, SlotFrame.gamble)
-	W.gamble:SetPoint("RIGHT", W.offerRow, "RIGHT", 0, 0)
-	W.offerRow:Hide()
-	y = y - size.gambleRow - gap
-
-	-- Controls: stake pills left, SPIN right
-	W.stakeLabel = text(f, fonts.label, c.muted)
-	W.stakeLabel:SetPoint("LEFT", f, "TOPLEFT", pad, y - size.controls / 2)
-	W.stakeLabel:SetText(string.upper(L.STAKE))
+	-- Stakes, or take / gamble in their place.
+	W.stakeRow = CreateFrame("Frame", nil, f)
+	W.stakeRow:SetAllPoints(f)
+	W.stakeLabel = Skin.textIn(W.stakeRow, f, Lay.stakeLabel, "label", fs.label, c.muted, "LEFT")
+	W.stakeLabel:SetText(string.upper(string.format(L.STAKE_LINES, #T2.lines)))
 	W.pillSets = {}
 	buildPills()
-	W.spin = button(f, size.spinWidth, size.controls, "accent", fonts.spin, SlotFrame.spin)
-	W.spin:SetPoint("TOPRIGHT", f, "TOPRIGHT", -pad, y)
-	y = y - size.controls - gap / 2
+	W.offerRow = CreateFrame("Frame", nil, f)
+	W.offerRow:SetAllPoints(f)
+	W.take = Skin.button(W.offerRow, "secondary", Lay.take[3], Lay.take[4], SlotFrame.take,
+		{ face = "number", size = fs.offer, color = c.bannerGold })
+	Skin.rect(W.take, f, Lay.take)
+	W.gamble = Skin.button(W.offerRow, "danger", Lay.gamble[3], Lay.gamble[4], SlotFrame.gamble, { size = fs.offer })
+	Skin.rect(W.gamble, f, Lay.gamble)
+	W.gamble.label:SetText(L.GAMBLE)
+	W.offerRow:Hide()
 
-	-- Paytable toggle; the paytable covers the top bar and the reels.
-	W.payToggle = button(f, 120, size.smallRow, "ghost", fonts.small, function()
+	-- The gold button and its breathing glow.
+	W.spinGlow = f:CreateTexture(nil, "ARTWORK")
+	W.spinGlow:SetTexture(Theme.tex.glowSoft)
+	local g = Lay.spinGlowOut
+	Skin.rect(W.spinGlow, f, { Lay.spin[1] - g, Lay.spin[2] - g, Lay.spin[3] + 2 * g, Lay.spin[4] + 2 * g })
+	Skin.color(W.spinGlow, c.gold)
+	Skin.add(W.spinGlow)
+	W.spinGlow:Hide()
+	W.spin = Skin.button(f, "primary", Lay.spin[3], Lay.spin[4], SlotFrame.spin)
+	Skin.rect(W.spin, f, Lay.spin)
+
+	-- Secondary row.
+	W.payToggle = secondary(f, Lay.paytable, Theme.icons.paytable, L.PAYTABLE, function()
 		db.paytable = not db.paytable
 		SlotFrame.layout()
 	end)
-	W.payToggle:SetPoint("TOPLEFT", f, "TOPLEFT", pad - 8, y)
-	y = y - size.smallRow
-	buildPaytable(f, topY, size.topBar + gap + reelsH)
+	W.officer = secondary(f, Lay.officer, Theme.icons.officer, L.OFFICER, function()
+		if ns.OfficerFrame then ns.OfficerFrame.toggle() end
+	end)
+	W.refill = secondary(f, Lay.refill, Theme.icons.coin, L.REFILL, SlotFrame.refill)
+	local fb = CreateFrame("Frame", nil, f)
+	Skin.rect(fb, f, Lay.footBalance)
+	W.footBalance = fb
+	W.footBalanceValue = Skin.text(fb, "number", fs.stake - 4, c.number, "RIGHT")
+	W.footBalanceValue:SetPoint("RIGHT", fb, "RIGHT", 0, 0)
+	local fbl = Skin.text(fb, "label", fs.small, c.muted, "RIGHT")
+	fbl:SetPoint("RIGHT", W.footBalanceValue, "LEFT", -6, 0)
+	fbl:SetText(string.upper(L.BALANCE))
+	W.footBalanceLabel = fbl
+	fb:Hide()
 
 	-- Footer
-	W.footer = text(f, fonts.small, c.muted)
-	W.footer:SetPoint("BOTTOM", f, "BOTTOM", 0, pad / 2 + 2)
-	W.footer:SetWidth(inner)
+	W.footer = Skin.textIn(f, f, Lay.footer, "label", fs.footer, c.footer, "CENTER")
 	W.footer:SetText(L.FOOTER)
+
+	buildStatus(f)
+	buildCard(f)
+	buildStage(f)
+	local ptf = frameAt(f, LEVEL.paytable)
+	Paytable.build(ptf, W, T2, symbolName, function()
+		db.paytable = false
+		SlotFrame.layout()
+	end)
 
 	f:SetScript("OnUpdate", onUpdate)
 	f:SetScript("OnKeyDown", onKeyDown)
@@ -1767,8 +1916,10 @@ local function build()
 		playSound("click")
 	end)
 	f:SetScript("OnHide", function()
-		-- Finish everything at once so a closed window never hides a pending result.
+		-- Finish everything at once so a closed window never hides a pending result, and stop
+		-- every effect.
 		settle()
+		stopFx()
 		updateKeyboard()
 	end)
 
@@ -1777,9 +1928,9 @@ local function build()
 	end
 
 	f:Hide() -- new frames start shown; toggle() decides
-	f:SetSize(width, -y + size.footer + pad / 2)
 	applyPosition()
 	setBalanceShown(S.game.balance)
+	setTotalShown(nil)
 	SlotFrame.layout()
 	refresh()
 end
@@ -1788,11 +1939,10 @@ function SlotFrame.layout()
 	if db.paytable then
 		SlotFrame.updatePaytable()
 		W.paytable:Show()
-		W.payToggle.label:SetText(L.PAYTABLE .. " -")
 	else
 		W.paytable:Hide()
-		W.payToggle.label:SetText(L.PAYTABLE .. " +")
 	end
+	W.payToggle:setSelected(db.paytable and true or false)
 end
 
 ---------------------------------------------------------------------------------------------
@@ -1802,12 +1952,13 @@ local function currentSession()
 	return ns.Main and ns.Main.session() or nil
 end
 
--- Shows the current game: stake pills, paytable, labels, balance, idle line.
+-- Shows the current game: stake buttons, paytable, labels, balance, idle line.
 local function applyGame()
 	buildPills()
 	SlotFrame.updatePaytable()
 	SlotFrame.layout()
 	W.balanceLabel:SetText(string.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
+	W.footBalanceLabel:SetText(string.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
 	S.counts = {}
 	setBalanceShown(S.game.balance)
 	setTotalShown(nil)
@@ -1853,7 +2004,8 @@ function SlotFrame.setMode(mode)
 	if mode == "guild" and not currentSession() then
 		if W.frame then
 			useMode("solo")
-			message(L.NO_GUILD, Theme.colors.lose)
+			message(L.NO_GUILD, Theme.tones.lose)
+			refresh()
 		else
 			chat(L.NO_GUILD)
 		end
@@ -1863,6 +2015,7 @@ function SlotFrame.setMode(mode)
 	if W.frame then
 		useMode(mode)
 		playSound("click")
+		refresh()
 	end
 	return true
 end
@@ -1876,18 +2029,19 @@ local function onMainEvent(name, data)
 	if not W.frame then
 		return
 	end
-	local busy = S.phase == "round" or S.phase == "flip"
+	local busy = S.phase ~= "idle"
 	if name == "session" then
 		local was = S.mode
 		useMode(wantedMode())
 		if was == "guild" and S.mode ~= "guild" then
-			message(L.NO_GUILD, Theme.colors.lose)
+			message(L.NO_GUILD, Theme.tones.lose)
 		end
+		refresh()
 	elseif name == "purchase" and S.mode == "guild" and type(data) == "table" and data.role == "player" then
 		if data.status == "done" then
 			S.credit = data
 		elseif (data.status == "failed" or data.status == "timeout") and not busy then
-			message(string.format(L.BUY_FAILED, tostring(data.code or data.status)), Theme.colors.lose)
+			message(string.format(L.BUY_FAILED, tostring(data.code or data.status)), Theme.tones.lose)
 		end
 	elseif name == "account" and S.mode == "guild" then
 		local credit = S.credit
@@ -1897,10 +2051,10 @@ local function onMainEvent(name, data)
 		end
 		applyGame()
 		if credit then
-			message(string.format(L.CREDIT, fmt(credit.tokens or 0), tostring(credit.officer)), Theme.colors.accent)
+			message(string.format(L.CREDIT, fmt(credit.tokens or 0), tostring(credit.officer)), Theme.tones.win)
 		end
 	elseif name == "roster" then
-		if not busy and S.phase == "idle" and not S.offer and not S.messageUntil then
+		if not busy and not S.offer and not S.messageUntil then
 			idleText()
 		end
 		refresh()
@@ -1966,6 +2120,11 @@ local function slash(msg)
 		db.space = not db.space
 		chat(db.space and L.SPACE_ON or L.SPACE_OFF)
 		updateKeyboard()
+	elseif msg == "fx" then
+		initDB()
+		db.fx = not db.fx
+		chat(db.fx and L.FX_ON or L.FX_OFF)
+		if W.frame and not db.fx then stopFx() end
 	elseif msg == "guild" or msg == "solo" then
 		ensure()
 		SlotFrame.setMode(msg)

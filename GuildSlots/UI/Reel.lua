@@ -18,7 +18,7 @@ local ICONS = 5 -- icons placed around the position (rows -2..2)
 
 -- parent: frame; strip: list of symbol ids (1-based, stop i is strip[i + 1]).
 function Reel.new(parent, strip)
-	local size, colors = Theme.size, Theme.colors
+	local size = Theme.size
 	local cell = size.cell
 	local f = CreateFrame("Frame", nil, parent)
 	f:SetSize(cell, cell * 3)
@@ -26,13 +26,16 @@ function Reel.new(parent, strip)
 		pcall(f.SetClipsChildren, f, true)
 	end
 
-	local bg = f:CreateTexture(nil, "BACKGROUND")
-	bg:SetAllPoints(f)
-	bg:SetColorTexture(colors.cell[1], colors.cell[2], colors.cell[3], 1)
+	-- The reel background is one texture behind all reels (slot window); each reel only adds
+	-- its shade (darker at the top and bottom) over the symbols.
+	local shade = f:CreateTexture(nil, "OVERLAY")
+	shade:SetAllPoints(f)
+	shade:SetTexture(Theme.tex.reelShade)
+	shade:SetAlpha(Theme.reelShadeAlpha or 0.8)
 
 	local self = setmetatable({
 		frame = f,
-		bg = bg,
+		shade = shade,
 		strip = strip,
 		n = #strip,
 		icons = {},
@@ -62,6 +65,9 @@ function Reel:setPosition(x)
 		local tex = self.icons[i]
 		local top, bottom = Anim.clip(row / iconH, HALF / iconH)
 		if top then
+			-- float noise must not push the coordinates past the art's edge
+			if top < 0 then top = 0 end
+			if bottom > 1 then bottom = 1 end
 			tex:SetTexture(symbols[strip[index + 1]])
 			tex:SetTexCoord(u0, u1, v0 + (v1 - v0) * top, v0 + (v1 - v0) * bottom)
 			-- Rows from the window top (row -HALF) to the visible top edge of the icon.
@@ -87,11 +93,6 @@ function Reel:setStrip(strip, stop)
 	self.strip = strip
 	self.n = #strip
 	self:setStop((stop or 0) % self.n)
-end
-
--- Background colour of the reel (free games use another tint).
-function Reel:setTint(c)
-	self.bg:SetColorTexture(c[1], c[2], c[3], 1)
 end
 
 -- Starts a spin to `target` at window time `t0` (may lie a little in the future); stopAt is

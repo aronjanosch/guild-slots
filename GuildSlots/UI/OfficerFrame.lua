@@ -1,20 +1,18 @@
 local _, ns = ...
 
--- The officer window (docs/guild-spec.md section 1): settings status, a form that builds the
--- settings line for the guild info, granting tokens, recent purchases and the self test switch.
--- Officers see everything; other members see the settings status only.
+-- The officer window (docs/guild-spec.md section 1): granting tokens to addon users heard
+-- online, recent purchases, the self test switch, the settings status and a form that builds
+-- the settings line for the guild info. Officers see everything; other members see the
+-- settings status only. Look: state 11 of the tavern design (UI/Theme.lua, Theme.officer).
 
-local L, Theme, Settings, Roster = ns.L, ns.Theme, ns.Settings, ns.Roster
+local L, Theme, Settings, Roster, Skin = ns.L, ns.Theme, ns.Settings, ns.Roster, ns.Skin
 local ui = ns.SlotFrame.ui
-local fmt, rgb, paint, font, text, panel, button = ui.fmt, ui.rgb, ui.paint, ui.font, ui.text, ui.panel, ui.button
+local fmt = ui.fmt
 
 local OfficerFrame = {}
 ns.OfficerFrame = OfficerFrame
 
 local FRAME_NAME = "GuildSlotsOfficerFrame"
-local WIDTH = 440
-local ONLINE_ROWS = 6
-local PURCHASE_ROWS = 6
 local REFRESH_EVERY = 5 -- seconds, while shown (the online list ages out)
 
 local FIELDS = { "L", "W", "R", "E", "G", "C", "T", "X" }
@@ -22,6 +20,12 @@ local FIELDS = { "L", "W", "R", "E", "G", "C", "T", "X" }
 local CODE_FIELD = {
 	bad_level = "L", bad_witnesses = "W", bad_rank = "R", bad_stakes = "E", bad_gamble = "G",
 	bad_cap = "C", bad_table = "T", bad_rate = "X",
+}
+
+-- Purchase status -> badge colour key (Theme.colors) and text colour key.
+local BADGE = {
+	done = { "statusOk", "white" }, wait_nonce = { "statusOpen", "dark" }, wait_seed = { "statusOpen", "dark" },
+	failed = { "statusBad", "white" }, timeout = { "statusBad", "white" },
 }
 
 local W = { fields = {}, onlineRows = {}, purchaseRows = {} }
@@ -47,38 +51,59 @@ end
 ---------------------------------------------------------------------------------------------
 -- Widgets
 
-local function editBox(parent, w, h)
-	local c = Theme.colors
-	local holder = panel(parent, c.bg, c.border)
-	holder:SetSize(w, h)
-	local e = CreateFrame("EditBox", nil, holder)
-	e:SetPoint("TOPLEFT", holder, "TOPLEFT", 6, 0)
-	e:SetPoint("BOTTOMRIGHT", holder, "BOTTOMRIGHT", -6, 0)
-	e:SetAutoFocus(false)
-	font(e, Theme.fonts.small + 1)
-	e:SetTextColor(rgb(c.text))
-	e:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-	e:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-	e.holder = holder
-	return e
-end
-
-local function heading(parent, str)
-	local fs = text(parent, Theme.fonts.label, Theme.colors.muted)
+local function heading(parent, r, str)
+	local fs = Skin.textIn(parent, parent, r, "label", Theme.fontSize.section, Theme.colors.goldLight, "LEFT")
 	fs:SetText(string.upper(str))
 	return fs
 end
 
-local function wrapped(parent, width, color)
-	local fs = text(parent, Theme.fonts.small, color or Theme.colors.muted)
-	fs:SetWidth(width)
-	fs:SetJustifyH("LEFT")
+local function wrapped(parent, r, color, size)
+	local fs = Skin.text(parent, "label", size or Theme.fontSize.small, color or Theme.colors.muted, "LEFT")
+	Skin.rect(fs, parent, r)
+	Skin.call(fs, "SetJustifyV", "TOP")
+	Skin.call(fs, "SetWordWrap", true)
 	return fs
 end
 
 local function note(fs, str, color)
 	fs:SetText(str or "")
-	fs:SetTextColor(rgb(color or Theme.colors.muted))
+	Skin.color(fs, color or Theme.colors.muted)
+end
+
+-- A list row: name, highlighted with a band and two gold lines when selected.
+local function listRow(parent, rel, r, onClick)
+	local c = Theme.colors
+	local b = CreateFrame("Button", nil, parent)
+	Skin.rect(b, rel, r)
+	b.band = Skin.fill(b, "BACKGROUND", c.rowSelected)
+	b.band:SetAllPoints(b)
+	b.lineTop = Skin.fill(b, "BORDER", c.goldLight)
+	b.lineTop:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
+	b.lineTop:SetPoint("TOPRIGHT", b, "TOPRIGHT", 0, 0)
+	b.lineTop:SetHeight(1)
+	b.lineBottom = Skin.fill(b, "BORDER", c.goldLight)
+	b.lineBottom:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, 0)
+	b.lineBottom:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 0, 0)
+	b.lineBottom:SetHeight(1)
+	b.label = Skin.text(b, "label", Theme.fontSize.listName, c.text, "LEFT")
+	b.label:SetPoint("LEFT", b, "LEFT", Theme.officer.grant.rowText, 0)
+	b.selected = false
+	local function paint()
+		b.band:SetShown(b.selected or b.hover)
+		b.band:SetAlpha(b.selected and 1 or 0.5)
+		b.lineTop:SetShown(b.selected)
+		b.lineBottom:SetShown(b.selected)
+		Skin.color(b.label, b.selected and c.number or c.text)
+	end
+	b.setSelected = function(_, on)
+		b.selected = on and true or false
+		paint()
+	end
+	b:SetScript("OnEnter", function() b.hover = true; paint() end)
+	b:SetScript("OnLeave", function() b.hover = false; paint() end)
+	b:SetScript("OnClick", onClick)
+	paint()
+	return b
 end
 
 ---------------------------------------------------------------------------------------------
@@ -107,15 +132,16 @@ local function formLine()
 end
 
 local function updateForm()
+	local c = Theme.colors
 	local line, s, code = formLine()
 	if not line then
 		local field = s
 		W.currentLine = ""
 		W.line:SetText("")
 		if field then
-			note(W.formNote, string.format(L.FIELD_BAD, L["F_" .. field]), Theme.colors.lose)
+			note(W.formNote, string.format(L.FIELD_BAD, L["F_" .. field]), c.lose)
 		else
-			note(W.formNote, string.format(L.LINE_BAD, tostring(code)), Theme.colors.lose)
+			note(W.formNote, string.format(L.LINE_BAD, tostring(code)), c.lose)
 		end
 		return
 	end
@@ -124,7 +150,7 @@ local function updateForm()
 	if s.L ~= 0 then
 		note(W.formNote, L.NOTE_LEVEL)
 	elseif s.E[#s.E] > 10 * s.E[1] then
-		note(W.formNote, L.WARN_SPREAD, Theme.colors.lose)
+		note(W.formNote, L.WARN_SPREAD, c.lose)
 	else
 		note(W.formNote, "")
 	end
@@ -169,46 +195,53 @@ local function statusText()
 	return string.format(L.SET_OK, (canonical:gsub("^GSLOTS1;", ""):gsub(";", "  ")))
 end
 
-local function purchaseText(p)
-	local status = p.status == "failed" and string.format(L.P_failed, tostring(p.code or "?"))
-		or lookup("P_", p.status)
-	local who = p.player
+local function who(p)
+	local name = tostring(p.player)
 	if p.role == "player" then
-		who = who .. " <- " .. tostring(p.officer)
+		name = name .. " <- " .. tostring(p.officer)
 	end
-	return string.format("%s  %s  %s", tostring(who), fmt(tonumber(p.tokens) or 0), status)
+	return name
+end
+
+local function statusLabel(p)
+	if p.status == "failed" then
+		return string.format(L.P_failed, tostring(p.code or "?"))
+	end
+	return lookup("P_", p.status)
 end
 
 local function layout()
-	local size = Theme.size
-	local pad, gap = size.pad, size.gap
-	local y = W.topY
+	local O = Theme.officer
+	local y = O.top
 	local function place(frame, h)
 		frame:ClearAllPoints()
-		frame:SetPoint("TOPLEFT", W.frame, "TOPLEFT", pad, y)
-		y = y - h - gap
-	end
-	place(W.status, 28)
-	if W.nonOfficer:IsShown() then
-		place(W.nonOfficer, 16)
-	end
-	if W.formPart:IsShown() then
-		place(W.formPart, W.formPart:GetHeight())
+		frame:SetPoint("TOPLEFT", W.frame, "TOPLEFT", 0, -y)
+		y = y + h + O.sectionGap
 	end
 	if W.grantPart:IsShown() then
-		place(W.grantPart, W.grantPart:GetHeight())
+		place(W.grantPart, O.grant.height)
 	end
-	W.frame:SetHeight(-y + pad / 2)
+	place(W.statusPart, O.status.height)
+	if W.nonOfficer:IsShown() then
+		place(W.nonOfficer, O.nonOfficer[4])
+	end
+	if W.formPart:IsShown() then
+		place(W.formPart, O.form.height)
+	end
+	local h = math.min(O.maxHeight, y - O.sectionGap + O.pad)
+	W.frame:SetHeight(h)
+	W.bgTiles:setHeight(h)
 end
 
 function OfficerFrame.refresh()
 	if not W.frame then
 		return
 	end
+	local c = Theme.colors
 	local s = session()
 	local officer = s ~= nil and main().isOfficer()
 	local valid = Roster.settings() ~= nil
-	note(W.status, statusText(), (s and valid) and Theme.colors.text or Theme.colors.lose)
+	note(W.status, statusText(), (s and valid) and c.text or c.lose)
 	W.nonOfficer:SetShown(s ~= nil and not officer)
 	-- Without a valid line nobody is an officer yet, so the form is how the first line is made.
 	W.formPart:SetShown(s ~= nil and (officer or not valid))
@@ -229,13 +262,19 @@ function OfficerFrame.refresh()
 		end
 		W.onlineNone:SetShown(#online == 0)
 		local list = s:purchases()
-		for i, fs in ipairs(W.purchaseRows) do
+		for i, row in ipairs(W.purchaseRows) do
 			local p = list[i]
 			if p then
-				fs:SetText(purchaseText(p))
-				fs:Show()
+				row.name:SetText(who(p))
+				row.amount:SetText(fmt(tonumber(p.tokens) or 0))
+				local b = BADGE[p.status] or BADGE.failed
+				local bc = c[b[1]]
+				row.badge:SetVertexColor(bc[1], bc[2], bc[3], 1)
+				row.status:SetText(statusLabel(p))
+				Skin.color(row.status, c[b[2]])
+				row:Show()
 			else
-				fs:Hide()
+				row:Hide()
 			end
 		end
 		W.noPurchases:SetShown(#list == 0)
@@ -248,9 +287,10 @@ end
 -- Actions
 
 local function grant()
+	local c = Theme.colors
 	local s = session()
 	if not s then
-		note(W.grantNote, L.NOT_IN_GUILD, Theme.colors.lose)
+		note(W.grantNote, L.NOT_IN_GUILD, c.lose)
 		return
 	end
 	local player = trim(W.player:GetText())
@@ -258,9 +298,9 @@ local function grant()
 	local tokens = raw:match("^%d+$") and tonumber(raw) or nil
 	local id, code = s:grant(player, tokens)
 	if id then
-		note(W.grantNote, string.format(L.GRANT_SENT, player), Theme.colors.accent)
+		note(W.grantNote, string.format(L.GRANT_SENT, player), c.goldLight)
 	else
-		note(W.grantNote, lookup("ERR_", code), Theme.colors.lose)
+		note(W.grantNote, lookup("ERR_", code), c.lose)
 	end
 	OfficerFrame.refresh()
 end
@@ -268,23 +308,112 @@ end
 ---------------------------------------------------------------------------------------------
 -- Building
 
-local function buildForm(parent, inner)
-	local fonts, c = Theme.fonts, Theme.colors
+local function section(parent, height)
 	local part = CreateFrame("Frame", nil, parent)
-	local y = 0
-	local h1 = heading(part, L.SETTINGS)
-	h1:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	y = y - 18
-	local cols, colGap = 4, 8
-	local colW = (inner - (cols - 1) * colGap) / cols
+	part:SetSize(Theme.officer.width, height)
+	return part
+end
+
+local function buildGrant(parent)
+	local G, c, fs = Theme.officer.grant, Theme.colors, Theme.fontSize
+	local part = section(parent, G.height)
+	heading(part, G.heading, L.GRANT_TITLE)
+
+	-- Addon users heard online: click selects one.
+	local list = Skin.panel(part, part, G.list, "inset")
+	local head = Skin.textIn(list, part, G.listHead, "label", fs.listHead, c.muted, "LEFT")
+	head:SetText(L.ONLINE_HEAD)
+	for i = 1, G.rows do
+		local col, row = (i - 1) % G.cols, math.floor((i - 1) / G.cols)
+		local b
+		b = listRow(list, part, { G.row[1] + col * G.rowStep[1], G.row[2] + row * G.rowStep[2], G.row[3], G.row[4] },
+			function()
+				W.player:SetText(b.name or "")
+				OfficerFrame.refresh()
+			end)
+		b:Hide()
+		W.onlineRows[i] = b
+	end
+	W.onlineNone = Skin.textIn(list, part, G.none, "label", fs.small, c.muted, "LEFT")
+	W.onlineNone:SetText(L.ONLINE_NONE)
+
+	-- Player, tokens, Grant.
+	local pl = Skin.textIn(part, part, G.playerLabel, "label", fs.label, c.muted, "LEFT")
+	pl:SetText(string.upper(L.PLAYER))
+	local tl = Skin.textIn(part, part, G.tokensLabel, "label", fs.label, c.muted, "LEFT")
+	tl:SetText(string.upper(L.TOKENS))
+	W.player = Skin.editBox(part, G.player[3], G.player[4], "label", fs.listName)
+	Skin.rect(W.player.holder, part, G.player)
+	W.player:SetScript("OnTextChanged", function(_, userInput)
+		if userInput then OfficerFrame.refresh() end
+	end)
+	W.tokens = Skin.editBox(part, G.tokens[3], G.tokens[4], "number", fs.field)
+	Skin.rect(W.tokens.holder, part, G.tokens)
+	W.tokens:SetScript("OnEnterPressed", function(self)
+		self:ClearFocus()
+		grant()
+	end)
+	W.grant = Skin.button(part, "primary", G.button[3], G.button[4], grant, { size = fs.gambleNumber })
+	Skin.rect(W.grant, part, G.button)
+	W.grant.label:SetText(L.GRANT)
+	W.grantNote = wrapped(part, G.note, c.footer)
+
+	-- Self test.
+	W.selfTest = Skin.button(part, "toggle", G.selfTest[3], G.selfTest[4], function()
+		local on = not (GuildSlotsDB and GuildSlotsDB.selfTest == true)
+		main().setSelfTest(on)
+		OfficerFrame.refresh()
+	end, { size = fs.small })
+	Skin.rect(W.selfTest, part, G.selfTest)
+	W.selfTest.label:SetText(L.SELF_TEST)
+	local hint = wrapped(part, G.selfHint, c.muted, fs.label)
+	hint:SetText(L.SELF_TEST_HINT)
+
+	-- Recent purchases with status badges.
+	heading(part, G.purchasesHead, L.PURCHASES)
+	local pp = Skin.panel(part, part, G.purchases, "inset")
+	W.noPurchases = Skin.textIn(pp, part, { G.pName[1], G.pRow, 380, G.pRowH }, "label", fs.small, c.muted, "LEFT")
+	W.noPurchases:SetText(L.NO_PURCHASES)
+	for i = 1, G.pRows do
+		local y = G.pRow + (i - 1) * G.pRowH
+		local row = CreateFrame("Frame", nil, pp)
+		Skin.rect(row, part, { G.purchases[1], y, G.purchases[3], G.pRowH })
+		local ox = G.purchases[1]
+		row.name = Skin.textIn(row, row, { G.pName[1] - ox, 0, G.pName[2], G.pRowH }, "label", fs.listName, c.text,
+			"LEFT")
+		row.amount = Skin.textIn(row, row, { G.pAmount[1] - ox, 0, G.pAmount[2], G.pRowH }, "number", fs.listNumber,
+			c.number, "RIGHT")
+		local br = { G.pBadge[1] - ox, G.pBadge[2], G.pBadge[3], G.pBadge[4] }
+		local anchor = CreateFrame("Frame", nil, row)
+		Skin.rect(anchor, row, br)
+		row.badge = Skin.nine(row, anchor, Theme.slices.badge, "ARTWORK")
+		row.status = Skin.textIn(row, row, br, "number", fs.badge, c.white, "CENTER")
+		Skin.shadow(row.status, 0, 0)
+		row:Hide()
+		W.purchaseRows[i] = row
+	end
+	return part
+end
+
+local function buildStatus(parent)
+	local St, c = Theme.officer.status, Theme.colors
+	local part = section(parent, St.height)
+	heading(part, St.heading, L.GUILD_SETTINGS)
+	W.status = wrapped(part, St.text, c.text)
+	return part
+end
+
+local function buildForm(parent)
+	local F, c, fs = Theme.officer.form, Theme.colors, Theme.fontSize
+	local part = section(parent, F.height)
 	for i, k in ipairs(FIELDS) do
-		local col, row = (i - 1) % cols, math.floor((i - 1) / cols)
-		local x, top = col * (colW + colGap), y - row * 46
-		local label = text(part, fonts.small, c.muted)
-		label:SetPoint("TOPLEFT", part, "TOPLEFT", x, top)
+		local col, row = (i - 1) % F.cols, math.floor((i - 1) / F.cols)
+		local x, top = F.x + col * F.colStep, row * F.rowStep
+		local label = Skin.textIn(part, part, { x + F.label[1], top + F.label[2], F.label[3], F.label[4] }, "label",
+			fs.label, c.muted, "LEFT")
 		label:SetText(L["F_" .. k])
-		local e = editBox(part, colW, 24)
-		e.holder:SetPoint("TOPLEFT", part, "TOPLEFT", x, top - 15)
+		local e = Skin.editBox(part, F.field[3], F.field[4], "number", fs.lineField + 1)
+		Skin.rect(e.holder, part, { x + F.field[1], top + F.field[2], F.field[3], F.field[4] })
 		e:SetScript("OnTextChanged", function()
 			if not W.filling then
 				updateForm()
@@ -292,10 +421,11 @@ local function buildForm(parent, inner)
 		end)
 		W.fields[k] = e
 	end
-	y = y - 2 * 46 - 4
 
-	W.line = editBox(part, inner, 26)
-	W.line.holder:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
+	W.line = Skin.editBox(part, F.line[3], F.line[4], "numberMedium", fs.lineField)
+	Skin.rect(W.line.holder, part, F.line)
+	Skin.color(W.line, c.stakeText)
+	W.line:setReadOnlyLook(true)
 	-- Read-only: user typing puts the line back; focus selects all for Ctrl+C.
 	W.line:SetScript("OnTextChanged", function(self, userInput)
 		if userInput then
@@ -303,108 +433,20 @@ local function buildForm(parent, inner)
 			self:HighlightText()
 		end
 	end)
-	W.line:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
-	y = y - 30
-	local hint = wrapped(part, inner)
-	hint:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
+	W.line:HookScript("OnEditFocusGained", function(self) self:HighlightText() end)
+	W.copy = Skin.button(part, "icon", F.copy[3], F.copy[4], function()
+		W.line:SetFocus()
+		W.line:HighlightText()
+	end, { icon = Theme.icons.copy, iconOnly = true, iconSize = Theme.layout.iconSize })
+	Skin.rect(W.copy, part, F.copy)
+	local hint = wrapped(part, F.hint, c.muted, fs.label)
 	hint:SetText(L.LINE_HINT)
-	y = y - 18
-	W.formNote = wrapped(part, inner)
-	W.formNote:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	y = y - 28
-	part:SetSize(inner, -y)
-	return part
-end
-
-local function buildGrant(parent, inner)
-	local fonts, c, gap = Theme.fonts, Theme.colors, 8
-	local part = CreateFrame("Frame", nil, parent)
-	local y = 0
-	local h = heading(part, L.GRANT_TITLE)
-	h:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	y = y - 18
-
-	-- Addon users heard online: click selects one.
-	local cols = 3
-	local rowW = (inner - (cols - 1) * gap) / cols
-	for i = 1, ONLINE_ROWS do
-		local col, row = (i - 1) % cols, math.floor((i - 1) / cols)
-		local b
-		b = button(part, rowW, 22, "pill", fonts.small, function()
-			W.player:SetText(b.name or "")
-			OfficerFrame.refresh()
-		end)
-		b:SetPoint("TOPLEFT", part, "TOPLEFT", col * (rowW + gap), y - row * 26)
-		b:Hide()
-		W.onlineRows[i] = b
-	end
-	W.onlineNone = wrapped(part, inner)
-	W.onlineNone:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y - 4)
-	W.onlineNone:SetText(L.ONLINE_NONE)
-	y = y - 2 * 26 - 4
-
-	-- Player, tokens, Grant.
-	local label = text(part, fonts.small, c.muted)
-	label:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	label:SetText(L.PLAYER)
-	local label2 = text(part, fonts.small, c.muted)
-	label2:SetPoint("TOPLEFT", part, "TOPLEFT", 200 + gap, y)
-	label2:SetText(L.TOKENS)
-	y = y - 15
-	W.player = editBox(part, 200, 26)
-	W.player.holder:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	W.player:SetScript("OnTextChanged", function(_, userInput)
-		if userInput then OfficerFrame.refresh() end
-	end)
-	W.tokens = editBox(part, 100, 26)
-	W.tokens.holder:SetPoint("TOPLEFT", part, "TOPLEFT", 200 + gap, y)
-	W.tokens:SetScript("OnEnterPressed", function(self)
-		self:ClearFocus()
-		grant()
-	end)
-	W.grant = button(part, inner - 300 - 2 * gap, 26, "accent", fonts.button, grant)
-	W.grant:SetPoint("TOPLEFT", part, "TOPLEFT", 300 + 2 * gap, y)
-	W.grant.label:SetText(L.GRANT)
-	y = y - 30
-	W.grantNote = wrapped(part, inner)
-	W.grantNote:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	y = y - 20
-
-	-- Self test.
-	W.selfTest = button(part, 110, 22, "pill", fonts.small, function()
-		local on = not (GuildSlotsDB and GuildSlotsDB.selfTest == true)
-		main().setSelfTest(on)
-		OfficerFrame.refresh()
-	end)
-	W.selfTest:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	W.selfTest.label:SetText(L.SELF_TEST)
-	local hint = wrapped(part, inner - 110 - gap)
-	hint:SetPoint("TOPLEFT", part, "TOPLEFT", 110 + gap, y)
-	hint:SetText(L.SELF_TEST_HINT)
-	y = y - 34
-
-	-- Recent purchases.
-	local h2 = heading(part, L.PURCHASES)
-	h2:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	y = y - 18
-	W.noPurchases = wrapped(part, inner)
-	W.noPurchases:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y)
-	W.noPurchases:SetText(L.NO_PURCHASES)
-	for i = 1, PURCHASE_ROWS do
-		local fs = wrapped(part, inner, c.text)
-		fs:SetPoint("TOPLEFT", part, "TOPLEFT", 0, y - (i - 1) * 16)
-		fs:Hide()
-		W.purchaseRows[i] = fs
-	end
-	y = y - PURCHASE_ROWS * 16
-	part:SetSize(inner, -y)
+	W.formNote = wrapped(part, F.note, c.muted, fs.label)
 	return part
 end
 
 local function build()
-	local size, c, fonts = Theme.size, Theme.colors, Theme.fonts
-	local pad = size.pad
-	local inner = WIDTH - 2 * pad
+	local O, c, fs = Theme.officer, Theme.colors, Theme.fontSize
 
 	local f = CreateFrame("Frame", FRAME_NAME, UIParent)
 	W.frame = f
@@ -416,28 +458,26 @@ local function build()
 	f:RegisterForDrag("LeftButton")
 	f:SetScript("OnDragStart", function(self) self:StartMoving() end)
 	f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-	local border = f:CreateTexture(nil, "BACKGROUND")
-	border:SetAllPoints(f)
-	paint(border, c.border)
-	local bg = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-	bg:SetPoint("TOPLEFT", f, "TOPLEFT", 1, -1)
-	bg:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -1, 1)
-	paint(bg, c.bg)
+	f:SetSize(O.width, O.maxHeight)
+	W.bgTiles = Skin.tiles(f, Theme.tex.bg, O.width, O.maxHeight, "BACKGROUND")
+	W.windowFrame = Skin.nine(f, f, Theme.slices.window, "BORDER")
 
-	local y = -pad
-	local title = text(f, fonts.title, c.text)
-	title:SetPoint("TOPLEFT", f, "TOPLEFT", pad, y - 6)
-	title:SetText(L.TITLE .. " - " .. L.OFFICER)
-	W.close = button(f, size.header, size.header, "ghost", fonts.title, function() f:Hide() end)
-	W.close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -pad + 8, y)
-	W.close.label:SetText("X")
-	W.topY = y - size.header - size.gap
+	local title = Skin.textIn(f, f, O.title, "title", fs.officerTitle, c.gold, "LEFT")
+	Skin.shadow(title, 2, -2, c.titleShadow)
+	title:SetText(L.OFFICER_TITLE)
+	W.close = Skin.button(f, "icon", O.close[3], O.close[4], function() f:Hide() end,
+		{ icon = Theme.icons.close, iconOnly = true, iconSize = Theme.layout.iconSize })
+	Skin.rect(W.close, f, O.close)
+	local divAnchor = CreateFrame("Frame", nil, f)
+	Skin.rect(divAnchor, f, O.divider)
+	Skin.nine(f, divAnchor, Theme.slices.divider, "ARTWORK")
 
-	W.status = wrapped(f, inner, c.text)
-	W.nonOfficer = wrapped(f, inner)
+	W.grantPart = buildGrant(f)
+	W.statusPart = buildStatus(f)
+	W.nonOfficer = Skin.text(f, "label", fs.small, c.muted, "LEFT")
+	W.nonOfficer:SetSize(O.nonOfficer[3], O.nonOfficer[4])
 	W.nonOfficer:SetText(L.NEED_OFFICER)
-	W.formPart = buildForm(f, inner)
-	W.grantPart = buildGrant(f, inner)
+	W.formPart = buildForm(f)
 
 	local acc = 0
 	f:SetScript("OnUpdate", function(_, elapsed)
@@ -456,11 +496,10 @@ local function build()
 		table.insert(UISpecialFrames, FRAME_NAME)
 	end
 	f:Hide()
-	f:SetWidth(WIDTH)
-	f:SetPoint("CENTER", UIParent, "CENTER", 420, 40)
+	f:SetPoint("CENTER", UIParent, "CENTER", 420, 20)
 
 	if main() then
-		main().subscribe(function(name)
+		main().subscribe(function()
 			if f:IsShown() then
 				OfficerFrame.refresh()
 			end

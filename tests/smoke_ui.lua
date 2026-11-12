@@ -4,7 +4,9 @@
 -- command and plays T2 rounds with stops queued into the injected rng (ns.random): a losing
 -- round, line wins with take and gamble, quick stop and skipping, a round with free games, a
 -- retrigger and an expansion, closing the window mid free games, keyboard and combat handling,
--- refill, the paytable, and random rounds. Runs once per locale (enUS, deDE).
+-- refill, the paytable, effects (/gs fx), and random rounds. Runs once per locale (enUS, deDE),
+-- and once more with the optional client API switched off in the stub (no CreateLine,
+-- SetRotation, SetClipsChildren, SetBlendMode; the bundled fonts fail to load).
 --
 -- Stops (strips in docs/table-t2-spec.md), solo rng order: 5 base stops, then (free games
 -- only) the expanding symbol 0..8, then 5 stops per free game.
@@ -19,11 +21,17 @@ local failures = 0
 
 local SOUND_BOOK, SOUND_FREE, SOUND_EXPAND, SOUND_BIG = 875, 8959, 31578, 8960
 
-local function scenario(locale)
+local OPTIONAL = { "CreateLine", "SetRotation", "SetClipsChildren", "SetBlendMode" }
+
+local function scenario(locale, lean)
 	-- Fresh globals for every run.
 	GuildSlotsDB = nil
 	local stub = dofile("tests/wowstub.lua")
 	stub.locale = locale
+	if lean then
+		for _, name in ipairs(OPTIONAL) do stub.off[name] = true end
+		stub.fontsFail = true
+	end
 
 	local values = {}
 	local function queue(...)
@@ -118,9 +126,57 @@ local function scenario(locale)
 	-- Open via slash command.
 	stub.slash("/gs")
 	assert(W.frame and W.frame:IsShown(), "window open after /gs")
-	assert(W.frame:GetWidth() == Theme.size.width, "window width from Theme")
-	assert(W.reelPanel:GetWidth() == Theme.size.width - 2 * Theme.size.pad, "reel panel fills the inner width")
+	assert(W.frame:GetWidth() == 600 and W.frame:GetHeight() == 672, "window 600 x 672")
+	assert(W.reelPanel:GetWidth() == 480 and W.reelPanel:GetHeight() == 288, "reel field 480 x 288")
 	assert(#W.reels == 5, "five reels")
+
+	-- Every texture and font the theme names is a file under GuildSlots/Media (built by
+	-- tools/build_media.py); the stub also checks every add-on path at SetTexture / SetFont.
+	local function exists(path)
+		local rel = path:gsub("^Interface\\AddOns\\", ""):gsub("\\", "/")
+		local fh = io.open(rel)
+		if fh then fh:close() end
+		return fh ~= nil and rel:find("^GuildSlots/Media/") ~= nil
+	end
+	local function eachPath(t, fn)
+		for _, v in pairs(t) do
+			if type(v) == "string" and v:find("^Interface\\AddOns\\") then fn(v)
+			elseif type(v) == "table" then eachPath(v, fn) end
+		end
+	end
+	local named = 0
+	for _, t in ipairs({ Theme.tex, Theme.icons, Theme.symbols, Theme.symbolsWin, Theme.slices, Theme.fonts }) do
+		eachPath(t, function(path)
+			named = named + 1
+			assert(exists(path), "theme path has no file: " .. path)
+		end)
+	end
+	assert(named > 80, "theme names the art")
+	local used = 0
+	for path in pairs(stub.files) do
+		used = used + 1
+		assert(exists(path), "used path has no file: " .. path)
+	end
+	assert(used > 40, "the window uses the delivered art (" .. used .. " files)")
+
+	-- Optional API: real lines and the bundled fonts, or the fallbacks.
+	local titleFont = W.title:GetFont()
+	if lean then
+		assert(W.realLines == false, "staircase lines without CreateLine")
+		assert(W.lineSegs[1][1]:GetObjectType() == "Texture", "segments are textures")
+		assert(titleFont == "Fonts\\MORPHEUS.TTF", "title falls back to the game font: " .. tostring(titleFont))
+		assert(W.balance:GetFont() == "Fonts\\ARIALN.TTF", "numbers fall back to Arial Narrow")
+	else
+		assert(W.realLines == true, "lines drawn with CreateLine")
+		assert(W.lineSegs[1][1]:GetObjectType() == "Line", "line objects")
+		assert(titleFont:find("CinzelDecorative%-Black"), "title in Cinzel Decorative")
+		assert(W.win:GetFont():find("Marcellus"), "message line in Marcellus")
+		assert(W.balance:GetFont():find("ArchivoNarrow%-Bold"), "numbers in Archivo Narrow")
+	end
+	-- Markers: left at the row a line starts in, right at the row it ends in.
+	local function markerY(m) local _, _, _, _, y = m.normal:GetPoint(1) return -y end
+	assert(markerY(W.markers[2][1]) == 166 and markerY(W.markers[10][1]) == 238, "left row 0: lines 2 .. 10")
+	assert(markerY(W.markers[8][1]) == 426 and markerY(W.markers[8][2]) == 214, "line 8 starts bottom, ends top")
 	local found = false
 	for _, n in ipairs(UISpecialFrames) do found = found or n == "GuildSlotsFrame" end
 	assert(found, "registered for Escape")
@@ -158,38 +214,76 @@ local function scenario(locale)
 	untilStep("line")
 	assert(W.win:GetText() == string.format(L.LINE_WIN, 5, 3, L.SYM_M, fmt(30)), "line text: " .. tostring(W.win:GetText()))
 	assert(W.markers[5].lit and not W.markers[1].lit, "marker of line 5 lit")
-	assert(W.cells[1][3].edges[1]:IsShown(), "line 5 starts bottom left")
-	assert(W.cells[3][1].edges[1]:IsShown(), "and reaches the top of reel 3")
-	assert(not W.cells[4][2].edges[1]:IsShown(), "reel 4 is not part of the win")
+	assert(W.cells[1][3].glow:IsShown(), "line 5 starts bottom left")
+	assert(W.cells[3][1].glow:IsShown(), "and reaches the top of reel 3")
+	assert(W.cells[1][3].win:IsShown() and W.cells[1][3].win:GetTexture() == Theme.symbolsWin.M, "winning art")
+	assert(not W.cells[4][2].glow:IsShown() and not W.cells[4][2].win:IsShown(), "reel 4 is not part of the win")
 	assert(W.cells[1][1].dim:IsShown(), "other cells dimmed")
+	ticks(2)
+	local sparkling = 0
+	for _, sp in ipairs(W.sparkles.list) do if sp.tex:IsShown() then sparkling = sparkling + 1 end end
+	assert(sparkling >= 1, "sparkles on the winning cells")
 	settle()
 	assert(S.game.balance == 1010, "990 - 10 + 30")
 	assert(W.winAmount:GetText() == fmt(30), "win shows 30")
 	assert(W.offerRow:IsShown(), "take/gamble offered")
-	assert(W.cells[1][3].edges[1]:IsShown(), "winning cells stay marked")
+	assert(W.cells[1][3].glow:IsShown(), "winning cells stay marked")
+	assert(W.win:GetText() == string.format(L.OFFER_HINT, fmt(30)), "offer hint")
 	shownMatches("after line win")
 	W.take:Click()
 	assert(not W.offerRow:IsShown(), "offer closed after take")
 	assert(S.game:state() == "idle", "idle after take")
 
-	-- 3. Gamble: won, then lost.
+	-- 3. Gamble as a card: GAMBLE shows the card face down, the pick draws (rng 0 wins, 1
+	-- loses); a won step shows the picked colour, a lost one the other colour.
+	local function flipped()
+		ticks(math.ceil(Theme.timing.gambleFlip * 60) + 2)
+		return W.card:GetTexture()
+	end
 	queue(1, 16, 0, 0, 0)
 	W.spin:Click()
 	settle()
-	queue(0)
 	W.gamble:Click()
-	assert(S.phase == "flip" and W.coinOverlay:IsShown(), "coin flip")
+	assert(S.phase == "pick" and W.cardOverlay:IsShown(), "card shown")
+	assert(W.card:GetTexture() == Theme.tex.cardBack, "face down")
+	assert(W.red:IsShown() and W.black:IsShown(), "red and black offered")
+	assert(W.gambleLine:GetText():find(fmt(60), 1, true), "amount at stake and the double shown")
+	assert(W.take:IsShown() and W.take.enabled and not W.gamble:IsShown(), "take stays available")
+	assert(not W.spin.enabled, "no spin while the card waits")
+	assert(S.game.balance == 1030, "nothing drawn before the pick")
+	queue(0)
+	W.red:Click()
+	assert(S.phase == "flip", "card turns")
+	assert(flipped() == Theme.tex.cardRed, "won: the picked colour")
+	assert(W.lastCards[1]:IsShown() and W.lastCards[1]:GetTexture() == Theme.tex.cardRed, "last cards")
 	settle()
+	assert(not W.cardOverlay:IsShown(), "card gone after the hold")
 	assert(S.game.balance == 1030 + 30, "won gamble adds 30")
 	assert(W.offerRow:IsShown(), "gamble offered again")
 	assert(W.take.label:GetText():find(fmt(60), 1, true), "take shows 60")
 	shownMatches("after gamble win")
-	queue(1)
 	W.gamble:Click()
+	queue(1)
+	W.red:Click()
+	assert(flipped() == Theme.tex.cardBlack, "lost: the other colour")
 	settle()
 	assert(S.game.balance == 1060 - 60, "lost gamble")
 	assert(not W.offerRow:IsShown(), "no offer after a loss")
 	shownMatches("after gamble loss")
+	-- Black, won; then take while the card waits.
+	queue(1, 16, 0, 0, 0)
+	W.spin:Click()
+	settle()
+	W.gamble:Click()
+	queue(0)
+	W.black:Click()
+	assert(flipped() == Theme.tex.cardBlack, "won with black: black")
+	settle()
+	W.gamble:Click()
+	W.take:Click()
+	assert(S.phase == "idle" and not W.cardOverlay:IsShown() and S.game:state() == "idle", "take from the card")
+	assert(S.game.balance == 1000 - 10 + 30 + 30, "took 60")
+	shownMatches("after take from the card")
 
 	-- 4. Quick stop, then skipping the presentation, uneven frame times.
 	queue(1, 16, 0, 0, 0)
@@ -210,7 +304,7 @@ local function scenario(locale)
 	-- a third skips everything.
 	queue(0, 0, 0, 0, 0)
 	W.spin:Click()
-	assert(S.game:state() == "idle" and S.game.balance == 1000 + 30 - 10 - 10, "offer taken by the next spin")
+	assert(S.game:state() == "idle" and S.game.balance == 1050 + 30 - 10 - 10, "offer taken by the next spin")
 	W.spin:Click()
 	W.spin:Click()
 	assert(S.phase == "idle", "skip during the spin ends the round")
@@ -237,18 +331,26 @@ local function scenario(locale)
 	assert(W.tease[3]:IsShown() and W.tease[5]:IsShown(), "anticipation glow on the remaining reels")
 	assert(not W.tease[1]:IsShown(), "no glow on a landed reel")
 	untilStep("scatter")
-	assert(W.cells[1][2].edges[1]:IsShown() and W.cells[3][2].edges[1]:IsShown(), "books highlighted")
+	assert(W.cells[1][2].glow:IsShown() and W.cells[3][2].glow:IsShown(), "books highlighted")
+	assert(W.cells[1][2].win:GetTexture() == Theme.symbolsWin.B, "tome art")
 	assert(W.win:GetText() == string.format(L.SCATTER_WIN, 3, L.SYM_B, fmt(20)), "scatter text")
 	untilStep("intro")
 	ticks(math.ceil(Theme.timing.introPulse * 60) + 2)
 	assert(W.banner:IsShown() and W.bannerTitle:GetText() == string.format(L.FREE_GAMES, 10), "intro banner")
 	ticks(math.ceil((Theme.timing.introShuffleAt - Theme.timing.introPulse) * 60) + 2)
 	assert(W.bannerIcon:IsShown(), "expanding symbol shuffles")
+	assert(W.book:IsShown(), "the tome opens")
+	assert(W.banner:IsShown() and W.bannerArt:GetTexture() == Theme.tex.bannerFree, "free-games banner")
 	untilStep("spin", 1)
 	assert(S.free and W.freeBar:IsShown(), "free-game mode")
 	assert(W.reels[1].strip == T2.freeReels[1], "free strips")
 	assert(W.freeCounter:GetText() == string.format(L.FREE_COUNTER, 1, 10), "counter 1 / 10")
 	assert(W.badge:GetTexture() == Theme.symbols.M, "badge shows the expanding symbol")
+	assert(W.expName:GetText() == L.SYM_M, "expanding symbol named")
+	assert(W.bgTiles.tex[1]:GetTexture() == Theme.tex.bgFree and W.reelBg:GetTexture() == Theme.tex.reelBgFree,
+		"free-game look")
+	assert(W.footBalance:IsShown() and not W.refill:IsShown(), "balance under the buttons in free games")
+	assert(W.win:GetText() == string.format(L.FREE_HINT, 1, 10, fmt(10)), "free-game hint")
 	assert(W.bannerSub:GetText() == "" and not W.banner:IsShown(), "intro banner gone")
 	assert(countSound(SOUND_FREE) == freeSounds + 1, "free-game start sound")
 	untilStep("retrigger", 1)
@@ -256,7 +358,7 @@ local function scenario(locale)
 	assert(W.freeCounter:GetText() == string.format(L.FREE_COUNTER, 1, 20), "counter grows to 20")
 	untilStep("expand", 1)
 	ticks(10)
-	assert(W.expand[3].bg:IsShown(), "reel 3 expands first")
+	assert(W.expand[3].bg:IsShown() and W.expand[3].bg:GetTexture() == Theme.tex.expandColumn, "reel 3 expands first")
 	untilStep("expandWin", 1)
 	assert(W.expand[3].bg:IsShown() and W.expand[5].bg:IsShown(), "expanded reels stay")
 	assert(W.expand[5].icons[1]:GetAlpha() == 1, "expansion fills the reel")
@@ -264,7 +366,7 @@ local function scenario(locale)
 	assert(W.markers[1].lit and W.markers[10].lit, "expansion pays on all lines")
 	untilStep("spin", 2)
 	assert(not W.expand[3].bg:IsShown(), "expansion cleared for the next game")
-	assert(W.freeTotal:GetText() == string.format(L.FREE_TOTAL, fmt(1075)), "free total after game 1")
+	assert(W.freeTotal:GetText() == fmt(1075), "free total after game 1")
 	W.spin:Click() -- skip game 2
 	assert(step().game == 3 and step().kind == "spin", "skip jumps to the next free game")
 	assert(W.freeCounter:GetText() == string.format(L.FREE_COUNTER, 3, 20), "counter 3 / 20")
@@ -273,14 +375,23 @@ local function scenario(locale)
 	untilStep("summary")
 	assert(W.bannerTitle:GetText() == L.FREE_OVER, "summary banner")
 	assert(onBaseStrips() and not S.free and not W.freeBar:IsShown(), "back to the base reels")
+	assert(W.bgTiles.tex[1]:GetTexture() == Theme.tex.bg, "wood again")
 	local big = untilStep("big")
 	assert(big.level == 3, "118x is legendary")
 	ticks(5)
 	assert(W.bannerTitle:GetText() == L.BIG_WIN_3, "big win banner")
-	assert(W.particles[1]:IsShown() and W.flash:IsShown(), "particles and flash")
+	assert(W.bannerArt:GetTexture() == Theme.tex.bannerBig, "big win banner art")
+	assert(W.rain.coins[1]:IsShown() and W.rays.tex:IsShown(), "coin rain and rays")
+	assert(W.bannerPop.frame:GetScale() < 1.12 + 1e-9, "banner pops")
+	local raysCoord = W.rays.tex._coord[1]
+	ticks(30)
+	assert(W.rays.tex._coord[1] ~= raysCoord, "rays turn")
+	local onScreen = 0
+	for _, coin in ipairs(W.rain.coins) do if coin:IsShown() then onScreen = onScreen + 1 end end
+	assert(onScreen > 5 and #W.rain.coins <= 30, "coins fall, at most 30")
 	assert(countSound(SOUND_BIG) == bigSounds + 1, "big win sound")
 	settle()
-	assert(not W.particles[1]:IsShown() and not W.flash:IsShown(), "celebration over")
+	assert(not W.rain.coins[1]:IsShown() and not W.rays.tex:IsShown(), "celebration over")
 	assert(S.game.balance == before - 10 + 1185, "free-game round paid")
 	assert(W.winAmount:GetText() == fmt(1185), "total 1185")
 	for r = 1, 5 do
@@ -302,6 +413,8 @@ local function scenario(locale)
 	assert(S.phase == "idle", "settled on close")
 	assert(not S.free and onBaseStrips(), "base reels after settling")
 	assert(not W.banner:IsShown(), "no banner left")
+	for _, coin in ipairs(W.rain.coins) do assert(not coin:IsShown(), "no coin left after closing") end
+	assert(not W.spinGlow:IsShown(), "no glow left after closing")
 	assert(S.game.balance == before - 10 + 1185, "balance after settling")
 	shownMatches("after close")
 	assert(W.winAmount:GetText() == fmt(1185), "settled total")
@@ -354,13 +467,17 @@ local function scenario(locale)
 	assert(W.paytable:IsShown() and W.frame:GetHeight() == h, "paytable opens over the reels")
 	assert(W.ptContent:IsShown() and not W.ptUnsupported:IsShown(), "lines paytable")
 	assert(W.ptRows.M[2]:GetText() == "5" and W.ptRows.M[5]:GetText() == "750", "M pays at stake 10")
-	assert(W.ptRows.K[2]:GetText() == "-", "K pays nothing for two")
+	assert(W.ptRows.K[2]:GetText() == "–", "K pays nothing for two")
+	assert(W.ptRows.B[3]:GetText() == "20" and W.ptRows.B[2]:GetText() == "–", "tome pays times the stake")
 	assert(W.ptRtp:GetText() == string.format(L.RTP, 94.99910643248847), "return rate")
 	W.pills[3]:Click()
 	assert(S.game.stake == 100, "stake 100")
 	assert(W.pills[3].selected and not W.pills[1].selected, "pill selected")
 	assert(W.ptRows.L[5]:GetText() == fmt(50000), "L pays at stake 100")
-	assert(W.ptBook:GetText():find(fmt(20000), 1, true), "book rule with scatter pays")
+	assert(W.ptRows.B[5]:GetText() == fmt(20000), "five tomes at stake 100")
+	assert(W.ptBook:GetText():find(fmt(100), 1, true), "note names the stake")
+	assert(W.stakeValue:GetText() == fmt(100) and W.stakeSub:GetText() == string.format(L.STAKE_SUB, 10, fmt(10)),
+		"stake display")
 	W.payToggle:Click()
 	assert(not W.paytable:IsShown(), "paytable closes")
 	W.payToggle:Click()
@@ -393,6 +510,35 @@ local function scenario(locale)
 	assert(GuildSlotsDB.soloBalance == S.game.balance, "balance saved")
 	assert(W.footer:GetText() == L.FOOTER, "footer text")
 
+	-- 11b. Effects: the gold button breathes while idle; /gs fx keeps only lines, pulses and
+	-- count-ups.
+	if W.offerRow:IsShown() then W.take:Click() end
+	ticks(2)
+	assert(W.spinGlow:IsShown(), "spin button breathes while idle")
+	stub.slash("/gs", "fx")
+	assert(GuildSlotsDB.fx == false, "fewer effects saved")
+	ticks(2)
+	assert(not W.spinGlow:IsShown(), "no breathing with fewer effects")
+	queue(1, 16, 0, 0, 0)
+	W.spin:Click()
+	untilStep("line")
+	ticks(3)
+	for _, sp in ipairs(W.sparkles.list) do assert(not sp.tex:IsShown(), "no sparkles with fewer effects") end
+	assert(W.lineSegs[5][1]:IsShown(), "lines still drawn")
+	settle()
+	if W.offerRow:IsShown() then W.take:Click() end
+	queueFreeRound(19)
+	W.spin:Click()
+	untilStep("big")
+	ticks(5)
+	assert(W.banner:IsShown() and W.bannerAmount:GetText() ~= "", "banner and count-up still shown")
+	assert(not W.rain.coins[1]:IsShown() and not W.rays.tex:IsShown(), "no coin rain, no rays")
+	assert(W.bannerPop.frame:GetScale() == 1, "no pop")
+	settle()
+	if W.offerRow:IsShown() then W.take:Click() end
+	stub.slash("/gs", "fx")
+	assert(GuildSlotsDB.fx == true, "all effects again")
+
 	-- 12. Random rounds with gambles, skips, frame times 5..60 ms.
 	for i = 1, 80 do
 		W.spin:Click()
@@ -403,6 +549,7 @@ local function scenario(locale)
 		settle()
 		if W.offerRow:IsShown() and i % 2 == 0 then
 			W.gamble:Click()
+			if i % 4 == 0 then W.red:Click() else W.black:Click() end
 			settle()
 		end
 		if S.game.balance < 100 then W.refill:Click() end
@@ -424,15 +571,17 @@ local function scenario(locale)
 	return unknown
 end
 
-for _, locale in ipairs({ "enUS", "deDE" }) do
-	local ok, res = xpcall(function() return scenario(locale) end, debug.traceback)
+for _, run in ipairs({ { "enUS" }, { "deDE" }, { "enUS", true } }) do
+	local locale, lean = run[1], run[2]
+	local name = locale .. (lean and " without optional API" or "")
+	local ok, res = xpcall(function() return scenario(locale, lean) end, debug.traceback)
 	if ok then
-		io.write("smoke ", locale, ": ok")
+		io.write("smoke ", name, ": ok")
 		if #res > 0 then io.write(" (unmodelled methods, no-ops: ", table.concat(res, ", "), ")") end
 		io.write("\n")
 	else
 		failures = failures + 1
-		io.write("smoke ", locale, ": FAIL\n", res, "\n")
+		io.write("smoke ", name, ": FAIL\n", res, "\n")
 	end
 end
 os.exit(failures == 0 and 0 or 1)
