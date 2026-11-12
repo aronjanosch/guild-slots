@@ -9,7 +9,7 @@ Core\Tables.lua
 Core\Settings.lua
 Core\Engine.lua
 Core\Ledger.lua
-# Core\Verify.lua goes here once it exists.
+Core\Verify.lua
 
 Locale\enUS.lua
 Locale\deDE.lua
