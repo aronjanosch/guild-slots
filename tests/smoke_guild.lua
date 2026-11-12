@@ -514,7 +514,7 @@ local function t1Flow(locale, unknown)
 	W.payToggle:Click()
 	assert(W.ptUnsupported:IsShown() and not W.ptContent:IsShown(), "paytable explains it too")
 	W.payToggle:Click()
-	-- Solo still plays T2.
+	-- Solo still plays (T3).
 	stub.slash("/gs", "solo")
 	W.spin:Click()
 	assert(S.phase == "round", "solo plays")
@@ -523,17 +523,91 @@ local function t1Flow(locale, unknown)
 	unknownMethods(stub, unknown)
 end
 
--- 5. No settings line: the officer form proposes T2.
+-- 5. No settings line: the officer form proposes T3 and names both lines tables.
 local function noLineFlow(locale, unknown)
 	local env = boot(locale, { line = false })
 	local ns, stub, L = env.ns, env.stub, env.L
 	stub.slash("/gs", "officer")
 	local O = ns.OfficerFrame.widgets
 	assert(O.status:GetText() == L.SET_MISSING, "no line")
-	assert(O.fields.T:GetText() == "T2", "table field prefilled with T2")
-	assert(O.line:GetText():find(";T=T2;", 1, true), "line for T2")
+	assert(O.fields.T:GetText() == "T3", "table field prefilled with T3")
+	assert(O.line:GetText():find(";T=T3;", 1, true), "line for T3")
+	local tables = string.format(L.NOTE_TABLES, string.format(L.TABLE_RTP, "T2", 95) .. ", "
+		.. string.format(L.TABLE_RTP, "T3", 92), "T3")
+	assert(O.formNote:GetText() == tables, "note names T2 and T3: " .. tostring(O.formNote:GetText()))
+	stub.type(O.fields.T, "T2")
+	assert(O.line:GetText():find(";T=T2;", 1, true), "T2 can still be chosen")
 	stub.type(O.fields.E, "10,25")
 	assert(O.line:GetText() == "" and O.formNote:GetText():find(L.F_E, 1, true), "25 is not a T2 stake")
+	stub.type(O.fields.T, "T3")
+	assert(O.line:GetText() == "" and O.formNote:GetText():find(L.F_E, 1, true), "25 is not a T3 stake")
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
+	unknownMethods(stub, unknown)
+end
+
+-- 6. Lines tables: a T2 guild account next to the T3 solo game in one window, then a new
+-- purchase under a T3 line. The reels, the paytable's return rate and the rounds follow the
+-- shown game's table.
+local function tablesFlow(locale, unknown)
+	local env = boot(locale, {})
+	local ns, stub, L = env.ns, env.stub, env.L
+	local W, S = ns.SlotFrame.widgets, ns.SlotFrame.state
+	local T2, T3 = ns.Tables.get("T2"), ns.Tables.get("T3")
+	local session = ns.Main.session()
+	env.pump(20)
+	ns.Main.setSelfTest(true)
+	assert(session:grant("Alice Smith", 1000), "grant under the T2 line")
+	env.pump(30)
+	assert(session:game().tbl.id == "T2", "the account plays T2")
+
+	local function onStrips(tbl)
+		for r = 1, 5 do
+			if W.reels[r].strip ~= tbl.reels[r] then return false end
+		end
+		return true
+	end
+	local function rtpShown(tbl)
+		W.payToggle:Click()
+		local text = W.ptRtp:GetText()
+		W.payToggle:Click()
+		return text == string.format(L.RTP, ns.Tables.stats(tbl, 10, 0).rtp * 100)
+	end
+	local function spinOnce()
+		stub.serverTime = stub.serverTime + 2
+		env.pump(120)
+		W.spin:Click()
+		settle(env)
+		if W.offerRow:IsShown() then W.take:Click() end
+	end
+
+	stub.slash("/gs", "guild")
+	assert(S.mode == "guild" and S.game.tbl == T2, "guild mode shows the T2 account")
+	assert(onStrips(T2), "T2 strips on the reels")
+	assert(rtpShown(T2), "paytable: 95 % return")
+	spinOnce()
+	assert(onStrips(T2), "still T2 after a guild round")
+
+	W.soloBtn:Click()
+	assert(S.mode == "solo" and S.game.tbl == T3, "solo plays T3")
+	assert(onStrips(T3), "T3 strips after the switch to solo")
+	assert(rtpShown(T3), "paytable: 92 % return")
+	W.spin:Click()
+	settle(env)
+	if W.offerRow:IsShown() then W.take:Click() end
+	assert(onStrips(T3), "still T3 after a solo round")
+
+	W.guildBtn:Click()
+	assert(S.game.tbl == T2 and onStrips(T2), "back to the T2 strips")
+
+	-- A new purchase under a T3 line: the same account now plays T3.
+	stub.infoText = "Welcome\nGSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T3\n"
+	stub.slash("/gs", "help") -- the guild info is read on a hardware event
+	assert(session:grant("Alice Smith", 500), "grant under the T3 line")
+	env.pump(30)
+	assert(session:game().tbl.id == "T3", "the account plays T3 after the purchase")
+	spinOnce()
+	assert(onStrips(T3), "T3 strips in guild mode after the T3 purchase")
+	assert(rtpShown(T3), "paytable follows the account: 92 %")
 	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
 	unknownMethods(stub, unknown)
 end
@@ -546,6 +620,7 @@ for _, locale in ipairs({ "enUS", "deDE" }) do
 		noGuildFlow(locale, unknown)
 		t1Flow(locale, unknown)
 		noLineFlow(locale, unknown)
+		tablesFlow(locale, unknown)
 	end, debug.traceback)
 	if ok then
 		local list = {}

@@ -1,15 +1,16 @@
 -- Load smoke test for the in-game UI, outside the client:
 --   luajit tests/smoke_ui.lua
 -- Loads every file in TOC order against tests/wowstub.lua, opens the window via the slash
--- command and plays T2 rounds with stops queued into the injected rng (ns.random): a losing
+-- command and plays T3 rounds (the solo table) with stops queued into the injected rng (ns.random): a losing
 -- round, line wins with take and gamble, quick stop and skipping, a round with free games, a
 -- retrigger and an expansion, closing the window mid free games, keyboard and combat handling,
 -- refill, the paytable, effects (/gs fx), and random rounds. Runs once per locale (enUS, deDE),
 -- and once more with the optional client API switched off in the stub (no CreateLine,
 -- SetRotation, SetClipsChildren, SetBlendMode; the bundled fonts fail to load).
 --
--- Stops (strips in docs/table-t2-spec.md), solo rng order: 5 base stops, then (free games
--- only) the expanding symbol 0..8, then 5 stops per free game.
+-- Stops (strips in docs/table-t3-spec.md; these windows do not touch the two stops where T3
+-- differs from T2), solo rng order: 5 base stops, then (free games only) the expanding symbol
+-- 0..8, then 5 stops per free game.
 --   0,0,0,0,0          loses (one book on reel 1)
 --   1,16,0,0,0         line 5: 3 x M = 30 at stake 10
 --   40,35,52,0,0       three books: lines and scatter 110, ten free games
@@ -74,7 +75,7 @@ local function scenario(locale, lean)
 	assert(type(GuildSlotsDB) == "table", "GuildSlotsDB created")
 
 	local L, Anim, Theme = ns.L, ns.Anim, ns.Theme
-	local T2 = ns.Tables.get("T2")
+	local T3 = ns.Tables.get("T3") -- the solo table
 	local W, S = ns.SlotFrame.widgets, ns.SlotFrame.state
 	local function fmt(n) return Anim.formatNumber(n, L.THOUSANDS) end
 
@@ -124,7 +125,7 @@ local function scenario(locale, lean)
 	end
 	local function onBaseStrips()
 		for r = 1, 5 do
-			if W.reels[r].strip ~= T2.reels[r] then return false end
+			if W.reels[r].strip ~= T3.reels[r] then return false end
 		end
 		return true
 	end
@@ -187,7 +188,7 @@ local function scenario(locale, lean)
 	for _, n in ipairs(UISpecialFrames) do found = found or n == "GuildSlotsFrame" end
 	assert(found, "registered for Escape")
 	assert(W.frame:IsKeyboardEnabled(), "keyboard enabled out of combat")
-	assert(S.game.tbl.id == "T2", "solo plays T2")
+	assert(S.game.tbl.id == "T3", "solo plays T3")
 	shownMatches("open")
 
 	-- 1. Losing round.
@@ -354,7 +355,7 @@ local function scenario(locale, lean)
 	assert(W.banner:IsShown() and W.bannerArt:GetTexture() == Theme.tex.bannerFree, "free-games banner")
 	untilStep("spin", 1)
 	assert(S.free and W.freeBar:IsShown(), "free-game mode")
-	assert(W.reels[1].strip == T2.freeReels[1], "free strips")
+	assert(W.reels[1].strip == T3.freeReels[1], "free strips")
 	assert(W.freeCounter:GetText() == string.format(L.FREE_COUNTER, 1, 10), "counter 1 / 10")
 	assert(W.badge:GetTexture() == Theme.symbols.M, "badge shows the expanding symbol")
 	assert(W.expName:GetText() == L.SYM_M, "expanding symbol named")
@@ -514,7 +515,7 @@ local function scenario(locale, lean)
 	assert(W.ptRows.M[2]:GetText() == "5" and W.ptRows.M[5]:GetText() == "750", "M pays at stake 10")
 	assert(W.ptRows.K[2]:GetText() == "–", "K pays nothing for two")
 	assert(W.ptRows.B[3]:GetText() == "20" and W.ptRows.B[2]:GetText() == "–", "tome pays times the stake")
-	assert(W.ptRtp:GetText() == string.format(L.RTP, 94.99910643248847), "return rate")
+	assert(W.ptRtp:GetText() == string.format(L.RTP, 91.99560947007686), "return rate of T3")
 	W.pills[3]:Click()
 	assert(S.game.stake == 100, "stake 100")
 	assert(W.pills[3].selected and not W.pills[1].selected, "pill selected")
@@ -881,7 +882,7 @@ local function scenario(locale, lean)
 	ticks(10)
 	assert(W.banner:IsShown() and W.bannerTitle:GetText() == string.format(L.FREE_GAMES, 10), "intro banner")
 	untilStep("spin", 1)
-	assert(S.free and W.reels[1].strip == T2.freeReels[1], "free games")
+	assert(S.free and W.reels[1].strip == T3.freeReels[1], "free games")
 	assert(not W.buy:IsShown(), "no buy button during the series")
 	untilStep("summary")
 	settle()

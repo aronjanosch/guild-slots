@@ -3,7 +3,7 @@ local addonName, ns = ...
 -- The slot machine window. Game rules live in ns.Solo (play money) and in the guild session's
 -- game (ns.Guild, tokens); both have the same shape. This file builds the window and plays the
 -- rounds they return: ns.Plan turns a round into timed steps, the step handlers below show them.
--- S.solo is the solo game, S.game the one shown. Only lines tables (T2) are rendered.
+-- S.solo is the solo game, S.game the one shown. Only lines tables (T2, T3) are rendered.
 --
 -- Look: the "tavern" design (design/gildenslots-v2). Layout, colours, fonts and timings come from
 -- UI/Theme.lua, widgets from UI/Skin.lua, effects from UI/Fx.lua, line geometry from
@@ -39,8 +39,14 @@ local S = { now = 0, phase = "idle", counts = {}, offer = false, mode = "solo", 
 	landAt = {}, baseStops = {}, stats = Stats.new(), auto = false } -- animation state
 SlotFrame.widgets, SlotFrame.state = W, S
 
--- The table the window draws (strips, lines): always T2.
-local T2 = ns.Tables.get("T2")
+-- The lines table the window draws (strips, lines, pays, buy price): the shown game's
+-- (S.game.tbl: T3 in solo, the account's table in guild mode). A game without a lines table (no
+-- account yet, or a T1 guild) cannot be played; the reels then keep the solo default's strips.
+local DEFAULT_TABLE = ns.Tables.get(ns.Solo.DEFAULT_TABLE)
+local function shownTable()
+	local tbl = S.game and S.game.tbl
+	return tbl and tbl.kind == "lines" and tbl or DEFAULT_TABLE
+end
 
 ---------------------------------------------------------------------------------------------
 -- Helpers
@@ -339,7 +345,7 @@ local function idleText()
 	if line then
 		setWinText(line, Theme.tones.lose)
 	else
-		setWinText(string.format(L.IDLE_HINT, #T2.lines), Theme.tones.muted)
+		setWinText(string.format(L.IDLE_HINT, #shownTable().lines), Theme.tones.muted)
 	end
 end
 
@@ -413,7 +419,7 @@ local function refresh()
 		pill:setEnabled(not busy and not status and not auto)
 	end
 	W.stakeValue:SetText(fmt(game.stake))
-	W.stakeSub:SetText(string.format(L.STAKE_SUB, #T2.lines, fmt(game.stake / #T2.lines)))
+	W.stakeSub:SetText(string.format(L.STAKE_SUB, #shownTable().lines, fmt(game.stake / #shownTable().lines)))
 
 	-- Header.
 	W.soloBtn:setSelected(S.mode == "solo")
@@ -428,7 +434,7 @@ local function refresh()
 	local officer = isOfficer()
 	local solo = S.mode == "solo" and not S.free
 	local guild = S.mode == "guild" and not S.free
-	local buy = solo and type(game.buy) == "function" and supported() and T2.buyPrice ~= nil
+	local buy = solo and type(game.buy) == "function" and supported() and shownTable().buyPrice ~= nil
 	W.officer:SetShown(officer)
 	W.refill:SetShown(solo)
 	W.refill:setEnabled(not busy and not auto)
@@ -448,7 +454,7 @@ local function refresh()
 		Skin.rect(b, W.frame, slots[i])
 	end
 	if buy then
-		local price = T2.buyPrice * game.stake
+		local price = shownTable().buyPrice * game.stake
 		local w = slots[#row][3]
 		W.buy.label:SetText(string.format(w < Lay.buyWide and L.BUY_SHORT or L.BUY, fmt(price)))
 		W.buy:setEnabled(phase == "idle" and not auto and not status)
@@ -566,7 +572,7 @@ local function showLine(li, count, alpha, sparkle)
 	local c = Theme.colors.lines[li]
 	setLine(li, c, alpha or 1)
 	setMarker(li, true)
-	local rows = T2.lines[li]
+	local rows = shownTable().lines[li]
 	for r = 1, count do
 		markCell(r, rows[r] + 1, c)
 		if sparkle then
@@ -577,7 +583,7 @@ end
 
 -- Highlights the books in window (a list of 5 columns).
 local function markBooks(window)
-	local wild = T2.scatter.symbol
+	local wild = shownTable().scatter.symbol
 	for r = 1, REELS do
 		local col = window[r]
 		for row = 1, ROWS do
@@ -598,7 +604,7 @@ local function pulseLit(t)
 end
 
 local function hasBook(col)
-	local wild = T2.scatter.symbol
+	local wild = shownTable().scatter.symbol
 	return col[1] == wild or col[2] == wild or col[3] == wild
 end
 
@@ -727,7 +733,7 @@ local function enterFree(symbol, of)
 	end
 	S.free = true
 	for r = 1, REELS do
-		W.reels[r]:setStrip(T2.freeReels[r], 0)
+		W.reels[r]:setStrip(shownTable().freeReels[r], 0)
 	end
 	W.badge:SetTexture(Theme.symbols[symbol])
 	W.expName:SetText(symbolName(symbol))
@@ -744,9 +750,24 @@ local function leaveFree()
 	S.free = false
 	hideExpansions()
 	for r = 1, REELS do
-		W.reels[r]:setStrip(T2.reels[r], S.baseStops[r] or 0)
+		W.reels[r]:setStrip(shownTable().reels[r], S.baseStops[r] or 0)
 	end
 	setFreeLook(false)
+end
+
+-- Outside free games: puts the shown table's base strips on the reels when another table's are
+-- there (solo T3 <-> a T2 guild account, or an account's new purchase under another table).
+local function seatStrips()
+	if S.free then
+		return
+	end
+	local strips = shownTable().reels
+	for r = 1, REELS do
+		local reel = W.reels[r]
+		if reel.strip ~= strips[r] then
+			reel:setStrip(strips[r], math.floor(reel.x + 0.5))
+		end
+	end
 end
 
 ---------------------------------------------------------------------------------------------
@@ -914,7 +935,7 @@ H.scatter = {
 		clearShow()
 		dimAll()
 		markBooks(S.window)
-		setWinText(string.format(L.SCATTER_WIN, step.count, symbolName(T2.scatter.symbol), fmt(step.amount)),
+		setWinText(string.format(L.SCATTER_WIN, step.count, symbolName(shownTable().scatter.symbol), fmt(step.amount)),
 			Theme.tones.free)
 		countStep(step, silent)
 		sfx("lineWin", silent)
@@ -990,7 +1011,7 @@ H.expandWin = {
 }
 
 local function expandingIndex(sym)
-	for i, s in ipairs(T2.expanding) do
+	for i, s in ipairs(shownTable().expanding) do
 		if s == sym then return i end
 	end
 	return 1
@@ -1010,7 +1031,7 @@ H.intro = {
 			local books = 0
 			for r = 1, REELS do
 				for row = 1, ROWS do
-					if S.window[r][row] == T2.scatter.symbol then books = books + 1 end
+					if S.window[r][row] == shownTable().scatter.symbol then books = books + 1 end
 				end
 			end
 			setWinText(string.format(L.FREE_TRIGGER, books, step.freeOf), Theme.tones.free)
@@ -1041,8 +1062,8 @@ H.intro = {
 		if t >= tm.introShuffleAt then
 			local u = t - tm.introShuffleAt
 			local final = expandingIndex(step.symbol)
-			local i = Anim.shuffle(u, tm.introShuffle, #T2.expanding, final)
-			W.bannerIcon:SetTexture(Theme.symbolsWin[T2.expanding[i]])
+			local i = Anim.shuffle(u, tm.introShuffle, #shownTable().expanding, final)
+			W.bannerIcon:SetTexture(Theme.symbolsWin[shownTable().expanding[i]])
 			W.bannerIcon:Show()
 			if u >= tm.introShuffle and S.introStage == 1 then
 				S.introStage = 2
@@ -1257,12 +1278,13 @@ local function startRound(r, before)
 	setBalanceShown(before - (r.cost or r.stake))
 	-- The base reels to come back to after free games: the round's, or (a bought series has no
 	-- base game) where they stand now.
+	seatStrips()
 	local stops = r.round.stops
 	for i = 1, REELS do
 		S.baseStops[i] = stops and stops[i] or math.floor(W.reels[i].x + 0.5) % W.reels[i].n
 	end
 	S.tm = Theme.timingFor(db.turbo)
-	S.plan = Plan.build(r.round, S.tm, T2)
+	S.plan = Plan.build(r.round, S.tm, shownTable())
 	S.si, S.quick = 0, false
 	S.phase = "round"
 	S.autoNext = nil
@@ -1799,7 +1821,7 @@ end
 local function buildLine(ov, li, yLeft, yRight)
 	local Lay = Theme.layout
 	local g = geometry()
-	local rows = T2.lines[li]
+	local rows = shownTable().lines[li]
 	if type(ov.CreateLine) == "function" then
 		local ok, res = pcall(function()
 			local pts = Layout.linePoints(rows, yLeft[li], yRight[li], g)
@@ -1836,7 +1858,7 @@ end
 -- Line number markers at both sides (Layout.markerY).
 local function buildMarkers(ov, yLeft, yRight)
 	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
-	for li = 1, #T2.lines do
+	for li = 1, #shownTable().lines do
 		local list = { lit = false }
 		for side = 1, 2 do
 			local x, y = Lay.markerX[side], side == 1 and yLeft[li] or yRight[li]
@@ -1885,7 +1907,7 @@ local function buildReels(f)
 	W.reelBg:SetTexture(Theme.tex.reelBg)
 	W.reels = {}
 	for r = 1, REELS do
-		local reel = Reel.new(rp, T2.reels[r])
+		local reel = Reel.new(rp, shownTable().reels[r])
 		reel.frame:SetPoint("TOPLEFT", rp, "TOPLEFT", (r - 1) * cell, 0)
 		W.reels[r] = reel
 	end
@@ -1954,10 +1976,10 @@ local function buildReels(f)
 	-- Lines and markers above the frame; sparkles on top.
 	local ov = frameAt(f, LEVEL.lines)
 	W.overlay = ov
-	local yLeft = Layout.markerY(T2.lines, 1, field[2], cell)
-	local yRight = Layout.markerY(T2.lines, 2, field[2], cell)
+	local yLeft = Layout.markerY(shownTable().lines, 1, field[2], cell)
+	local yRight = Layout.markerY(shownTable().lines, 2, field[2], cell)
 	W.lineSegs, W.markers = {}, {}
-	for li = 1, #T2.lines do
+	for li = 1, #shownTable().lines do
 		W.lineSegs[li], W.realLines = buildLine(ov, li, yLeft, yRight)
 	end
 	buildMarkers(ov, yLeft, yRight)
@@ -2385,7 +2407,7 @@ local function build()
 	W.stakeRow = CreateFrame("Frame", nil, f)
 	W.stakeRow:SetAllPoints(f)
 	W.stakeLabel = Skin.textIn(W.stakeRow, f, Lay.stakeLabel, "label", fs.label, c.muted, "LEFT")
-	W.stakeLabel:SetText(Skin.upper(string.format(L.STAKE_LINES, #T2.lines)))
+	W.stakeLabel:SetText(Skin.upper(string.format(L.STAKE_LINES, #shownTable().lines)))
 	W.pillSets = {}
 	buildPills()
 	W.offerRow = CreateFrame("Frame", nil, f)
@@ -2460,7 +2482,7 @@ local function build()
 	buildCard(f)
 	buildStage(f)
 	local ptf = frameAt(f, LEVEL.paytable)
-	Paytable.build(ptf, W, T2, symbolName, function()
+	Paytable.build(ptf, W, shownTable(), symbolName, function()
 		db.paytable = false
 		SlotFrame.layout()
 	end)
@@ -2534,6 +2556,7 @@ function applyGame()
 	setBalanceShown(restBalance())
 	setTotalShown(nil)
 	clearShow()
+	seatStrips()
 	S.offer = S.game:state() == "gamble"
 	idleText()
 	refresh()

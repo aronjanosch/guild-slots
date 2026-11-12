@@ -50,6 +50,21 @@ local function lookup(prefix, code)
 	return rawget(L, prefix .. tostring(code)) or tostring(code)
 end
 
+-- The tables the slot window plays (docs/table-t3-spec.md) and the one the form proposes when
+-- the guild info has no valid line. The settings default (T1) stays: the vectors pin it.
+local PLAYABLE_TABLES = { "T2", "T3" }
+local PROPOSED_TABLE = "T3"
+
+-- "T2 (95 %), T3 (92 %)" with each table's return rate.
+local function tablesNote()
+	local list = {}
+	for i, id in ipairs(PLAYABLE_TABLES) do
+		local tbl = ns.Tables.get(id)
+		list[i] = string.format(L.TABLE_RTP, id, ns.Tables.stats(tbl, tbl.lineCount, 0).rtp * 100)
+	end
+	return string.format(L.NOTE_TABLES, table.concat(list, ", "), PROPOSED_TABLE)
+end
+
 ---------------------------------------------------------------------------------------------
 -- Widgets
 
@@ -117,18 +132,21 @@ local function updateForm()
 		note(W.formNote, L.NOTE_LEVEL)
 	elseif s.E[#s.E] > 10 * s.E[1] then
 		note(W.formNote, L.WARN_SPREAD, c.lose)
+	elseif W.proposed then
+		note(W.formNote, tablesNote())
 	else
 		note(W.formNote, "")
 	end
 end
 
--- Fills the form from the guild info, or the defaults with table T2 (the table this version
--- plays).
+-- Fills the form from the guild info, or (no valid line) proposes the defaults with
+-- PROPOSED_TABLE; the note then names the tables this version plays.
 local function prefill()
 	local s = Roster.settings()
+	W.proposed = not s
 	if not s then
 		s = Settings.defaults()
-		s.T = "T2"
+		s.T = PROPOSED_TABLE
 	end
 	W.filling = true
 	for _, k in ipairs(FIELDS) do
