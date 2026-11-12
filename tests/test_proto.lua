@@ -89,6 +89,10 @@ t.test("LOG takes everything after the fifth bar as payload", function()
 	t.eq(Proto.encode("LOG", { reqId = H16, seq = 1, total = 1, payload = "a|b" }), "1|LOG|" .. H16 .. "|1|1|a|b", "encode")
 	local longest = assert(Proto.encode("LOG", { reqId = H16, seq = 200, total = 200, payload = string.rep("\255", 200) }))
 	t.ok(#longest <= Proto.MAX, "longest LOG fits")
+	-- More than 200 chunks still decodes, so that the officer can refuse it as too_large.
+	local big = Proto.decode("1|LOG|" .. H16 .. "|1|2147483648|x")
+	t.ok(big, "total 2^31 decodes")
+	t.eq(big.total, 2147483648, "total")
 end)
 
 t.test("encode codes for the payout messages", function()
@@ -102,7 +106,7 @@ t.test("encode codes for the payout messages", function()
 		{ "LOGREQ", { reqId = H32, player = "P" }, "long reqId" },
 		{ "LOG", { reqId = H16, seq = 0, total = 1, payload = "x" }, "seq 0" },
 		{ "LOG", { reqId = H16, seq = 2, total = 1, payload = "x" }, "seq above total" },
-		{ "LOG", { reqId = H16, seq = 1, total = 201, payload = "x" }, "total 201" },
+		{ "LOG", { reqId = H16, seq = 1, total = 2147483649, payload = "x" }, "total above 2^31" },
 		{ "LOG", { reqId = H16, seq = 1, total = 1, payload = "" }, "empty payload" },
 		{ "LOG", { reqId = H16, seq = 1, total = 1, payload = string.rep("x", 201) }, "payload 201" },
 		{ "LOG", { reqId = H16, seq = 1, total = 1, payload = "a\0b" }, "NUL in payload" },
@@ -130,7 +134,7 @@ t.test("decode rejects malformed payout messages", function()
 		"1|LOG|" .. H16 .. "|1|1",
 		"1|LOG|" .. H16 .. "|2|1|x",
 		"1|LOG|" .. H16 .. "|0|1|x",
-		"1|LOG|" .. H16 .. "|1|201|x",
+		"1|LOG|" .. H16 .. "|1|2147483649|x",
 		"1|LOG|" .. H16 .. "|1|1|" .. string.rep("x", 201),
 		"1|LOG|" .. H16 .. "|1|1|a\0",
 		"1|LOG|" .. H16:upper() .. "|1|1|x",

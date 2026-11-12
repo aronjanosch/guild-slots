@@ -976,6 +976,127 @@ t.test("a PAY that does not fit the account fails and leaves it as it was", func
 	t.eq(#account(p, "Pia").entries, count, "no entry")
 end)
 
+-- The PAY an officer would send for Pia's account as it is now.
+local function payFor(p, reqId, amount, payId)
+	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+	local entry = { type = "P", payId = payId or "00000000000000d7", officer = "Olga", amount = amount,
+		balanceAfter = state.balance - amount, time = 9000 }
+	assert(Ledger.apply(state, entry))
+	return { reqId = reqId, payId = entry.payId, player = "Pia", amount = amount, balanceAfter = entry.balanceAfter,
+		time = entry.time, head = Ledger.shortHead(state), anchors = state.anchors }
+end
+
+t.test("an open request survives a reload: lock, LOGREQ and PAY", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local balance = p.session:game().balance
+	local reqId = assert(p.session:requestPayout("Olga", 30))
+	-- Reload before the PAYREQ is even delivered.
+	local p2 = replaceSession(w, p, addSession(w, "Pia", { store = p.env.store }))
+	t.eq(p2.session:payout().reqId, reqId, "request restored")
+	t.eq(p2.session:payout().status, "wait_officer", "status restored")
+	t.eq(p2.session:game():status(), "payout", "lock restored")
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "the restored session answered the LOGREQ")
+	assert(o.session:confirm(reqId))
+	flush(w)
+	t.eq(p2.session:payout().status, "paid", "paid")
+	t.eq(p2.session:game().balance, balance - 30, "balance")
+	t.eq(p2.env.store.payout[GUILD].Pia.status, "paid", "kept in the store")
+	t.eq(p2.env.store.payout[GUILD].Pia.chunks, nil, "no account text in the store")
+end)
+
+t.test("a reload while sending sends the LOG again", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	local send = p.env.send
+	p.env.send = function(text)
+		if text:find("|LOG|", 1, true) then return nil, "full" end
+		return send(text)
+	end
+	flush(w)
+	t.eq(p.session:payout().status, "sending", "stuck sending")
+	local p2 = replaceSession(w, p, addSession(w, "Pia", { store = p.env.store }))
+	t.eq(p2.session:payout().status, "sending", "restored sending")
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "ready")
+	t.eq(p2.session:payout().status, "wait_decision", "all sent")
+end)
+
+t.test("a PAY after expiry is accepted while the account is unchanged", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local balance = p.session:game().balance
+	local reqId = assert(p.session:requestPayout("Olga", 20))
+	untilReady(w, o, reqId)
+	local pay = payFor(p, reqId, 20)
+	w.now = w.now + 300
+	p.session:tick()
+	t.eq(p.session:payout().status, "expired", "expired")
+	t.eq(p.session:game():status(), "ok", "lock ended")
+	-- Even after a reload.
+	local p2 = replaceSession(w, p, addSession(w, "Pia", { store = p.env.store }))
+	t.eq(p2.session:payout().status, "expired", "restored as expired")
+	inject(w, "Olga", "PAY", pay)
+	t.eq(p2.session:payout().status, "paid", "late PAY accepted")
+	t.eq(p2.session:game().balance, balance - 20, "paid")
+end)
+
+t.test("a late PAY fails once the player has spun, and is ignored after a newer request", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local id1 = assert(p.session:requestPayout("Olga", 20))
+	untilReady(w, o, id1)
+	local pay1 = payFor(p, id1, 20)
+	w.now = w.now + 300
+	pump(w)
+	play(w, p, 3)
+	local count = #account(p, "Pia").entries
+	inject(w, "Olga", "PAY", pay1)
+	t.eq(p.session:payout().status, "failed", "failed")
+	-- The spins moved the balance, so the ledger refuses the entry before the head is compared.
+	t.eq(p.session:payout().code, "bad_balance", "ledger code")
+	t.eq(#account(p, "Pia").entries, count, "account unchanged")
+	-- A newer request: the PAY of the old one is no longer for this request.
+	local id2 = assert(p.session:requestPayout("Olga", 10))
+	local pay2 = payFor(p, id1, 20, "00000000000000d6")
+	inject(w, "Olga", "PAY", pay2)
+	t.eq(p.session:payout().reqId, id2, "newer request")
+	t.eq(p.session:payout().status, "wait_decision", "untouched")
+	t.eq(#account(p, "Pia").entries, count, "still unchanged")
+end)
+
+t.test("a PAY with another amount fails with amount_mismatch", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local balance = p.session:game().balance
+	local reqId = assert(p.session:requestPayout("Olga", 20))
+	untilReady(w, o, reqId)
+	inject(w, "Olga", "PAY", payFor(p, reqId, 25))
+	t.eq(p.session:payout().status, "failed", "failed")
+	t.eq(p.session:payout().code, "amount_mismatch", "amount_mismatch")
+	t.eq(p.session:game().balance, balance, "nothing paid")
+end)
+
+t.test("too_large: more than 200 announced chunks, or more entries than Pack allows", function()
+	local w, o = payWorld()
+	local id = "00000000000000e5"
+	inject(w, "Pam", "PAYREQ", { reqId = id, officer = "Olga", amount = 1, head = H32, count = 1 })
+	inject(w, "Pam", "LOG", { reqId = id, seq = 1, total = 201, payload = "s10" })
+	t.eq(req(o, id).status, "failed", "failed")
+	t.eq(req(o, id).code, "too_large", "too_large")
+	t.eq(w.log[#w.log].msg.reason, "too_large", "REJECT too_large")
+	t.eq(Pack.MAX_ENTRIES, 100000, "limit")
+	local id2 = "00000000000000e6"
+	inject(w, "Pam", "PAYREQ", { reqId = id2, officer = "Olga", amount = 1, head = H32, count = 100001 })
+	t.eq(req(o, id2).status, "failed", "count over the limit")
+	t.eq(w.log[#w.log].msg.reason, "too_large", "REJECT too_large")
+	local id3 = "00000000000000e7"
+	inject(w, "Pam", "PAYREQ", { reqId = id3, officer = "Olga", amount = 1, head = H32, count = 100000 })
+	t.eq(req(o, id3).status, "fetching", "at the limit")
+end)
+
 t.test("a LOG that does not unpack is rejected as bad_log", function()
 	local w, o = payWorld()
 	local id = "00000000000000e4"
