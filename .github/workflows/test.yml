@@ -25,6 +25,9 @@ jobs:
             echo "tests/smoke_ui.lua not present, skipping"
           fi
 
+      - name: Run network smoke test
+        run: luajit tests/smoke_net.lua
+
       - name: Regenerate test vectors and check for drift
         run: |
           if [ -f tools/ref/gen_vectors.py ]; then

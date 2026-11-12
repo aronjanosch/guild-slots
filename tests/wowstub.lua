@@ -252,6 +252,69 @@ function stub.isPlaying(name)
 end
 C_Timer = { After = function(_, fn) stub.timers = stub.timers or {}; table.insert(stub.timers, fn) end }
 
+-- Guild and addon-message API ------------------------------------------------------------
+--   stub.guildName, stub.playerName, stub.playerGUID, stub.infoText, stub.serverTime
+--   stub.roster      list of { name, rankName, rankIndex, level, class, zone, note, officerNote, online }
+--   stub.sendCode    result code SendAddonMessage returns (default 0)
+--   stub.sent        { { prefix, text, channel, target }, ... } every call, accepted or not
+--   stub.prefixes    registered prefixes
+--   stub.rosterRequests  count of C_GuildInfo.GuildRoster calls
+--   stub.deliver(prefix, text, channel, sender)   fire CHAT_MSG_ADDON
+stub.guildName = "Test Guild"
+stub.playerName = "Alice Smith"
+stub.playerGUID = "Player-1-00000001"
+stub.infoText = ""
+stub.serverTime = 1700000000
+stub.roster = {}
+stub.sendCode = 0
+stub.sent = {}
+stub.prefixes = {}
+stub.rosterRequests = 0
+
+function IsInGuild() return stub.guildName ~= nil end
+function GetGuildInfo(unit)
+	check(unit == "player", "GetGuildInfo: only 'player' is modelled")
+	return stub.guildName
+end
+function GetUnitName(unit, showServer)
+	check(unit == "player", "GetUnitName: only 'player' is modelled")
+	return stub.playerName
+end
+function UnitName(unit)
+	check(unit == "player", "UnitName: only 'player' is modelled")
+	return (stub.playerName:match("^(%S+)"))
+end
+function UnitGUID(unit) return stub.playerGUID end
+function GetServerTime() return stub.serverTime end
+function debugprofilestop() return clock * 1000 end
+function GetGuildInfoText() return stub.infoText end
+function GetNumGuildMembers() return #stub.roster, #stub.roster end
+function GetGuildRosterInfo(i)
+	local m = stub.roster[i]
+	if not m then return nil end
+	return m.name, m.rankName or "Rank", m.rankIndex, m.level or 60, m.class or "Warrior",
+		m.zone or "", m.note or "", m.officerNote or "", m.online and true or false
+end
+C_GuildInfo = C_GuildInfo or {}
+function C_GuildInfo.GuildRoster() stub.rosterRequests = stub.rosterRequests + 1 end
+C_ChatInfo = {
+	RegisterAddonMessagePrefix = function(prefix)
+		check(type(prefix) == "string" and #prefix > 0 and #prefix <= 16, "bad addon prefix")
+		stub.prefixes[#stub.prefixes + 1] = prefix
+		return true
+	end,
+	SendAddonMessage = function(prefix, text, channel, target)
+		check(type(prefix) == "string" and type(text) == "string", "SendAddonMessage: bad prefix or text")
+		check(type(channel) == "string", "SendAddonMessage: bad channel")
+		stub.sent[#stub.sent + 1] = { prefix = prefix, text = text, channel = channel, target = target }
+		return stub.sendCode
+	end,
+}
+
+function stub.deliver(prefix, text, channel, sender)
+	stub.fire("CHAT_MSG_ADDON", prefix, text, channel or "GUILD", sender)
+end
+
 function stub.fire(event, ...)
 	for _, f in ipairs(stub.frames) do
 		if f._events[event] and f._scripts.OnEvent then
