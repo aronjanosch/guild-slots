@@ -327,6 +327,17 @@ function Anim.span(a, b, lo, hi)
 	return (va - a) / (b - a), (vb - a) / (b - a)
 end
 
+-- Window shake t seconds into a shake of `dur`: offset dx, dy in pixels, at most `amp`, dying
+-- away; exactly 0, 0 from `dur` on (and before 0).
+function Anim.shake(t, dur, amp, freq)
+	if t <= 0 or t >= dur then
+		return 0, 0
+	end
+	local k = amp * (1 - t / dur)
+	local w = 2 * pi * freq * t
+	return k * sin(w), k * 0.6 * sin(1.7 * w + 1)
+end
+
 -- Coin i of the coin rain, t seconds into its fall of `life` seconds: x (0..1 across the
 -- window), y (0 top, 1 bottom; starts above, ends below), size class 1..3 and flipbook phase
 -- 0..7. Falls straight down and speeds up a little.
