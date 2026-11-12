@@ -125,6 +125,7 @@ function Guild.new(env)
 	self.account = accounts[self.me]
 	subtable(self.store, "purchases")
 	subtable(self.store, "requests")
+	self:restorePayout()
 
 	local entries = self.account and self.account.entries
 	if type(entries) == "table" and #entries > 0 then
@@ -228,7 +229,7 @@ function Session:expire()
 		end
 	end
 	local r = self.request
-	if r and PLAYER_OPEN[r.status] and now - r.started >= REQUEST_TIMEOUT then
+	if r and PLAYER_OPEN[r.status] and now - r.time >= REQUEST_TIMEOUT then
 		self:setPayout("expired")
 	end
 	for i = #self.reqs, 1, -1 do
@@ -456,11 +457,31 @@ function Session:payout()
 	}
 end
 
+-- The last request lives in store.payout[guild][player], so a reload keeps the lock and can
+-- still answer LOGREQ and accept PAY/REJECT. The LOG chunks are rebuilt from the account.
+local PLAYER_STATES = {
+	wait_officer = true, sending = true, wait_decision = true, paid = true, rejected = true, expired = true,
+	failed = true,
+}
+
+function Session:restorePayout()
+	local list = self.store.payout and self.store.payout[self.guild]
+	local r = type(list) == "table" and list[self.me]
+	if type(r) ~= "table" or type(r.reqId) ~= "string" or type(r.officer) ~= "string" or type(r.amount) ~= "number"
+		or type(r.time) ~= "number" or not PLAYER_STATES[r.status] then
+		return
+	end
+	if r.status == "sending" then
+		r.sent = 0 -- everything again: the officer ignores chunks it already has
+	end
+	self.request = r
+end
+
 function Session:setPayout(status, code)
 	local r = self.request
 	r.status, r.code = status, code
 	if not PLAYER_OPEN[status] then
-		r.chunks = nil
+		self.logChunks = nil
 		self.gameObj:refresh()
 	end
 	event(self, "payout", self:payout())
@@ -500,10 +521,13 @@ function Session:requestPayout(officer, amount)
 	-- An open gamble offer is taken: the ledger already holds the win.
 	self.declined = true
 	self.gameObj:refresh()
+	-- head and count are the account at the request: a late PAY only fits while they still hold.
 	self.request = {
 		reqId = reqId, officer = officer, amount = amount, status = "wait_officer", sent = 0, total = 0,
-		started = env.now(),
+		time = env.now(), head = Ledger.shortHead(self.state), count = self.state.count,
 	}
+	self.logChunks = nil
+	subtable(subtable(self.store, "payout"), self.guild)[self.me] = self.request
 	event(self, "payout", self:payout())
 	return reqId
 end
@@ -514,9 +538,17 @@ function Session:pumpLog()
 	if not r or r.status ~= "sending" then
 		return
 	end
+	local chunks = self.logChunks
+	if not chunks then
+		chunks = Pack.split(Pack.encode(self.account.entries))
+		if #chunks ~= r.total then
+			return self:setPayout("failed", "mismatch") -- the account changed under a restored request
+		end
+		self.logChunks = chunks
+	end
 	while r.sent < r.total do
 		local seq = r.sent + 1
-		if not self:send("LOG", { reqId = r.reqId, seq = seq, total = r.total, payload = r.chunks[seq] }) then
+		if not self:send("LOG", { reqId = r.reqId, seq = seq, total = r.total, payload = chunks[seq] }) then
 			return
 		end
 		r.sent = seq
@@ -533,15 +565,21 @@ function Session:onLogReq(sender, msg)
 	if #chunks > MAX_CHUNKS then
 		return self:setPayout("failed", "too_large")
 	end
-	r.chunks, r.total, r.sent = chunks, #chunks, 0
+	self.logChunks, r.total, r.sent = chunks, #chunks, 0
 	self:setPayout("sending")
 	self:pumpLog()
 end
 
+-- PAY for the open request, or for the last one after it expired: the head check below only
+-- passes while the account is unchanged since the request.
 function Session:onPay(sender, msg)
 	local r = self.request
-	if not r or not PLAYER_OPEN[r.status] or r.reqId ~= msg.reqId or sender ~= r.officer then
+	if not r or not (PLAYER_OPEN[r.status] or r.status == "expired") or r.reqId ~= msg.reqId
+		or sender ~= r.officer then
 		return
+	end
+	if msg.player ~= self.me or msg.amount ~= r.amount then
+		return self:setPayout("failed", "amount_mismatch")
 	end
 	local entry = {
 		type = "P", payId = msg.payId, officer = sender, amount = msg.amount, balanceAfter = msg.balanceAfter,
@@ -668,6 +706,11 @@ function Session:onLog(sender, msg)
 		return
 	end
 	if r.total == nil then
+		if msg.total > MAX_CHUNKS then
+			r.total = msg.total
+			self:sendReject(r.reqId, r.player, "too_large")
+			return self:setReq(r, "failed", "too_large")
+		end
 		r.total = msg.total
 	elseif r.total ~= msg.total then
 		return

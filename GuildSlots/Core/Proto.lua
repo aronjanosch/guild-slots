@@ -109,8 +109,10 @@ local TYPES = {
 	},
 	LOG = {
 		field("reqId", hex(16)),
-		field("seq", int(1, 200)),
-		field("total", int(1, 200)),
+		-- seq and total are read up to 2^31 so that the officer can refuse more than 200 chunks
+		-- with REJECT too_large instead of never hearing them.
+		field("seq", int(1, MAX_SPIN)),
+		field("total", int(1, MAX_SPIN)),
 		field("payload", payload),
 		rest = true, -- the last field takes the rest of the message
 		valid = function(m) return m.seq <= m.total end,

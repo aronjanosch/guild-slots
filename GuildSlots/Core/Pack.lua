@@ -17,7 +17,7 @@ local dec = Engine.dec
 
 Pack.CHUNK = 200
 -- decode never builds more entries than this unless the caller passes its own limit.
-Pack.MAX_ENTRIES = 1000000
+Pack.MAX_ENTRIES = 100000
 
 local MAX_NUMBER = 9007199254740991 -- 2^53 - 1
 
