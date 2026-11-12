@@ -99,14 +99,14 @@ def bell(freq, length, decay, partials=((1, 1.0), (2.0, 0.35), (3.01, 0.12))):
 
 def tension_riser(length=3.0):
     """Anticipation: a buzzy tone gliding up an octave and a half with a quickening tremolo and
-    a swelling noise bed. Stopped by the addon when the last teased reel lands."""
+    a very quiet noise bed. Stopped by the addon when the last teased reel lands."""
     t = seconds(length)
     u = t / length
     freq = 110 * 2 ** (1.6 * u)  # 110 Hz -> about 333 Hz
     phase = 2 * np.pi * np.cumsum(freq) / RATE
     tone = np.sin(phase) + 0.45 * np.sin(2 * phase) + 0.2 * np.sin(3 * phase)
     tremolo = 0.75 + 0.25 * np.sin(2 * np.pi * np.cumsum(4 + 10 * u) / RATE)
-    noise = bandpass(rng.standard_normal(len(t)), 400, 3000) * (0.15 + 0.5 * u)
+    noise = bandpass(rng.standard_normal(len(t)), 400, 3000) * (0.02 + 0.04 * u)  # barely there
     out = (0.55 * tone * tremolo + noise) * (0.35 + 0.65 * u)
     return out * envelope(len(t), 0.25, 0.06)
 
@@ -117,7 +117,7 @@ def count_tick(step):
     freq = 1046.5 * 2 ** (2 * step / 12)  # C6 upwards in whole tones
     blip = np.sin(2 * np.pi * freq * t) + 0.25 * np.sin(2 * np.pi * 2 * freq * t)
     click = bandpass(rng.standard_normal(len(t)), 2000, 7000) * np.exp(-t / 0.002)
-    out = (blip * np.exp(-t / 0.018) + 0.3 * click)
+    out = (blip * np.exp(-t / 0.018) + 0.08 * click)
     return out * envelope(len(t), 0.001, 0.01)
 
 
@@ -127,7 +127,7 @@ def tease_miss():
     freq = 55 + 45 * np.exp(-t / 0.05)
     body = np.sin(2 * np.pi * np.cumsum(freq) / RATE) * np.exp(-t / 0.11)
     thump = lowpass(rng.standard_normal(len(t)), 300) * np.exp(-t / 0.03)
-    return (body + 1.5 * thump) * envelope(len(t), 0.002, 0.05)
+    return (body + 0.6 * thump) * envelope(len(t), 0.002, 0.05)
 
 
 def tease_hit():
@@ -136,7 +136,7 @@ def tease_hit():
     for i, f in enumerate((1046.5, 1318.5, 1568.0, 2093.0)):
         add(out, 0.8 * bell(f, 0.8 - 0.05 * i, 0.22), 0.05 * i)
     t = seconds(0.8)
-    shimmer = bandpass(rng.standard_normal(len(t)), 5000, 11000) * np.exp(-t / 0.12) * 0.25
+    shimmer = bandpass(rng.standard_normal(len(t)), 5000, 11000) * np.exp(-t / 0.12) * 0.03
     return (out + shimmer) * envelope(len(t), 0.002, 0.08)
 
 
@@ -150,7 +150,7 @@ def free_start():
     for f in (880.0, 1108.7, 1318.5, 1760.0):
         add(out, 0.35 * bell(f, length - 0.45, 0.45), 0.45)
     t = seconds(length)
-    swell = bandpass(rng.standard_normal(len(t)), 2500, 9000) * np.sin(np.pi * t / length) ** 2 * 0.12
+    swell = bandpass(rng.standard_normal(len(t)), 2500, 9000) * np.sin(np.pi * t / length) ** 2 * 0.015
     return (out + swell) * envelope(len(t), 0.003, 0.25)
 
 
@@ -159,7 +159,7 @@ def tier_step():
     t = seconds(0.7)
     freq = 48 + 70 * np.exp(-t / 0.04)
     boom = np.sin(2 * np.pi * np.cumsum(freq) / RATE) * np.exp(-t / 0.18)
-    burst = lowpass(rng.standard_normal(len(t)), 1200) * np.exp(-t / 0.04) * 0.6
+    burst = lowpass(rng.standard_normal(len(t)), 1200) * np.exp(-t / 0.04) * 0.15
     stab = np.zeros(len(t))
     for f in (523.3, 659.3, 784.0, 1046.5):
         stab += 0.3 * bell(f, 0.7, 0.2)
