@@ -281,6 +281,48 @@ local function evaluateLines(tbl, strips, stops, stake, X)
 end
 Tables.evaluateLines = evaluateLines
 
+-- One round of a lines table (docs/table-t2-spec.md section 5): the base game plus every free
+-- game it awards. Pure; the stops come from `draw`:
+--   draw.base()    -> { s1..s5 } base-game stops
+--   draw.symbol()  -> 0..#tbl.expanding-1, index of the expanding symbol; called once, only
+--                     when free games are awarded
+--   draw.free(i)   -> { s1..s5 } stops of the i-th free game of the round (i counts across retriggers)
+-- No input checks: callers pass a valid table, stake and cap. Returns the round without `n`.
+function Tables.playRound(tbl, stake, cap, draw)
+	local strips = tbl.reels
+	local stops = draw.base()
+	local base = evaluateLines(tbl, strips, stops, stake, nil)
+	local round = {
+		kind = "lines", stake = stake, lineBet = stake / tbl.lineCount,
+		stops = stops, window = base.window, lines = base.lines, scatter = base.scatter,
+		base = base.win,
+	}
+	local win = base.win
+	local trigger, award, limit = tbl.scatter.trigger, tbl.scatter.games, tbl.maxFree
+	if base.scatter.count >= trigger then
+		local X = tbl.expanding[draw.symbol() + 1]
+		local freeStrips, games, freeWin = tbl.freeReels, {}, 0
+		local left, played = award, 0
+		while left > 0 and played < limit do
+			played, left = played + 1, left - 1
+			local game = evaluateLines(tbl, freeStrips, draw.free(played), stake, X)
+			game.retrigger = game.scatter.count >= trigger
+			if game.retrigger then
+				left = left + award
+			end
+			games[played] = game
+			freeWin = freeWin + game.win
+		end
+		round.free = { symbol = X, awarded = played, win = freeWin, games = games }
+		win = win + freeWin
+	end
+	if cap and cap > 0 and win > cap then
+		win = cap
+	end
+	round.win = win
+	return round
+end
+
 local function isLinesTable(tbl)
 	return isTable(tbl) and tbl.kind == "lines"
 end

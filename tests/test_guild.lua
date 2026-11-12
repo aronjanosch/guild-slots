@@ -95,8 +95,9 @@ local function account(s, player)
 end
 
 -- A world with officer Olga and player Pia, Pia already holding `tokens`.
-local function funded(tokens)
+local function funded(tokens, line)
 	local w = newWorld()
+	w.line = line or w.line
 	local o = addSession(w, "Olga")
 	local p = addSession(w, "Pia")
 	local buyId = assert(o.session:grant("Pia", tokens or 1000))
@@ -370,6 +371,33 @@ t.test("spins and gamble steps replay from the store to the same balance", funct
 	t.eq(o.env.store.heard[GUILD].Pia.n, spins, "officer stored it")
 	t.eq(p.env.store.heard, nil, "a player stores nothing heard")
 	t.ok(p.session:lastSpin("Pia"), "the player still remembers in memory")
+end)
+
+local LINE_T2 = "GSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T2"
+
+t.test("a T2 account plays rounds that replay to the same balance", function()
+	local w, _, p = funded(1000, LINE_T2)
+	local g = p.session:game()
+	t.eq(g.tbl.id, "T2", "table from the purchase")
+	t.eq(g:info().kind, "lines", "info kind")
+	for _ = 1, 60 do
+		w.now = w.now + 2
+		if g.balance < g.stake then break end
+		local r, code = g:spin()
+		t.ok(r, "spin: " .. tostring(code))
+		t.eq(r.kind, "spin", "kind")
+		t.eq(r.round.kind, "lines", "round")
+		t.eq(r.round.n, r.n, "round number")
+		t.eq(r.win, r.round.win, "win")
+		t.eq(r.balance, g.balance, "balance")
+		t.eq(r.canGamble, r.pending > 0, "gamble flag")
+		t.eq(r.stops, nil, "no T1 stops")
+		t.eq(r.symbols, nil, "no T1 symbols")
+		flush(w)
+		if g:state() == "gamble" then g:take() end
+	end
+	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+	t.eq(state.balance, g.balance, "replayed balance")
 end)
 
 t.test("SPIN carries the short head before the entry", function()

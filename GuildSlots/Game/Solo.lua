@@ -12,7 +12,7 @@ ns.Solo = Solo
 
 local START = 1000
 local REELS = 3
-local SYMBOL_ORDER = { "D", "M", "W", "T", "G", "S", "K" }
+local SYMBOL_ORDER = { "D", "M", "W", "T", "G", "S", "K" } -- T1
 
 local Game = {}
 Game.__index = Game
@@ -21,11 +21,11 @@ local function isAmount(v)
 	return type(v) == "number" and v % 1 == 0 and v >= 0
 end
 
--- opts: rng (required), table ("T1"), start (1000), stakes ({10,50,100}),
+-- opts: rng (required), table ("T2"), start (1000), stakes ({10,50,100}),
 -- maxGamble (3), cap (0 = none), balance (restore a saved balance).
 function Solo.new(opts)
 	assert(type(opts) == "table" and type(opts.rng) == "function", "Solo.new needs opts.rng")
-	local tbl = assert(ns.Tables.get(opts.table or "T1"), "unknown table")
+	local tbl = assert(ns.Tables.get(opts.table or "T2"), "unknown table")
 	local start = opts.start or START
 	local g = setmetatable({
 		rng = opts.rng,
@@ -67,6 +67,9 @@ function Game:spin()
 	if self.balance < stake then
 		return nil, "no_funds"
 	end
+	if self.tbl.kind == "lines" then
+		return self:spinRound(stake)
+	end
 	local tbl, stops, window = self.tbl, {}, {}
 	for r = 1, REELS do
 		stops[r] = self.rng(#tbl.reels[r])
@@ -93,6 +96,37 @@ function Game:spin()
 		canGamble = self.pending > 0,
 		winReels = { win > 0, win > 0, win > 0 and a == c },
 		anticipation = a == b,
+	}
+end
+
+-- A round of a lines table (T2), stops from rng: base stops, then the expanding symbol only
+-- when free games are awarded, then the stops of each free game.
+function Game:spinRound(stake)
+	local tbl, rng = self.tbl, self.rng
+	local function stopsOf(strips)
+		local stops = {}
+		for r = 1, #strips do
+			stops[r] = rng(#strips[r])
+		end
+		return stops
+	end
+	local round = ns.Tables.playRound(tbl, stake, self.cap, {
+		base = function() return stopsOf(tbl.reels) end,
+		symbol = function() return rng(#tbl.expanding) end,
+		free = function() return stopsOf(tbl.freeReels) end,
+	})
+	local win = round.win
+	self.balance = self.balance - stake + win
+	self.step = 0
+	self.pending = (win > 0 and self.maxGamble > 0) and win or 0
+	return {
+		kind = "spin",
+		stake = stake,
+		win = win,
+		balance = self.balance,
+		pending = self.pending,
+		canGamble = self.pending > 0,
+		round = round,
 	}
 end
 
@@ -142,15 +176,26 @@ function Game:refill()
 	return { kind = "refill", balance = self.balance }
 end
 
--- Paytable data for display: multipliers, symbol order (best first), return rate.
-function Game:info()
-	local stats = ns.Tables.stats(self.tbl, self.stake, self.cap)
-	return {
-		pair = self.tbl.pair,
-		triple = self.tbl.triple,
-		order = SYMBOL_ORDER,
+-- Paytable data for display, shared with the guild game. A lines table gives
+-- { kind = "lines", pays, lines, scatter, order, lineBet, rtp, hit, maxGamble }; the classic
+-- table { kind = "classic", pair, triple, order, rtp, hit, maxGamble }.
+function Solo.info(tbl, stake, cap, maxGamble)
+	local stats = ns.Tables.stats(tbl, stake, cap)
+	local info = {
+		kind = tbl.kind,
 		rtp = stats and stats.rtp or 0,
 		hit = stats and stats.hit or 0,
-		maxGamble = self.maxGamble,
+		maxGamble = maxGamble,
 	}
+	if tbl.kind == "lines" then
+		info.pays, info.lines, info.scatter, info.order = tbl.pays, tbl.lines, tbl.scatter, tbl.order
+		info.lineBet = stake / tbl.lineCount
+	else
+		info.pair, info.triple, info.order = tbl.pair, tbl.triple, SYMBOL_ORDER
+	end
+	return info
+end
+
+function Game:info()
+	return Solo.info(self.tbl, self.stake, self.cap, self.maxGamble)
 end

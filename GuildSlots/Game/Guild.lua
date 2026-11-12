@@ -579,6 +579,18 @@ function Game:spin()
 	self:refresh()
 
 	local tbl = s.state.tbl
+	if tbl.kind == "lines" then
+		return {
+			kind = "spin",
+			n = entry.n,
+			stake = stake,
+			win = info.win,
+			balance = info.balance,
+			pending = info.pending,
+			canGamble = info.pending > 0,
+			round = info.round,
+		}
+	end
 	local stops = info.stops
 	local window = {}
 	for r = 1, 3 do
@@ -652,13 +664,5 @@ function Game:gamble()
 end
 
 function Game:info()
-	local stats = Tables.stats(self.tbl, self.stake, self.cap)
-	return {
-		pair = self.tbl.pair,
-		triple = self.tbl.triple,
-		order = { "D", "M", "W", "T", "G", "S", "K" },
-		rtp = stats and stats.rtp or 0,
-		hit = stats and stats.hit or 0,
-		maxGamble = self.maxGamble,
-	}
+	return ns.Solo.info(self.tbl, self.stake, self.cap, self.maxGamble)
 end
