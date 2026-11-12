@@ -168,6 +168,10 @@ function Object:SetVertexColor(r, g, b) check(isNum(r) and isNum(g) and isNum(b)
 function Object:SetText(t)
 	check(t == nil or type(t) == "string" or isNum(t), "SetText: bad value")
 	self._text = t and tostring(t) or nil
+	-- Like the client: an edit box reports a scripted change with userInput = false.
+	if self._kind == "EditBox" and self._scripts.OnTextChanged then
+		self._scripts.OnTextChanged(self, false)
+	end
 end
 function Object:GetText() return self._text end
 function Object:SetTextColor(r, g, b) check(isNum(r) and isNum(g) and isNum(b), "SetTextColor needs numbers") end
@@ -202,6 +206,35 @@ function Object:StopMovingOrSizing() end
 function Object:SetClampedToScreen() end
 function Object:SetToplevel() end
 function Object:SetClipsChildren() end
+function Object:SetJustifyV(j) check(j == "TOP" or j == "MIDDLE" or j == "BOTTOM", "SetJustifyV: bad value") end
+function Object:SetWordWrap() end
+
+-- EditBox
+function Object:SetAutoFocus(on) self._autoFocus = on and true or false end
+function Object:SetMaxLetters(n) check(isNum(n), "SetMaxLetters needs a number") end
+function Object:SetTextInsets(l, r, t, b)
+	check(isNum(l) and isNum(r) and isNum(t) and isNum(b), "SetTextInsets needs four numbers")
+end
+function Object:SetFocus()
+	self._focus = true
+	if self._scripts.OnEditFocusGained then self._scripts.OnEditFocusGained(self) end
+end
+function Object:ClearFocus()
+	local had = self._focus
+	self._focus = false
+	if had and self._scripts.OnEditFocusLost then self._scripts.OnEditFocusLost(self) end
+end
+function Object:HasFocus() return self._focus and true or false end
+function Object:HighlightText() self._highlighted = true end
+function Object:SetCursorPosition(n) check(isNum(n), "SetCursorPosition needs a number") end
+
+-- Simulates the user typing into an edit box: the text is replaced and OnTextChanged runs
+-- with userInput = true.
+function stub.type(box, t)
+	check(box._kind == "EditBox", "stub.type needs an edit box")
+	box._text = t
+	if box._scripts.OnTextChanged then box._scripts.OnTextChanged(box, true) end
+end
 
 -- Globals --------------------------------------------------------------------------------
 
@@ -250,6 +283,21 @@ function stub.isPlaying(name)
 	end
 	return false
 end
+-- Addon metadata read from the TOC on disk ("## Version: x" -> GetAddOnMetadata(name, "Version")).
+C_AddOns = {
+	GetAddOnMetadata = function(name, field)
+		check(type(name) == "string" and type(field) == "string", "GetAddOnMetadata: bad arguments")
+		local fh = io.open(name .. "/" .. name .. ".toc")
+		if not fh then return nil end
+		local value
+		for line in fh:lines() do
+			local k, v = line:match("^## ([%w%-]+):%s*(.-)%s*$")
+			if k == field then value = v end
+		end
+		fh:close()
+		return value
+	end,
+}
 C_Timer = { After = function(_, fn) stub.timers = stub.timers or {}; table.insert(stub.timers, fn) end }
 
 -- Guild and addon-message API ------------------------------------------------------------

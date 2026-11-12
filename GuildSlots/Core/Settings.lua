@@ -166,6 +166,16 @@ function Settings.parse(line)
 		s.T = values.T
 	end
 
+	-- A lines table (T2) splits the stake over its lines: every stake must divide evenly.
+	local lineCount = ns.Tables.get(s.T).lineCount
+	if lineCount then
+		for _, stake in ipairs(s.E) do
+			if stake % lineCount ~= 0 then
+				return nil, "bad_stakes"
+			end
+		end
+	end
+
 	s.Z = 2 * s.W + 3
 	return s
 end

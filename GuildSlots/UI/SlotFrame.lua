@@ -1,7 +1,8 @@
 local addonName, ns = ...
 
--- The slot machine window (solo mode, play money). Game rules live in ns.Solo; this file
--- builds the window and animates the plain result tables Solo returns.
+-- The slot machine window. Game rules live in ns.Solo (play money) and in the guild session's
+-- game (ns.Guild, tokens); both have the same shape. This file builds the window and animates
+-- the plain result tables they return. S.solo is the solo game, S.game the one shown.
 
 local L, Theme, Anim, Reel = ns.L, ns.Theme, ns.Anim, ns.Reel
 
@@ -18,7 +19,7 @@ end
 
 local db -- GuildSlotsDB, set on ADDON_LOADED (or on first use)
 local W = {} -- widgets
-local S = { now = 0, phase = "idle", counts = {}, offer = false } -- animation state
+local S = { now = 0, phase = "idle", counts = {}, offer = false, mode = "solo" } -- animation state
 SlotFrame.widgets, SlotFrame.state = W, S
 
 ---------------------------------------------------------------------------------------------
@@ -184,6 +185,12 @@ local function button(parent, w, h, style, size, onClick)
 	return b
 end
 
+-- Shared with UI/OfficerFrame.lua so both windows look the same.
+SlotFrame.ui = {
+	fmt = fmt, rgb = rgb, paint = paint, font = font, text = text, panel = panel, button = button,
+	chat = chat, playSound = playSound,
+}
+
 ---------------------------------------------------------------------------------------------
 -- Saved state
 
@@ -222,8 +229,8 @@ local function applyPosition()
 end
 
 local function saveGame()
-	if db and S.game then
-		db.soloBalance = S.game.balance
+	if db and S.solo then
+		db.soloBalance = S.solo.balance
 	end
 end
 
@@ -257,6 +264,35 @@ local function message(str, color)
 	S.messageUntil = S.now + Theme.timing.message
 end
 
+-- What the window shows while idle in guild mode when the game cannot be played.
+local STATUS_LINES = { no_account = "ST_NO_ACCOUNT", level = "ST_LEVEL", broken = "ST_BROKEN" }
+
+local function statusLine()
+	if S.mode ~= "guild" then
+		return nil
+	end
+	local key = STATUS_LINES[S.game:status()]
+	return key and L[key] or nil
+end
+
+local function idleText()
+	setWinText(statusLine() or "", Theme.colors.muted)
+end
+
+-- The short line for a code from spin() or gamble().
+local CODE_LINES = {
+	no_account = "ST_NO_ACCOUNT", level = "ST_LEVEL", broken = "ST_BROKEN", wait = "WAIT",
+	send = "SEND_FAILED",
+}
+
+local function codeLine(code)
+	if code == "no_funds" then
+		return S.mode == "guild" and L.NO_TOKENS or L.NO_FUNDS
+	end
+	local key = CODE_LINES[code]
+	return key and L[key] or string.format(L.SPIN_FAILED, tostring(code))
+end
+
 local function setReelModes(modes)
 	for i = 1, REELS do
 		W.reels[i]:setMode(modes and modes[i] or nil)
@@ -273,6 +309,10 @@ local function refresh()
 		pill:setEnabled(not busy)
 	end
 	W.refill:setEnabled(not busy)
+	W.refill:SetShown(S.mode == "solo")
+	W.mode.label:SetText(S.mode == "guild" and L.GUILD or L.SOLO)
+	local officer = ns.Main and ns.Main.isOfficer() or false
+	W.officer:SetShown(officer)
 	local offer = S.offer and game:state() == "gamble" and not busy
 	if offer then
 		W.take.label:SetText(string.format(L.TAKE, fmt(game.pending)))
@@ -315,7 +355,7 @@ local function present()
 		setReelModes(modes)
 		S.pulseStart = S.now
 		countTo("win", 0, r.win, dur)
-		countTo("balance", S.balanceShown, r.balance, dur)
+		countTo("balance", S.balanceShown, S.game.balance, dur)
 		if big then
 			S.celebrateUntil = S.now + t.celebrate
 			playSound("bigWin")
@@ -326,7 +366,7 @@ local function present()
 		S.phase = "present"
 		S.presentEnd = S.now + dur
 	else
-		setBalanceShown(r.balance)
+		setBalanceShown(S.game.balance)
 		S.phase = "idle"
 		S.offer = false
 	end
@@ -353,9 +393,7 @@ function SlotFrame.spin()
 	local before = game.balance
 	local r, err = game:spin()
 	if not r then
-		if err == "no_funds" then
-			message(L.NO_FUNDS, Theme.colors.lose)
-		end
+		message(codeLine(err), Theme.colors.lose)
 		refresh()
 		return
 	end
@@ -396,7 +434,12 @@ function SlotFrame.gamble()
 	if S.phase ~= "idle" or S.game:state() ~= "gamble" then
 		return
 	end
-	local res = S.game:gamble()
+	local res, err = S.game:gamble()
+	if not res then
+		message(codeLine(err), Theme.colors.lose)
+		refresh()
+		return
+	end
 	S.flip = { res = res, t0 = S.now, revealed = false }
 	S.offer = false
 	S.messageUntil = nil
@@ -411,7 +454,7 @@ function SlotFrame.gamble()
 end
 
 function SlotFrame.refill()
-	if S.phase == "spinning" or S.phase == "flip" then
+	if S.mode ~= "solo" or S.phase == "spinning" or S.phase == "flip" then
 		return
 	end
 	finishPresentation()
@@ -466,7 +509,7 @@ local function updateFlip()
 			setWinText(L.GAMBLE_LOST, Theme.colors.lose)
 			playSound("gambleLose")
 		end
-		countTo("balance", S.balanceShown, res.balance, t.countUp)
+		countTo("balance", S.balanceShown, S.game.balance, t.countUp)
 		saveGame()
 	end
 	if dt >= t.gambleFlip + t.gambleHold then
@@ -487,6 +530,25 @@ local function updateFlip()
 		end
 		refresh()
 	end
+end
+
+-- Finishes everything at once (spin, coin flip, count-ups) so no result stays hidden.
+-- Used when the window closes and before the window changes to another game.
+local function settle()
+	stopSpinSound()
+	if S.phase == "spinning" then
+		for i = 1, REELS do
+			W.reels[i]:setStop(S.result.stops[i])
+		end
+		present()
+	end
+	if S.phase == "flip" then
+		S.flip.t0 = S.now - 100
+		updateFlip()
+	end
+	finishPresentation()
+	S.counts = {}
+	setBalanceShown(S.game.balance)
 end
 
 local function onUpdate(_, elapsed)
@@ -566,7 +628,7 @@ local function onUpdate(_, elapsed)
 	if S.messageUntil and now >= S.messageUntil then
 		S.messageUntil = nil
 		if S.phase == "idle" and not S.offer then
-			setWinText("")
+			idleText()
 		end
 	end
 end
@@ -608,7 +670,9 @@ end
 ---------------------------------------------------------------------------------------------
 -- Building the window
 
-local function buildPaytable(parent, width)
+local buildPaytable, buildPills
+
+local function makePaytable(parent, width)
 	local size, c = Theme.size, Theme.colors
 	local info = S.game:info()
 	local rowH = size.paytableRow
@@ -650,6 +714,49 @@ local function buildPaytable(parent, width)
 	return pt
 end
 
+-- The paytable of the current game; one panel per distinct content, reused on later switches.
+buildPaytable = function()
+	local info = S.game:info()
+	local key = string.format("%s|%.6f|%d", tostring(S.game.tbl and S.game.tbl.id), info.rtp, info.maxGamble)
+	local pt = W.paytables[key]
+	if not pt then
+		local size = Theme.size
+		pt = makePaytable(W.frame, size.width - 2 * size.pad)
+		pt:SetPoint("TOPLEFT", W.frame, "TOPLEFT", size.pad, W.paytableY)
+		W.paytables[key] = pt
+	end
+	if W.paytable and W.paytable ~= pt then
+		W.paytable:Hide()
+	end
+	W.paytable = pt
+end
+
+-- Stake pills for the stakes of the current game; one set per stake list, reused.
+buildPills = function()
+	local stakes = S.game.stakes
+	local key = table.concat(stakes, ",")
+	local pills = W.pillSets[key]
+	if not pills then
+		local size, fonts, pad = Theme.size, Theme.fonts, Theme.size.pad
+		local pillW = 64
+		pills = {}
+		for i = #stakes, 1, -1 do
+			local v = stakes[i]
+			local p = button(W.frame, pillW, size.stakeRow, "pill", fonts.button, function() SlotFrame.setStake(v) end)
+			p.stake = v
+			p.label:SetText(fmt(v))
+			p:SetPoint("TOPRIGHT", W.frame, "TOPRIGHT", -pad - (#stakes - i) * (pillW + 8), W.pillY)
+			pills[i] = p
+		end
+		W.pillSets[key] = pills
+	end
+	if W.pills and W.pills ~= pills then
+		for _, p in ipairs(W.pills) do p:Hide() end
+	end
+	for _, p in ipairs(pills) do p:Show() end
+	W.pills = pills
+end
+
 local function build()
 	local size, c, fonts = Theme.size, Theme.colors, Theme.fonts
 	local pad, gap, width = size.pad, size.gap, size.width
@@ -689,9 +796,9 @@ local function build()
 	local title = text(f, fonts.title, c.text)
 	title:SetPoint("TOPLEFT", f, "TOPLEFT", pad, y - 6)
 	title:SetText(L.TITLE)
-	local mode = text(f, fonts.small, c.muted)
-	mode:SetPoint("LEFT", title, "RIGHT", 8, 0)
-	mode:SetText(L.SOLO)
+	-- Mode switch Solo / Guild.
+	W.mode = button(f, 64, 20, "pill", fonts.small, function() SlotFrame.toggleMode() end)
+	W.mode:SetPoint("LEFT", title, "RIGHT", 8, 0)
 	W.close = button(f, size.header, size.header, "ghost", fonts.title, function() f:Hide() end)
 	W.close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -pad + 8, y)
 	W.close.label:SetText("X")
@@ -700,15 +807,20 @@ local function build()
 		refresh()
 	end)
 	W.sound:SetPoint("RIGHT", W.close, "LEFT", -4, 0)
+	W.officer = button(f, 64, size.header, "ghost", fonts.small, function()
+		if ns.OfficerFrame then ns.OfficerFrame.toggle() end
+	end)
+	W.officer:SetPoint("RIGHT", W.sound, "LEFT", -4, 0)
+	W.officer.label:SetText(L.OFFICER)
 	y = y - size.header - gap
 
 	-- Balance
 	local bal = panel(f, c.panel, c.border)
 	bal:SetPoint("TOPLEFT", f, "TOPLEFT", pad, y)
 	bal:SetSize(inner, size.balance)
-	local balLabel = text(bal, fonts.label, c.muted)
-	balLabel:SetPoint("TOPLEFT", bal, "TOPLEFT", 12, -8)
-	balLabel:SetText(string.upper(L.BALANCE))
+	W.balanceLabel = text(bal, fonts.label, c.muted)
+	W.balanceLabel:SetPoint("TOPLEFT", bal, "TOPLEFT", 12, -8)
+	W.balanceLabel:SetText(string.upper(L.BALANCE))
 	W.balance = text(bal, fonts.number, c.text)
 	W.balance:SetPoint("BOTTOMLEFT", bal, "BOTTOMLEFT", 12, 6)
 	W.refill = button(bal, 84, 28, "panel", fonts.small, SlotFrame.refill)
@@ -797,17 +909,8 @@ local function build()
 	local stakeLabel = text(f, fonts.label, c.muted)
 	stakeLabel:SetPoint("TOPLEFT", f, "TOPLEFT", pad, y - 11)
 	stakeLabel:SetText(string.upper(L.STAKE))
-	W.pills = {}
-	local stakes = S.game.stakes
-	local pillW = 64
-	for i = #stakes, 1, -1 do
-		local v = stakes[i]
-		local p = button(f, pillW, size.stakeRow, "pill", fonts.button, function() SlotFrame.setStake(v) end)
-		p.stake = v
-		p.label:SetText(fmt(v))
-		p:SetPoint("TOPRIGHT", f, "TOPRIGHT", -pad - (#stakes - i) * (pillW + 8), y)
-		W.pills[i] = p
-	end
+	W.pillY, W.pillSets = y, {}
+	buildPills()
 	y = y - size.stakeRow - gap
 
 	-- SPIN
@@ -822,8 +925,8 @@ local function build()
 	end)
 	W.payToggle:SetPoint("TOPLEFT", f, "TOPLEFT", pad - 8, y)
 	y = y - size.smallRow
-	W.paytable = buildPaytable(f, inner)
-	W.paytable:SetPoint("TOPLEFT", f, "TOPLEFT", pad, y)
+	W.paytableY, W.paytables = y, {}
+	buildPaytable()
 	W.baseHeight = -y
 
 	-- Footer
@@ -839,21 +942,8 @@ local function build()
 		playSound("click")
 	end)
 	f:SetScript("OnHide", function()
-		stopSpinSound()
 		-- Finish everything at once so a closed window never hides a pending result.
-		if S.phase == "spinning" then
-			for i = 1, REELS do
-				W.reels[i]:setStop(S.result.stops[i])
-			end
-			present()
-		end
-		if S.phase == "flip" then
-			S.flip.t0 = S.now - 100
-			updateFlip()
-		end
-		finishPresentation()
-		S.counts = {}
-		setBalanceShown(S.game.balance)
+		settle()
 		updateKeyboard()
 	end)
 
@@ -883,13 +973,131 @@ function SlotFrame.layout()
 	W.frame:SetHeight(h)
 end
 
+---------------------------------------------------------------------------------------------
+-- Modes: solo (play money) and guild (tokens of the guild session)
+
+local function currentSession()
+	return ns.Main and ns.Main.session() or nil
+end
+
+-- Shows the current game: stake pills, paytable, labels, balance, idle line.
+local function applyGame()
+	buildPills()
+	buildPaytable()
+	SlotFrame.layout()
+	W.balanceLabel:SetText(string.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
+	S.counts = {}
+	setBalanceShown(S.game.balance)
+	S.offer = S.game:state() == "gamble"
+	idleText()
+	refresh()
+end
+
+-- Switches the window to a mode; guild mode only with a session. Settles first, and closes an
+-- open gamble offer (the win is already in the balance, so nothing is lost).
+local function useMode(mode)
+	local session = currentSession()
+	if mode == "guild" and not session then
+		mode = "solo"
+	end
+	local game = mode == "guild" and session:game() or S.solo
+	if game == S.game and mode == S.mode then
+		return false
+	end
+	if W.frame then
+		settle()
+		if S.game:state() == "gamble" then
+			S.game:take()
+		end
+		S.offer, S.messageUntil = false, nil
+		setReelModes(nil)
+	end
+	S.game, S.mode = game, mode
+	if W.frame then
+		applyGame()
+	end
+	return true
+end
+
+-- The mode the player asked for, as far as a session allows it.
+local function wantedMode()
+	return db.mode == "guild" and currentSession() and "guild" or "solo"
+end
+
+function SlotFrame.setMode(mode)
+	initDB()
+	if mode == "guild" and not currentSession() then
+		if W.frame then
+			useMode("solo")
+			message(L.NO_GUILD, Theme.colors.lose)
+		else
+			chat(L.NO_GUILD)
+		end
+		return false
+	end
+	db.mode = mode
+	if W.frame then
+		useMode(mode)
+		playSound("click")
+	end
+	return true
+end
+
+function SlotFrame.toggleMode()
+	return SlotFrame.setMode(S.mode == "guild" and "solo" or "guild")
+end
+
+-- Session events from Main.
+local function onMainEvent(name, data)
+	if not W.frame then
+		return
+	end
+	local busy = S.phase == "spinning" or S.phase == "flip"
+	if name == "session" then
+		local was = S.mode
+		useMode(wantedMode())
+		if was == "guild" and S.mode ~= "guild" then
+			message(L.NO_GUILD, Theme.colors.lose)
+		end
+	elseif name == "purchase" and S.mode == "guild" and type(data) == "table" and data.role == "player" then
+		if data.status == "done" then
+			S.credit = data
+		elseif (data.status == "failed" or data.status == "timeout") and not busy then
+			message(string.format(L.BUY_FAILED, tostring(data.code or data.status)), Theme.colors.lose)
+		end
+	elseif name == "account" and S.mode == "guild" then
+		local credit = S.credit
+		S.credit = nil
+		if busy then
+			return -- the running animation ends on the new balance
+		end
+		finishPresentation()
+		applyGame()
+		if credit then
+			message(string.format(L.CREDIT, fmt(credit.tokens or 0), tostring(credit.officer)), Theme.colors.accent)
+		end
+	elseif name == "roster" then
+		if not busy and S.phase == "idle" and not S.offer and not S.messageUntil then
+			idleText()
+		end
+		refresh()
+	end
+end
+
 local function ensure()
 	initDB()
-	if not S.game then
-		S.game = ns.Solo.new({ rng = ns.random, balance = db.soloBalance })
+	if not S.solo then
+		S.solo = ns.Solo.new({ rng = ns.random, balance = db.soloBalance })
+		S.game, S.mode = S.solo, "solo"
+	end
+	if not S.subscribed and ns.Main then
+		S.subscribed = true
+		ns.Main.subscribe(onMainEvent)
 	end
 	if not W.frame then
+		useMode(wantedMode())
 		build()
+		applyGame()
 	end
 end
 
@@ -919,6 +1127,16 @@ local function slash(msg)
 		db.space = not db.space
 		chat(db.space and L.SPACE_ON or L.SPACE_OFF)
 		updateKeyboard()
+	elseif msg == "guild" or msg == "solo" then
+		ensure()
+		SlotFrame.setMode(msg)
+		if not W.frame:IsShown() then
+			W.frame:Show()
+		end
+	elseif msg == "officer" then
+		if ns.OfficerFrame then
+			ns.OfficerFrame.toggle()
+		end
 	elseif msg == "reset" then
 		initDB()
 		db.pos = nil
