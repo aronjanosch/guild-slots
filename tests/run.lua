@@ -41,7 +41,7 @@ for _, name in ipairs(CORE) do
 	end
 end
 -- Pure files outside Core (no WoW API), loaded after Core.
-local PURE = { "Game/Solo.lua", "UI/Anim.lua" }
+local PURE = { "Game/Solo.lua", "Game/Guild.lua", "UI/Anim.lua" }
 for _, file in ipairs(PURE) do
 	assert(loadfile("GuildSlots/" .. file))("GuildSlots", ns)
 end

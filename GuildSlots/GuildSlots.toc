@@ -16,6 +16,7 @@ Locale\enUS.lua
 Locale\deDE.lua
 
 Game\Solo.lua
+Game\Guild.lua
 
 UI\Theme.lua
 UI\Anim.lua
