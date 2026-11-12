@@ -105,7 +105,9 @@ local function scenario(locale, lean)
 		end
 	end
 	local function shownMatches(where)
-		local want = fmt(S.game.balance)
+		-- An open take / gamble offer holds the amount at risk back on screen.
+		local held = S.game:state() == "gamble" and S.game.pending or 0
+		local want = fmt(S.game.balance - held)
 		assert(W.balance:GetText() == want,
 			where .. ": balance shows " .. tostring(W.balance:GetText()) .. ", game has " .. want)
 	end
@@ -283,6 +285,8 @@ local function scenario(locale, lean)
 	W.take:Click()
 	assert(S.phase == "idle" and not W.cardOverlay:IsShown() and S.game:state() == "idle", "take from the card")
 	assert(S.game.balance == 1000 - 10 + 30 + 30, "took 60")
+	assert(W.balance:GetText() == fmt(990), "the amount at risk was held back until the take")
+	settle()
 	shownMatches("after take from the card")
 
 	-- 4. Quick stop, then skipping the presentation, uneven frame times.

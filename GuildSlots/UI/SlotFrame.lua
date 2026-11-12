@@ -159,6 +159,16 @@ end
 ---------------------------------------------------------------------------------------------
 -- Displays
 
+-- The balance to show at rest. The game books a win at once, but while the take / gamble
+-- offer is open the amount at risk is held back on screen, so "take" visibly collects it.
+local function restBalance()
+	local game = S.game
+	if game:state() == "gamble" then
+		return game.balance - (game.pending or 0)
+	end
+	return game.balance
+end
+
 local function setBalanceShown(v)
 	S.balanceShown = v
 	W.balance:SetText(fmt(v))
@@ -1002,7 +1012,7 @@ local function endRound()
 	leaveFree()
 	hideBanner()
 	showResting()
-	countTo("balance", S.balanceShown, S.game.balance, Theme.timing.countUp)
+	countTo("balance", S.balanceShown, restBalance(), Theme.timing.countUp)
 	S.offer = S.game:state() == "gamble"
 	if S.offer then
 		setWinText(string.format(L.OFFER_HINT, fmt(S.game.pending)), Theme.tones.win)
@@ -1127,6 +1137,7 @@ function SlotFrame.take()
 	S.offer = false
 	hideCard()
 	clearShow()
+	countTo("balance", S.balanceShown, S.game.balance, Theme.timing.countUp)
 	message(L.TAKEN .. " " .. fmt(res.amount), Theme.tones.win)
 	playSound("click")
 	refresh()
@@ -1228,7 +1239,7 @@ local function updateFlip()
 			setWinText(L.GAMBLE_LOST, Theme.tones.lose)
 			playSound("gambleLose")
 		end
-		countTo("balance", S.balanceShown, S.game.balance, t.countUp)
+		countTo("balance", S.balanceShown, restBalance(), t.countUp)
 		saveGame()
 	end
 	if dt >= t.gambleFlip + t.gambleHold then
@@ -1265,6 +1276,7 @@ function SlotFrame.setStake(v)
 		S.game:take()
 		S.offer = false
 		clearShow()
+		setBalanceShown(S.game.balance)
 	end
 	S.game:setStake(v)
 	SlotFrame.updatePaytable()
@@ -1305,7 +1317,7 @@ local function settle()
 		updateFlip()
 	end
 	S.counts = {}
-	setBalanceShown(S.game.balance)
+	setBalanceShown(restBalance())
 end
 
 local function updateEffects(now)
@@ -1942,7 +1954,7 @@ local function build()
 
 	f:Hide() -- new frames start shown; toggle() decides
 	applyPosition()
-	setBalanceShown(S.game.balance)
+	setBalanceShown(restBalance())
 	setTotalShown(nil)
 	SlotFrame.layout()
 	refresh()
@@ -1973,7 +1985,7 @@ local function applyGame()
 	W.balanceLabel:SetText(Skin.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
 	W.footBalanceLabel:SetText(Skin.upper(S.mode == "guild" and L.TOKENS or L.BALANCE))
 	S.counts = {}
-	setBalanceShown(S.game.balance)
+	setBalanceShown(restBalance())
 	setTotalShown(nil)
 	clearShow()
 	S.offer = S.game:state() == "gamble"

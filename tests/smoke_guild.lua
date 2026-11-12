@@ -71,6 +71,11 @@ local function fmt(ns, n)
 	return ns.Anim.formatNumber(n, ns.L.THOUSANDS)
 end
 
+-- The balance the window shows at rest: an open offer holds the amount at risk back.
+local function resting(game)
+	return game.balance - (game:state() == "gamble" and game.pending or 0)
+end
+
 local function settle(env)
 	local S = env.ns.SlotFrame.state
 	local guard = 0
@@ -197,7 +202,7 @@ local function officerFlow(locale, unknown)
 	assert(S.phase == "round", "round running in guild mode")
 	settle(env)
 	assert(env.count("SPIN") == spins + 1, "SPIN sent")
-	assert(W.balance:GetText() == fmt(ns, session:game().balance), "shown balance matches the account")
+	assert(W.balance:GetText() == fmt(ns, resting(session:game())), "shown balance matches the account")
 	if W.offerRow:IsShown() then
 		W.take:Click()
 	end
@@ -242,7 +247,7 @@ local function officerFlow(locale, unknown)
 			W.black:Click()
 			settle(env)
 		end
-		assert(W.balance:GetText() == fmt(ns, session:game().balance), "balance matches after spin " .. i)
+		assert(W.balance:GetText() == fmt(ns, resting(session:game())), "balance matches after spin " .. i)
 	end
 	assert(env.count("SPIN") >= spins + 2, "more spins sent")
 	assert(env.count("GAM") >= 1, "a gamble step was sent")
@@ -277,7 +282,7 @@ local function officerFlow(locale, unknown)
 	assert(S.phase == "idle" and S.mode == "solo", "settled and switched")
 	W.guildBtn:Click()
 	assert(env.count("SPIN") == n + 1, "spin was sent")
-	assert(W.balance:GetText() == fmt(ns, session:game().balance), "result kept after the switch")
+	assert(W.balance:GetText() == fmt(ns, resting(session:game())), "result kept after the switch")
 
 	-- Closing the officer window and reopening via slash.
 	stub.slash("/gs", "officer")
