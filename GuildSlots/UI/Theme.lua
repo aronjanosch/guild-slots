@@ -168,6 +168,8 @@ Theme.colors = {
 	statusOk = hex("2f9e44"),
 	statusOpen = hex("e8a33a"),
 	statusBad = hex("c0283a"),
+	statusNone = hex("6b5a40"), -- badge of a status or light the window does not know
+	barFill = hex("f2c14e"), -- progress bar of a payout request
 	disabledAlpha = 0.45, -- text of a disabled button
 	-- One colour per line number, 1..10 (SPEC.md; the lines themselves are the game's).
 	lines = {
@@ -292,6 +294,32 @@ Theme.layout = {
 	ptNote = { 32, 456, 536, 34 },
 	ptDiagram = { 40, 498 }, ptDiagramStep = { 106, 50 }, ptDiagramCell = { 12, 10 },
 	ptDiagramPitch = { 15, 13 }, ptDiagramOff = { 18, 4 }, ptDiagramNum = { 0, 8, 14, 18 },
+	-- Cash-out overlay over the reels (guild mode, milestone 4), in window coordinates. The Cash
+	-- out button takes the refill slot (Lay.refill / Lay.officer).
+	cashout = {
+		panel = { 72, 150, 456, 296 },
+		title = { 96, 160, 380, 30 },
+		close = { 484, 162, 30, 28 },
+		-- Form: amount, officers, reminder, refusal line, buttons.
+		amountLabel = { 96, 198, 200, 14 },
+		amount = { 96, 214, 140, 36 },
+		max = { 242, 216, 62, 32 },
+		officerLabel = { 318, 198, 190, 14 },
+		officers = { 314, 214, 196, 106 },
+		oRow = { 320, 219, 184, 24 }, oRowStep = 24, oRows = 4, rowText = 8,
+		oNone = { 324, 219, 180, 52 },
+		note = { 96, 258, 208, 62 },
+		error = { 96, 326, 414, 34 },
+		request = { 314, 382, 196, 50 },
+		cancel = { 96, 386, 150, 42 },
+		-- State of an open or finished request.
+		sTitle = { 96, 202, 408, 34 },
+		sSub = { 96, 238, 408, 42 },
+		bar = { 136, 284, 328, 24 }, barInset = 6,
+		timer = { 96, 312, 408, 18 },
+		lock = { 96, 334, 408, 36 },
+		hide = { 314, 382, 196, 50 },
+	},
 }
 
 -- Officer window (state 11, 448 wide; the height follows what is shown, 728 for an officer).
@@ -301,7 +329,10 @@ Theme.officer = {
 	title = { 30, 22, 300, 42 },
 	close = { 384, 29, 34, 32 },
 	divider = { 22, 68, 404, 12 },
-	top = 86, -- first section
+	-- Tabs in the toggle style: Tokens, Payouts, Settings. The count badge sits on the Payouts tab.
+	tabs = { 22, 84, 128, 30 }, tabStep = 138,
+	tabBadge = { 100, -8, 34, 22 }, -- relative to the Payouts tab
+	top = 122, -- first section, under the tabs
 	sectionGap = 4,
 	-- Sections, stacked from `top` (rects: x in the window, y from the section's top).
 	grant = {
@@ -333,6 +364,34 @@ Theme.officer = {
 		line = { 22, 98, 360, 32 }, copy = { 390, 98, 36, 32 },
 		hint = { 26, 134, 400, 14 },
 		note = { 26, 150, 400, 28 },
+	},
+	-- Payouts tab: request list, then the review of the selected request.
+	payouts = {
+		height = 582,
+		heading = { 26, 0, 300, 16 },
+		list = { 22, 18, 404, 116 },
+		row = { 28, 24, 392, 26 }, rows = 4,
+		rName = { 8, 128 }, rAmount = { 136, 64 }, rBadge = { 208, 2, 128, 22 }, rSecs = { 340, 44 },
+		none = { 36, 24, 380, 26 },
+		reviewHead = { 26, 142, 400, 16 },
+		hint = { 26, 166, 400, 40 },
+		light = { 22, 162, 128, 52 },
+		lightGlowOut = 14,
+		numLabel = { 164, 150 }, numValue = { 312, 114 }, numY = 162, numH = 18,
+		findingsHead = { 26, 220, 300, 16 },
+		findings = { 22, 238, 404, 92 },
+		fRowY = 242, fRowH = 21, fRows = 4, fDot = { 36, 7, 8, 8 }, fText = { 52, 368 },
+		luckHead = { 26, 336, 300, 16 },
+		luck = { 22, 354, 404, 96 },
+		lRowY = 358, lRowH = 22, lName = { 36, 120 }, lZ = { 160, 60 }, lBadge = { 232, 0, 180, 22 },
+		spins = { 36, 426, 380, 18 },
+		luckNote = { 26, 454, 400, 28 },
+		lookahead = { 26, 484, 400, 16 },
+		note = { 26, 502, 400, 32 },
+		confirm = { 22, 536, 230, 44 },
+		reject = { 262, 538, 164, 40 },
+		-- While choosing a reject reason: declined, mismatch, back.
+		reason1 = { 22, 538, 130, 40 }, reason2 = { 158, 538, 130, 40 }, back = { 296, 538, 130, 40 },
 	},
 }
 
@@ -420,4 +479,23 @@ Theme.sounds = {
 	bigWin = "READY_CHECK",
 	gambleWin = "LOOT_WINDOW_COIN_SOUND",
 	gambleLose = "IG_QUEST_FAILED",
+	payoutRequest = "READY_CHECK", -- a payout request arrived while the officer window is closed
+	payoutDone = "LOOT_WINDOW_COIN_SOUND", -- the own request was paid out
+}
+
+---------------------------------------------------------------------------------------------
+-- Payouts (milestone 4)
+
+Theme.payout = {
+	lifetime = 300, -- seconds a request stays open (Game/Guild.lua REQUEST_TIMEOUT), for the countdown
+	refresh = 1, -- seconds between refreshes of the countdowns and progress while shown
+	-- Status -> badge colour key (Theme.colors) and text colour key. Unknown statuses: statusNone.
+	badge = {
+		wait_officer = { "statusOpen", "dark" }, sending = { "statusOpen", "dark" },
+		wait_decision = { "statusOpen", "dark" }, fetching = { "statusOpen", "dark" },
+		checking = { "statusOpen", "dark" }, ready = { "gold", "dark" }, paid = { "statusOk", "white" },
+		rejected = { "statusBad", "white" }, expired = { "statusBad", "white" }, failed = { "statusBad", "white" },
+	},
+	-- Verify light -> colour key.
+	light = { green = "statusOk", yellow = "statusOpen", red = "statusBad" },
 }

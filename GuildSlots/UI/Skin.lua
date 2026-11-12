@@ -378,6 +378,71 @@ function Skin.button(parent, style, w, h, onClick, opts)
 end
 
 ---------------------------------------------------------------------------------------------
+-- List row: a button with a name label, highlighted with a band and two gold lines when
+-- selected, a fainter band on hover. Fields: label, selected, setSelected.
+
+function Skin.listRow(parent, rel, r, onClick, textX, ox, oy)
+	local c = Theme.colors
+	local b = CreateFrame("Button", nil, parent)
+	Skin.rect(b, rel, r, ox, oy)
+	b.band = Skin.fill(b, "BACKGROUND", c.rowSelected)
+	b.band:SetAllPoints(b)
+	b.lineTop = Skin.fill(b, "BORDER", c.goldLight)
+	b.lineTop:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
+	b.lineTop:SetPoint("TOPRIGHT", b, "TOPRIGHT", 0, 0)
+	b.lineTop:SetHeight(1)
+	b.lineBottom = Skin.fill(b, "BORDER", c.goldLight)
+	b.lineBottom:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, 0)
+	b.lineBottom:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 0, 0)
+	b.lineBottom:SetHeight(1)
+	b.label = Skin.text(b, "label", Theme.fontSize.listName, c.text, "LEFT")
+	b.label:SetPoint("LEFT", b, "LEFT", textX or 8, 0)
+	b.selected = false
+	local function paint()
+		b.band:SetShown(b.selected or b.hover)
+		b.band:SetAlpha(b.selected and 1 or Theme.alpha.rowHover)
+		b.lineTop:SetShown(b.selected)
+		b.lineBottom:SetShown(b.selected)
+		Skin.color(b.label, b.selected and c.number or c.text)
+	end
+	b.setSelected = function(_, on)
+		b.selected = on and true or false
+		paint()
+	end
+	b:SetScript("OnEnter", function() b.hover = true; paint() end)
+	b:SetScript("OnLeave", function() b.hover = false; paint() end)
+	b:SetScript("OnClick", onClick)
+	paint()
+	return b
+end
+
+---------------------------------------------------------------------------------------------
+-- Status badge: badge_status tinted, with a centred text. setStatus(colorKey, textColorKey, text)
+-- takes keys of Theme.colors; an unknown key shows the neutral colour.
+
+function Skin.badge(parent, rel, r, size, ox, oy)
+	local holder = CreateFrame("Frame", nil, parent)
+	Skin.rect(holder, rel, r, ox, oy)
+	local o = { holder = holder }
+	o.bg = Skin.nine(holder, holder, Theme.slices.badge, "ARTWORK")
+	o.text = Skin.text(holder, "number", size or Theme.fontSize.badge, Theme.colors.white, "CENTER")
+	o.text:SetAllPoints(holder)
+	Skin.shadow(o.text, 0, 0)
+	o.setStatus = function(_, colorKey, textKey, str)
+		local c = Theme.colors
+		local bc = c[colorKey] or c.statusNone
+		o.bg:SetVertexColor(bc[1], bc[2], bc[3], 1)
+		Skin.color(o.text, c[textKey] or c.white)
+		o.text:SetText(str or "")
+	end
+	o.Show = function() holder:Show() end
+	o.Hide = function() holder:Hide() end
+	o.SetShown = function(_, on) holder:SetShown(on) end
+	o.IsShown = function() return holder:IsShown() end
+	return o
+end
+
+---------------------------------------------------------------------------------------------
 -- Input field: an edit box on a 9-slice holder with the normal / focus / disabled textures.
 
 function Skin.editBox(parent, w, h, face, size)

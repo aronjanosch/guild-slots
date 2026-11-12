@@ -1,11 +1,12 @@
 local _, ns = ...
 
--- The officer window (docs/guild-spec.md section 1): granting tokens to addon users heard
--- online, recent purchases, the self test switch, the settings status and a form that builds
--- the settings line for the guild info. Officers see everything; other members see the
--- settings status only. Look: state 11 of the tavern design (UI/Theme.lua, Theme.officer).
+-- The officer window (docs/guild-spec.md section 1), in three tabs: "Tokens" (granting tokens to
+-- addon users heard online, recent purchases, the self test switch), "Payouts" (payout requests
+-- and their review, UI/Payouts.lua) and "Settings" (the settings status and a form that builds
+-- the settings line for the guild info). Officers see every tab; other members only Settings.
+-- Look: state 11 of the tavern design (UI/Theme.lua, Theme.officer); tabs in the toggle style.
 
-local L, Theme, Settings, Roster, Skin = ns.L, ns.Theme, ns.Settings, ns.Roster, ns.Skin
+local L, Theme, Settings, Roster, Skin, Payouts = ns.L, ns.Theme, ns.Settings, ns.Roster, ns.Skin, ns.Payouts
 local ui = ns.SlotFrame.ui
 local fmt = ui.fmt
 
@@ -28,8 +29,9 @@ local BADGE = {
 	failed = { "statusBad", "white" }, timeout = { "statusBad", "white" },
 }
 
-local W = { fields = {}, onlineRows = {}, purchaseRows = {} }
+local W = { fields = {}, onlineRows = {}, purchaseRows = {}, tab = "tokens" }
 OfficerFrame.widgets = W
+local TABS = { "tokens", "payouts", "settings" }
 
 local function main()
 	return ns.Main
@@ -68,42 +70,6 @@ end
 local function note(fs, str, color)
 	fs:SetText(str or "")
 	Skin.color(fs, color or Theme.colors.muted)
-end
-
--- A list row: name, highlighted with a band and two gold lines when selected.
-local function listRow(parent, rel, r, onClick)
-	local c = Theme.colors
-	local b = CreateFrame("Button", nil, parent)
-	Skin.rect(b, rel, r)
-	b.band = Skin.fill(b, "BACKGROUND", c.rowSelected)
-	b.band:SetAllPoints(b)
-	b.lineTop = Skin.fill(b, "BORDER", c.goldLight)
-	b.lineTop:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
-	b.lineTop:SetPoint("TOPRIGHT", b, "TOPRIGHT", 0, 0)
-	b.lineTop:SetHeight(1)
-	b.lineBottom = Skin.fill(b, "BORDER", c.goldLight)
-	b.lineBottom:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, 0)
-	b.lineBottom:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 0, 0)
-	b.lineBottom:SetHeight(1)
-	b.label = Skin.text(b, "label", Theme.fontSize.listName, c.text, "LEFT")
-	b.label:SetPoint("LEFT", b, "LEFT", Theme.officer.grant.rowText, 0)
-	b.selected = false
-	local function paint()
-		b.band:SetShown(b.selected or b.hover)
-		b.band:SetAlpha(b.selected and 1 or Theme.alpha.rowHover)
-		b.lineTop:SetShown(b.selected)
-		b.lineBottom:SetShown(b.selected)
-		Skin.color(b.label, b.selected and c.number or c.text)
-	end
-	b.setSelected = function(_, on)
-		b.selected = on and true or false
-		paint()
-	end
-	b:SetScript("OnEnter", function() b.hover = true; paint() end)
-	b:SetScript("OnLeave", function() b.hover = false; paint() end)
-	b:SetScript("OnClick", onClick)
-	paint()
-	return b
 end
 
 ---------------------------------------------------------------------------------------------
@@ -210,6 +176,7 @@ local function statusLabel(p)
 	return lookup("P_", p.status)
 end
 
+-- Stacks the shown sections of the current tab under the tabs; the window height follows.
 local function layout()
 	local O = Theme.officer
 	local y = O.top
@@ -218,15 +185,20 @@ local function layout()
 		frame:SetPoint("TOPLEFT", W.frame, "TOPLEFT", 0, -y)
 		y = y + h + O.sectionGap
 	end
-	if W.grantPart:IsShown() then
-		place(W.grantPart, O.grant.height)
-	end
-	place(W.statusPart, O.status.height)
-	if W.nonOfficer:IsShown() then
-		place(W.nonOfficer, O.nonOfficer[4])
-	end
-	if W.formPart:IsShown() then
-		place(W.formPart, O.form.height)
+	if W.tab == "tokens" then
+		if W.grantPart:IsShown() then
+			place(W.grantPart, O.grant.height)
+		end
+	elseif W.tab == "payouts" then
+		place(W.payoutsPart, O.payouts.height)
+	else
+		place(W.statusPart, O.status.height)
+		if W.nonOfficer:IsShown() then
+			place(W.nonOfficer, O.nonOfficer[4])
+		end
+		if W.formPart:IsShown() then
+			place(W.formPart, O.form.height)
+		end
 	end
 	local h = math.min(O.maxHeight, y - O.sectionGap + O.pad)
 	W.frame:SetHeight(h)
@@ -246,6 +218,23 @@ function OfficerFrame.refresh()
 	-- Without a valid line nobody is an officer yet, so the form is how the first line is made.
 	W.formPart:SetShown(s ~= nil and (officer or not valid))
 	W.grantPart:SetShown(officer)
+
+	-- Tabs: members see only Settings.
+	if not officer then
+		W.tab = "settings"
+	end
+	W.tabTokens:SetShown(officer)
+	W.tabPayouts:SetShown(officer)
+	for _, key in ipairs(TABS) do
+		W.tabButtons[key]:setSelected(W.tab == key)
+		W.tabFrames[key]:SetShown(W.tab == key)
+	end
+	local open = officer and Payouts.openCount(s) or 0
+	W.tabBadge:SetShown(open > 0)
+	W.tabBadge:setStatus("statusOpen", "dark", tostring(open))
+	if officer and W.tab == "payouts" then
+		Payouts.refresh(s)
+	end
 
 	if officer then
 		local online = s:online()
@@ -327,11 +316,12 @@ local function buildGrant(parent)
 	for i = 1, G.rows do
 		local col, row = (i - 1) % G.cols, math.floor((i - 1) / G.cols)
 		local b
-		b = listRow(list, part, { G.row[1] + col * G.rowStep[1], G.row[2] + row * G.rowStep[2], G.row[3], G.row[4] },
+		b = Skin.listRow(list, part,
+			{ G.row[1] + col * G.rowStep[1], G.row[2] + row * G.rowStep[2], G.row[3], G.row[4] },
 			function()
 				W.player:SetText(b.name or "")
 				OfficerFrame.refresh()
-			end)
+			end, G.rowText)
 		b:Hide()
 		W.onlineRows[i] = b
 	end
@@ -473,19 +463,47 @@ local function build()
 	Skin.rect(divAnchor, f, O.divider)
 	Skin.nine(f, divAnchor, Theme.slices.divider, "ARTWORK")
 
-	W.grantPart = buildGrant(f)
-	W.statusPart = buildStatus(f)
-	W.nonOfficer = Skin.text(f, "label", fs.small, c.muted, "LEFT")
+	-- Tabs and one frame per tab holding its sections.
+	W.tabButtons, W.tabFrames = {}, {}
+	local labels = { tokens = L.TAB_TOKENS, payouts = L.TAB_PAYOUTS, settings = L.TAB_SETTINGS }
+	for i, key in ipairs(TABS) do
+		local r = O.tabs
+		local b = Skin.button(f, "toggle", r[3], r[4], function() OfficerFrame.setTab(key) end, { size = fs.button })
+		Skin.rect(b, f, { r[1] + (i - 1) * O.tabStep, r[2], r[3], r[4] })
+		b.label:SetText(labels[key])
+		W.tabButtons[key] = b
+		local holder = CreateFrame("Frame", nil, f)
+		holder:SetAllPoints(f)
+		W.tabFrames[key] = holder
+	end
+	W.tabTokens, W.tabPayouts, W.tabSettings = W.tabButtons.tokens, W.tabButtons.payouts, W.tabButtons.settings
+	W.tabBadge = Skin.badge(W.tabPayouts, W.tabPayouts, O.tabBadge, fs.small)
+	W.tabBadge:Hide()
+
+	W.grantPart = buildGrant(W.tabFrames.tokens)
+	W.statusPart = buildStatus(W.tabFrames.settings)
+	W.nonOfficer = Skin.text(W.tabFrames.settings, "label", fs.small, c.muted, "LEFT")
 	W.nonOfficer:SetSize(O.nonOfficer[3], O.nonOfficer[4])
 	W.nonOfficer:SetText(L.NEED_OFFICER)
-	W.formPart = buildForm(f)
+	W.formPart = buildForm(W.tabFrames.settings)
+	Payouts.build(section(W.tabFrames.payouts, O.payouts.height), W, {
+		session = session,
+		fmt = fmt,
+		refresh = OfficerFrame.refresh,
+	})
 
 	local acc = 0
 	f:SetScript("OnUpdate", function(_, elapsed)
-		acc = acc + (tonumber(elapsed) or 0)
+		elapsed = tonumber(elapsed) or 0
+		acc = acc + elapsed
 		if acc >= REFRESH_EVERY then
 			acc = 0
 			OfficerFrame.refresh()
+		elseif W.tab == "payouts" and Payouts.tick(elapsed, session()) then
+			-- countdowns and progress, once per second; the count on the tab with them
+			local open = Payouts.openCount(session())
+			W.tabBadge:SetShown(open > 0)
+			W.tabBadge:setStatus("statusOpen", "dark", tostring(open))
 		end
 	end)
 	f:SetScript("OnShow", function()
@@ -518,6 +536,30 @@ local function build()
 	end
 end
 
+-- key: "tokens", "payouts" or "settings". Members only have Settings.
+function OfficerFrame.setTab(key)
+	if not W.frame then
+		return
+	end
+	W.tab = key
+	OfficerFrame.refresh()
+end
+
+-- Opens the window on a tab (the chat notice of a payout request points here).
+function OfficerFrame.open(key)
+	if not W.frame then
+		build()
+	end
+	if key then
+		W.tab = key
+	end
+	if not W.frame:IsShown() then
+		W.frame:Show()
+	else
+		OfficerFrame.refresh()
+	end
+end
+
 function OfficerFrame.toggle()
 	if not W.frame then
 		build()
@@ -528,3 +570,24 @@ function OfficerFrame.toggle()
 		W.frame:Show()
 	end
 end
+
+-- A new payout request while the window is closed: one chat line and a sound. Subscribed at
+-- login, when Main is loaded, so it works before the window was ever opened.
+local login = CreateFrame("Frame")
+login:RegisterEvent("PLAYER_LOGIN")
+login:SetScript("OnEvent", function()
+	if OfficerFrame.subscribed or not ns.Main then
+		return
+	end
+	OfficerFrame.subscribed = true
+	ns.Main.subscribe(function(name, data)
+		if name ~= "request" or not Payouts.isNew(data) then
+			return
+		end
+		if W.frame and W.frame:IsShown() then
+			return
+		end
+		ui.chat(string.format(L.PAY_NEW_CHAT, tostring(data.player), fmt(tonumber(data.amount) or 0)))
+		ui.playSound("payoutRequest")
+	end)
+end)

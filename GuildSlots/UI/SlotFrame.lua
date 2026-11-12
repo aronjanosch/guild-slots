@@ -7,13 +7,14 @@ local addonName, ns = ...
 --
 -- Look: the "tavern" design (design/gildenslots-v2). Layout, colours, fonts and timings come from
 -- UI/Theme.lua, widgets from UI/Skin.lua, effects from UI/Fx.lua, line geometry from
--- UI/Layout.lua, the paytable from UI/Paytable.lua.
+-- UI/Layout.lua, the paytable from UI/Paytable.lua, the cash-out overlay (guild mode) from
+-- UI/Cashout.lua.
 --
 -- Phases: "idle" (an open take/gamble offer is S.offer), "round" (a plan plays), "pick" (the
 -- gamble card waits for red or black), "flip" (the card turns over).
 
 local L, Theme, Anim, Reel, Plan = ns.L, ns.Theme, ns.Anim, ns.Reel, ns.Plan
-local Skin, Fx, Layout, Paytable = ns.Skin, ns.Fx, ns.Layout, ns.Paytable
+local Skin, Fx, Layout, Paytable, Cashout = ns.Skin, ns.Fx, ns.Layout, ns.Paytable, ns.Cashout
 
 local SlotFrame = {}
 ns.SlotFrame = SlotFrame
@@ -238,7 +239,7 @@ end
 
 -- What the window shows while idle in guild mode when the game cannot be played: message line,
 -- and title / text of the status panel over the reels.
-local STATUS_LINES = { no_account = "ST_NO_ACCOUNT", level = "ST_LEVEL", broken = "ST_BROKEN" }
+local STATUS_LINES = { no_account = "ST_NO_ACCOUNT", level = "ST_LEVEL", broken = "ST_BROKEN", payout = "ST_PAYOUT" }
 
 local function statusLine()
 	if S.mode ~= "guild" then
@@ -249,6 +250,8 @@ local function statusLine()
 	if key then
 		if st == "no_account" then
 			return L[key], L.NO_TOKENS_TITLE, L.ASK_OFFICER
+		elseif st == "payout" then
+			return L[key], L.PO_LOCK_TITLE, L.PO_LOCK_SUB
 		end
 		return L[key], L.CANNOT_PLAY, L[key]
 	end
@@ -270,7 +273,7 @@ end
 -- The short line for a code from spin() or gamble().
 local CODE_LINES = {
 	no_account = "ST_NO_ACCOUNT", level = "ST_LEVEL", broken = "ST_BROKEN", wait = "WAIT",
-	send = "SEND_FAILED",
+	send = "SEND_FAILED", payout = "ST_PAYOUT",
 }
 
 local function codeLine(code)
@@ -342,12 +345,18 @@ local function refresh()
 	W.guildBtn:setEnabled(not busy)
 	W.sound:setIcon(db.sound and Theme.icons.soundOn or Theme.icons.soundOff)
 
-	-- Secondary row: paytable, officer, refill (solo) or the balance (free games).
+	-- Secondary row: paytable, officer, refill (solo) or cash out (guild), or the balance (free
+	-- games).
 	local officer = isOfficer()
 	W.officer:SetShown(officer)
 	W.refill:SetShown(S.mode == "solo" and not S.free)
 	Skin.rect(W.refill, W.frame, officer and Lay.refill or Lay.officer)
 	W.refill:setEnabled(not busy)
+	local guild = S.mode == "guild" and not S.free
+	W.cashout:SetShown(guild)
+	Skin.rect(W.cashout, W.frame, officer and Lay.refill or Lay.officer)
+	W.cashout:setEnabled(guild and phase == "idle" and Cashout.canOpen(game))
+	W.cashout:setSelected(Cashout.isShown())
 	W.footBalance:SetShown(S.free and true or false)
 
 	-- Guild status over the reels (state 10).
@@ -1079,6 +1088,7 @@ local function startRound(r, before)
 	S.plan = Plan.build(r.round, Theme.timing, T2)
 	S.si, S.quick = 0, false
 	S.phase = "round"
+	Cashout.conceal()
 	if db.paytable then
 		db.paytable = false
 		SlotFrame.layout()
@@ -1283,6 +1293,26 @@ function SlotFrame.refill()
 	refresh()
 end
 
+-- Opens (or re-opens) the cash-out overlay; hides it when it is shown.
+function SlotFrame.cashout()
+	if S.mode ~= "guild" or S.phase ~= "idle" then
+		return
+	end
+	if Cashout.isShown() then
+		Cashout.hide()
+		return
+	end
+	if not Cashout.canOpen(S.game) then
+		return
+	end
+	if db.paytable then
+		db.paytable = false
+		SlotFrame.layout()
+	end
+	Cashout.show()
+	playSound("click")
+end
+
 function SlotFrame.setStake(v)
 	if S.phase ~= "idle" then
 		return
@@ -1401,6 +1431,7 @@ local function onUpdate(_, elapsed)
 	end
 
 	updateEffects(now)
+	Cashout.tick(elapsed)
 
 	if S.messageUntil and now >= S.messageUntil then
 		S.messageUntil = nil
@@ -1529,7 +1560,7 @@ local function frameAt(parent, level, r)
 end
 
 local LEVEL = { reels = 2, cells = 5, reelFrame = 7, lines = 8, status = 12, card = 12, stage = 14, banner = 16,
-	stageTop = 18, paytable = 30, rain = 40 }
+	stageTop = 18, paytable = 30, cashout = 32, rain = 40 }
 
 local function buildReels(f)
 	local Lay, c = Theme.layout, Theme.colors
@@ -1825,6 +1856,8 @@ local function buildPills()
 	W.pills = pills
 end
 
+local applyGame -- defined with the modes below
+
 local function iconButton(parent, r, icon, onClick)
 	local b = Skin.button(parent, "icon", r[3], r[4], onClick,
 		{ icon = icon, iconOnly = true, iconSize = Theme.layout.iconSize })
@@ -1919,12 +1952,18 @@ local function build()
 	-- Secondary row.
 	W.payToggle = secondary(f, Lay.paytable, Theme.icons.paytable, L.PAYTABLE, function()
 		db.paytable = not db.paytable
+		if db.paytable and Cashout.isShown() then
+			Cashout.conceal()
+			refresh()
+		end
 		SlotFrame.layout()
 	end)
 	W.officer = secondary(f, Lay.officer, Theme.icons.officer, L.OFFICER, function()
 		if ns.OfficerFrame then ns.OfficerFrame.toggle() end
 	end)
 	W.refill = secondary(f, Lay.refill, Theme.icons.coin, L.REFILL, SlotFrame.refill)
+	W.cashout = secondary(f, Lay.refill, Theme.icons.coin, L.CASHOUT, SlotFrame.cashout)
+	W.cashout:Hide()
 	local fb = CreateFrame("Frame", nil, f)
 	Skin.rect(fb, f, Lay.footBalance)
 	W.footBalance = fb
@@ -1948,6 +1987,18 @@ local function build()
 		db.paytable = false
 		SlotFrame.layout()
 	end)
+	Cashout.build(frameAt(f, LEVEL.cashout), f, W, {
+		session = function() return S.mode == "guild" and ns.Main and ns.Main.session() or nil end,
+		fmt = fmt,
+		refresh = refresh,
+		afterRequest = function(line)
+			applyGame()
+			message(line, Theme.tones.win)
+			refresh()
+		end,
+		allowSelf = function() return db.selfTest == true end,
+		guildMode = function() return S.mode == "guild" end,
+	})
 
 	f:SetScript("OnUpdate", onUpdate)
 	f:SetScript("OnKeyDown", onKeyDown)
@@ -1993,7 +2044,7 @@ local function currentSession()
 end
 
 -- Shows the current game: stake buttons, paytable, labels, balance, idle line.
-local function applyGame()
+function applyGame()
 	buildPills()
 	SlotFrame.updatePaytable()
 	SlotFrame.layout()
@@ -2026,10 +2077,12 @@ local function useMode(mode)
 		end
 		S.offer, S.messageUntil = false, nil
 		clearShow()
+		Cashout.conceal()
 	end
 	S.game, S.mode = game, mode
 	if W.frame then
 		applyGame()
+		SlotFrame.showLock()
 	end
 	return true
 end
@@ -2060,6 +2113,13 @@ function SlotFrame.setMode(mode)
 	return true
 end
 
+-- After a reload or a switch to guild mode with an open payout request: show its state.
+function SlotFrame.showLock()
+	if W.frame and S.mode == "guild" and Cashout.isOpen() then
+		Cashout.show()
+	end
+end
+
 function SlotFrame.toggleMode()
 	return SlotFrame.setMode(S.mode == "guild" and "solo" or "guild")
 end
@@ -2083,15 +2143,25 @@ local function onMainEvent(name, data)
 		elseif (data.status == "failed" or data.status == "timeout") and not busy then
 			message(string.format(L.BUY_FAILED, tostring(data.code or data.status)), Theme.tones.lose)
 		end
+	elseif name == "payout" then
+		if Cashout.onPayout(data) and S.mode == "guild" then
+			S.paid = { from = S.balanceShown, amount = data.amount, officer = data.officer }
+			playSound("payoutDone")
+		end
+		refresh()
 	elseif name == "account" and S.mode == "guild" then
-		local credit = S.credit
-		S.credit = nil
+		local credit, paid = S.credit, S.paid
+		S.credit, S.paid = nil, nil
 		if busy then
 			return -- the running round ends on the new balance
 		end
 		applyGame()
 		if credit then
 			message(string.format(L.CREDIT, fmt(credit.tokens or 0), tostring(credit.officer)), Theme.tones.win)
+		elseif paid then
+			-- The balance counts down by the amount paid out.
+			countTo("balance", paid.from or S.balanceShown, restBalance(), Theme.timing.countUp)
+			message(string.format(L.PO_PAID, fmt(tonumber(paid.amount) or 0), tostring(paid.officer)), Theme.tones.win)
 		end
 	elseif name == "roster" then
 		if not busy and not S.offer and not S.messageUntil then
@@ -2131,6 +2201,7 @@ local function ensure()
 		useMode(wantedMode())
 		build()
 		applyGame()
+		SlotFrame.showLock()
 	end
 end
 
@@ -2170,6 +2241,16 @@ local function slash(msg)
 		ensure()
 		SlotFrame.setMode(msg)
 		if not W.frame:IsShown() then
+			W.frame:Show()
+		end
+	elseif msg == "payout" then
+		ensure()
+		if SlotFrame.setMode("guild") then
+			if not W.frame:IsShown() then
+				W.frame:Show()
+			end
+			SlotFrame.cashout()
+		elseif not W.frame:IsShown() then
 			W.frame:Show()
 		end
 	elseif msg == "officer" then

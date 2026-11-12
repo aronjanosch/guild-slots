@@ -37,8 +37,8 @@ local function dispatch(name, data)
 	end
 end
 
--- fn(name, data) for the session events ("account", "purchase", "presence", "notice") plus
--- "session" (created or dropped) and "roster" (guild roster or guild info changed).
+-- fn(name, data) for the session events ("account", "purchase", "presence", "notice", "payout",
+-- "request") plus "session" (created or dropped) and "roster" (guild roster or guild info changed).
 function Main.subscribe(fn)
 	listeners[#listeners + 1] = fn
 end
