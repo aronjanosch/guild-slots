@@ -18,6 +18,10 @@ Locale\deDE.lua
 Game\Solo.lua
 Game\Guild.lua
 
+Net\Queue.lua
+Net\Comm.lua
+Guild\Roster.lua
+
 UI\Theme.lua
 UI\Anim.lua
 UI\Reel.lua
