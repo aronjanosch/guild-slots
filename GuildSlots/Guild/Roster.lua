@@ -9,7 +9,7 @@ ns.Roster = Roster
 local Sha256, Settings = ns.Sha256, ns.Settings
 
 local counter = 0
-local listeners, frame, lastInfo = {}, nil, nil
+local listeners, frame = {}, nil
 
 local function cutRealm(name)
 	if type(name) ~= "string" then
@@ -18,16 +18,14 @@ local function cutRealm(name)
 	return (name:gsub("%-.*$", ""))
 end
 
-local function infoText()
-	if type(GetGuildInfoText) == "function" then
-		return GetGuildInfoText()
-	end
-	if C_GuildInfo and type(C_GuildInfo.GetInfoText) == "function" then
-		return C_GuildInfo.GetInfoText()
-	end
-end
+-- The guild info text is protected in this client: reading it works from a hardware event
+-- (a click, a key, a slash command) but raises ADDON_ACTION_BLOCKED from a timer or an event
+-- handler. So it is read only in Roster.refreshInfo(), which UI code calls from clicks and
+-- slash commands, and everything else uses the copy. The copy is saved per guild so the
+-- settings are known right after login.
+local infoCache
 
-function Roster.guild()
+local function guildName()
 	if type(GetGuildInfo) ~= "function" then
 		return nil
 	end
@@ -35,6 +33,57 @@ function Roster.guild()
 	if type(name) == "string" and name ~= "" then
 		return name
 	end
+end
+
+local function savedInfo()
+	local db = type(GuildSlotsDB) == "table" and GuildSlotsDB or nil
+	local saved = db and db.info
+	if type(saved) == "table" and type(saved.text) == "string" and saved.guild == guildName() then
+		return saved.text
+	end
+end
+
+local function infoText()
+	if infoCache and infoCache.guild == guildName() then
+		return infoCache.text
+	end
+	return savedInfo()
+end
+
+local fire
+
+-- Reads the guild info text. Call only from a hardware event. Returns true when it was read.
+function Roster.refreshInfo()
+	if type(InCombatLockdown) == "function" and InCombatLockdown() then
+		return false
+	end
+	local guild = guildName()
+	if not guild then
+		return false
+	end
+	local text
+	if type(GetGuildInfoText) == "function" then
+		text = GetGuildInfoText()
+	elseif C_GuildInfo and type(C_GuildInfo.GetInfoText) == "function" then
+		text = C_GuildInfo.GetInfoText()
+	end
+	if type(text) ~= "string" then
+		return false
+	end
+	local before = infoText()
+	infoCache = { guild = guild, text = text }
+	if type(GuildSlotsDB) ~= "table" then
+		GuildSlotsDB = {}
+	end
+	GuildSlotsDB.info = { guild = guild, text = text }
+	if text ~= before then
+		fire()
+	end
+	return true
+end
+
+function Roster.guild()
+	return guildName()
 end
 
 function Roster.me()
@@ -136,7 +185,7 @@ function Roster.randomHex(n)
 	return out:sub(1, n)
 end
 
-local function fire()
+fire = function()
 	for _, fn in ipairs(listeners) do
 		fn()
 	end
@@ -149,20 +198,11 @@ function Roster.onChange(fn)
 		frame:RegisterEvent("GUILD_ROSTER_UPDATE")
 		frame:RegisterEvent("PLAYER_GUILD_UPDATE")
 		frame:SetScript("OnEvent", function(_, event)
-			if event == "GUILD_ROSTER_UPDATE" then
-				lastInfo = infoText()
-				fire()
-			else
-				-- Membership or guild info changed: refresh, fire when the text differs.
-				requestRoster()
-				local info = infoText()
-				if info ~= lastInfo then
-					lastInfo = info
-					fire()
-				end
+			if event ~= "GUILD_ROSTER_UPDATE" then
+				requestRoster() -- membership changed
 			end
+			fire()
 		end)
-		lastInfo = infoText()
 		requestRoster()
 	end
 end

@@ -137,7 +137,13 @@ stub.roster = {
 }
 
 -- No settings line: nobody is an officer.
-stub.infoText = "Welcome to the guild\nRaids on Friday"
+-- The guild info is protected: it is only read in refreshInfo(), during a hardware event.
+local function setInfo(text)
+	stub.infoText = text
+	stub.asUser(Roster.refreshInfo)
+end
+
+setInfo("Welcome to the guild\nRaids on Friday")
 eq(Roster.line(), nil, "no line")
 local s, c = Roster.settings()
 eq(s, nil, "no settings")
@@ -145,7 +151,7 @@ assert(c, "settings code")
 eq(Roster.isOfficer("Alice Smith"), false, "guild leader is no officer without settings")
 eq(Roster.isOfficer("Bob Jones"), false, "nobody is an officer without settings")
 
-stub.infoText = "Welcome\n  GSLOTS1;L=0;R=1  \nRaids on Friday"
+setInfo("Welcome\n  GSLOTS1;L=0;R=1  \nRaids on Friday")
 eq(Roster.line(), "GSLOTS1;L=0;R=1", "line found and trimmed")
 s = Roster.settings()
 eq(s.R, 1, "parsed rank limit")
@@ -158,6 +164,12 @@ eq(Roster.isOfficer("bob jones"), false, "names compare byte for byte")
 eq(Roster.isOfficer(nil), false, "nil name")
 
 stub.infoText = "GSLOTS1;R=banana"
+eq(Roster.line(), "GSLOTS1;L=0;R=1", "the copy is kept until the next read")
+stub.combat = true
+stub.asUser(function() eq(Roster.refreshInfo(), false, "no read in combat") end)
+stub.combat = false
+eq(GuildSlotsDB.info.text:find("GSLOTS1;L=0;R=1", 1, true) ~= nil, true, "copy saved for the next login")
+setInfo("GSLOTS1;R=banana")
 eq(Roster.isOfficer("Alice Smith"), false, "invalid settings: nobody")
 
 local m = Roster.members()
@@ -178,10 +190,12 @@ eq(changes, 1, "fires on GUILD_ROSTER_UPDATE")
 stub.fire("GUILD_ROSTER_UPDATE")
 eq(changes, 2, "fires again")
 stub.fire("PLAYER_GUILD_UPDATE")
-eq(changes, 2, "no fire when the info text is unchanged")
-stub.infoText = "GSLOTS1;L=0"
-stub.fire("PLAYER_GUILD_UPDATE")
-eq(changes, 3, "fires when the info text changed")
+eq(changes, 3, "fires on PLAYER_GUILD_UPDATE")
+setInfo("GSLOTS1;L=0")
+eq(changes, 4, "fires when a read finds a changed info text")
+setInfo("GSLOTS1;L=0")
+eq(changes, 4, "not when the text is the same")
+eq(#stub.blocked, 0, "no protected call outside a hardware event")
 
 -- randomHex
 GuildSlotsDB = { pool = "start" }

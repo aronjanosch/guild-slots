@@ -38,6 +38,8 @@ local function boot(locale, opts)
 	stub.fire("ADDON_LOADED", "GuildSlots")
 	stub.fire("PLAYER_LOGIN")
 	stub.fire("GUILD_ROSTER_UPDATE")
+	-- The guild info is only read during a hardware event; the first slash command does it.
+	stub.slash("/gs", "help")
 
 	local env = { stub = stub, ns = ns, L = ns.L }
 	-- Frames advance by dt; echoes are delivered after each frame, in order.
@@ -299,6 +301,7 @@ local function officerFlow(locale, unknown)
 	stub.deliver("GSLOTS", "", "GUILD", nil)
 	env.pump(2)
 
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
 	unknownMethods(stub, unknown)
 end
 
@@ -322,6 +325,7 @@ local function memberFlow(locale, unknown)
 	stub.fire("GUILD_ROSTER_UPDATE")
 	assert(W.officer:IsShown(), "officer button after promotion")
 	assert(O.grantPart:IsShown(), "grant part after promotion")
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
 	unknownMethods(stub, unknown)
 end
 
@@ -357,6 +361,7 @@ local function noGuildFlow(locale, unknown)
 	assert(ns.Main.session() == nil, "session dropped after leaving")
 	assert(S.mode == "solo", "window back to solo")
 	env.pump(10)
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
 	unknownMethods(stub, unknown)
 end
 
@@ -388,6 +393,7 @@ local function t1Flow(locale, unknown)
 	W.spin:Click()
 	assert(S.phase == "round", "solo plays")
 	settle(env)
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
 	unknownMethods(stub, unknown)
 end
 
@@ -402,6 +408,7 @@ local function noLineFlow(locale, unknown)
 	assert(O.line:GetText():find(";T=T2;", 1, true), "line for T2")
 	stub.type(O.fields.E, "10,25")
 	assert(O.line:GetText() == "" and O.formNote:GetText():find(L.F_E, 1, true), "25 is not a T2 stake")
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
 	unknownMethods(stub, unknown)
 end
 

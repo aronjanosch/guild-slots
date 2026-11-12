@@ -2145,6 +2145,7 @@ end
 -- Slash commands and events
 
 local function slash(msg)
+	if ns.Roster then ns.Roster.refreshInfo() end -- a slash command is a hardware event
 	msg = string.lower(tostring(msg or "")):gsub("^%s+", ""):gsub("%s+$", "")
 	if msg == "" then
 		SlotFrame.toggle()

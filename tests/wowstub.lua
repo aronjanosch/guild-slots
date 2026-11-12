@@ -22,6 +22,8 @@ local stub = {
 	playing = {}, -- handle -> file of file sounds not stopped by StopSound
 	chat = {},
 	unknown = {},
+	hardware = 0, -- depth of simulated hardware events
+	blocked = {}, -- protected calls made outside a hardware event
 	frames = {},
 	off = {},
 	fontsFail = false,
@@ -270,7 +272,12 @@ end
 function Object:SetJustifyH(j) check(j == "LEFT" or j == "CENTER" or j == "RIGHT", "SetJustifyH: bad value") end
 
 function Object:Click(button)
-	if self._scripts.OnClick then self._scripts.OnClick(self, button or "LeftButton", false) end
+	stub.hardware = stub.hardware + 1
+	local ok, err = pcall(function()
+		if self._scripts.OnClick then self._scripts.OnClick(self, button or "LeftButton", false) end
+	end)
+	stub.hardware = stub.hardware - 1
+	if not ok then error(err, 0) end
 end
 function Object:EnableKeyboard(on)
 	check(not stub.combat, "EnableKeyboard called in combat")
@@ -421,7 +428,14 @@ end
 function UnitGUID(unit) return stub.playerGUID end
 function GetServerTime() return stub.serverTime end
 function debugprofilestop() return clock * 1000 end
-function GetGuildInfoText() return stub.infoText end
+-- Protected in the client: only readable during a hardware event (click, slash command).
+function GetGuildInfoText()
+	if stub.hardware <= 0 then
+		stub.blocked[#stub.blocked + 1] = "GetGuildInfoText"
+		return nil
+	end
+	return stub.infoText
+end
 function GetNumGuildMembers() return #stub.roster, #stub.roster end
 function GetGuildRosterInfo(i)
 	local m = stub.roster[i]
@@ -465,12 +479,26 @@ function stub.tick(dt)
 	end
 end
 
+-- Runs fn as if a click or key press were being handled.
+function stub.asUser(fn, ...)
+	stub.hardware = stub.hardware + 1
+	local ok, err = pcall(fn, ...)
+	stub.hardware = stub.hardware - 1
+	if not ok then error(err, 0) end
+end
+
 function stub.slash(cmd, msg)
 	for key, fn in pairs(SlashCmdList) do
 		for i = 1, 9 do
 			local alias = _G["SLASH_" .. key .. i]
 			if not alias then break end
-			if alias == cmd then return fn(msg or "") end
+			if alias == cmd then
+				stub.hardware = stub.hardware + 1
+				local ok, err = pcall(fn, msg or "")
+				stub.hardware = stub.hardware - 1
+				if not ok then error(err, 0) end
+				return
+			end
 		end
 	end
 	error("unknown slash command " .. cmd)

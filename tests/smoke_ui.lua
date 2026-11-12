@@ -570,6 +570,7 @@ local function scenario(locale, lean)
 	settle()
 	shownMatches("demo round")
 
+	assert(#stub.blocked == 0, "protected call outside a hardware event")
 	local unknown = {}
 	for k in pairs(stub.unknown) do unknown[#unknown + 1] = k end
 	table.sort(unknown)

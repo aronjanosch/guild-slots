@@ -106,6 +106,11 @@ Roster.randomHex(n)   -> n hex characters
 Roster.onChange(fn)   fn() after GUILD_ROSTER_UPDATE and when the guild info text changed
 ```
 
+- `GetGuildInfoText()` is protected in the client: called from a timer it raised
+  `ADDON_ACTION_BLOCKED` (2026-11-12), while the probe read it fine from a slash command. So the
+  text is read only in `Roster.refreshInfo()`, which UI code calls from clicks and slash commands
+  (never in combat). `Roster.line()` and everything built on it use the copy, which is also saved in
+  `GuildSlotsDB.info` per guild so the settings are known right after login.
 - Roster names can carry `-Realm`; it is cut off. Names are compared byte for byte.
 - Without valid settings nobody is an officer.
 - `randomHex` must not be plain `math.random`: a seed the player can guess breaks the purchase.

@@ -350,6 +350,8 @@ function Skin.button(parent, style, w, h, onClick, opts)
 		paintButton(b)
 	end)
 	b:SetScript("OnClick", function()
+		-- A click is a hardware event: the one place the guild info may be read.
+		if ns.Roster then ns.Roster.refreshInfo() end
 		if b.enabled and b.onClick then
 			b.onClick()
 		end
