@@ -12,9 +12,15 @@ local addonName, ns = ...
 --
 -- Phases: "idle" (an open take/gamble offer is S.offer), "round" (a plan plays), "pick" (the
 -- gamble card waits for red or black), "flip" (the card turns over).
+--
+-- Engagement pack (v0.7): autoplay (UI/Auto.lua rules, driven by a timer here), turbo (a
+-- second timing set, Theme.timingTurbo, for the plan and the reels), anticipation sounds, the
+-- tiered big win with tick ladder and window shake, the session panel (UI/Session.lua), the
+-- guild ticker on the footer line (UI/Ticker.lua) and the bonus buy (solo only).
 
 local L, Theme, Anim, Reel, Plan = ns.L, ns.Theme, ns.Anim, ns.Reel, ns.Plan
 local Skin, Fx, Layout, Paytable, Cashout = ns.Skin, ns.Fx, ns.Layout, ns.Paytable, ns.Cashout
+local Stats, Auto, Ticker = ns.Stats, ns.Auto, ns.Ticker
 
 local SlotFrame = {}
 ns.SlotFrame = SlotFrame
@@ -30,7 +36,7 @@ end
 local db -- GuildSlotsDB, set on ADDON_LOADED (or on first use)
 local W = {} -- widgets
 local S = { now = 0, phase = "idle", counts = {}, offer = false, mode = "solo", cards = {}, lit = {}, litN = 0,
-	landAt = {} } -- animation state
+	landAt = {}, baseStops = {}, stats = Stats.new(), autoOpts = { rounds = 10, stopFree = true, stopWin = 0 } } -- animation state
 SlotFrame.widgets, SlotFrame.state = W, S
 
 -- The table the window draws (strips, lines): always T2.
@@ -63,6 +69,11 @@ end
 -- All effects, or only lines, pulses and count-ups ("/gs fx").
 local function fxOn()
 	return not db or db.fx ~= false
+end
+
+-- The timing set of the running round (fixed when it starts), else the one turbo selects.
+local function tm()
+	return S.tm or Theme.timingFor(db and db.turbo)
 end
 
 -- A Theme.sounds entry is a soundkit name, a soundkit id, or a file under the addon folder
@@ -110,6 +121,15 @@ local function startSpinSound()
 	spinSound = playSound("reelSpin")
 end
 
+-- The tension riser runs while teased reels turn after two tomes.
+local riserSound
+local function stopRiser()
+	if riserSound and type(StopSound) == "function" then
+		pcall(StopSound, riserSound, 80)
+	end
+	riserSound = nil
+end
+
 -- Shared with UI/OfficerFrame.lua.
 SlotFrame.ui = { fmt = fmt, chat = chat, playSound = playSound }
 
@@ -127,6 +147,57 @@ local function initDB()
 	if db.sound == nil then db.sound = true end
 	if db.space == nil then db.space = true end
 	if db.fx == nil then db.fx = true end
+	if db.turbo == nil then db.turbo = false end
+	if db.ticker == nil then db.ticker = true end
+end
+
+---------------------------------------------------------------------------------------------
+-- Window shake (big-win tier steps): the window's own anchor is moved by a few pixels and put
+-- back exactly. The window is not a protected frame, but it never shakes in combat anyway.
+
+local shake = { active = false }
+
+local function stopShake()
+	if not shake.active then
+		return
+	end
+	shake.active = false
+	local f = W.frame
+	f:ClearAllPoints()
+	f:SetPoint(shake.point, shake.rel, shake.relPoint, shake.x, shake.y)
+end
+
+local function startShake()
+	local f = W.frame
+	if not f or not fxOn() or inCombat() then
+		return
+	end
+	if shake.active then
+		shake.t0 = S.now -- a new step while it still shakes: shake on from the same rest point
+		return
+	end
+	local point, rel, relPoint, x, y = f:GetPoint(1)
+	if not point or f:GetNumPoints() ~= 1 then
+		return
+	end
+	shake.point, shake.rel, shake.relPoint, shake.x, shake.y = point, rel or UIParent, relPoint or point, x or 0, y or 0
+	shake.t0, shake.active = S.now, true
+end
+
+local function updateShake(now)
+	if not shake.active then
+		return
+	end
+	local t = tm()
+	local dt = now - shake.t0
+	if dt >= t.shake or inCombat() then
+		stopShake()
+		return
+	end
+	local dx, dy = Anim.shake(dt, t.shake, Theme.layout.shakeAmp, t.shakeFreq)
+	local f = W.frame
+	f:ClearAllPoints()
+	f:SetPoint(shake.point, shake.rel, shake.relPoint, shake.x + dx, shake.y + dy)
 end
 
 local function savePosition()
@@ -134,6 +205,7 @@ local function savePosition()
 	if not f or not db then
 		return
 	end
+	stopShake()
 	local point, _, relPoint, x, y = f:GetPoint(1)
 	if point then
 		db.pos = { point, relPoint, x, y }
@@ -142,6 +214,7 @@ end
 
 local function applyPosition()
 	local f = W.frame
+	stopShake()
 	f:ClearAllPoints()
 	local p = db and db.pos
 	if type(p) == "table" and type(p[1]) == "string" then
@@ -304,7 +377,10 @@ local function refresh()
 	local status = phase == "idle" and statusLine() or nil
 
 	local label = L.SPIN
-	if phase == "round" then
+	local auto = S.auto
+	if auto then
+		label = auto.left and string.format(L.AUTO_STOP, auto.left) or L.AUTO_STOP_ENDLESS
+	elseif phase == "round" then
 		local step = currentStep()
 		if step and step.kind == "spin" and step.game == 0 and not S.quick then
 			label = L.STOP
@@ -314,8 +390,16 @@ local function refresh()
 			label = L.SKIP
 		end
 	end
+	local small = auto and true or false
+	if W.spin.small ~= small then
+		W.spin.small = small
+		Skin.font(W.spin.label, "title", small and Theme.fontSize.spinAuto or Theme.fontSize.spin)
+	end
 	W.spin.label:SetText(label)
-	W.spin:setEnabled(phase == "round" or (phase == "idle" and not status))
+	W.spin:setEnabled(auto or phase == "round" or (phase == "idle" and not status))
+	W.auto:setEnabled(auto or (phase == "idle" and not status and supported()))
+	W.auto:setSelected(auto or W.autoPanel:IsShown())
+	W.turbo:setSelected(db.turbo and true or false)
 
 	-- Stakes, or the take / gamble buttons that replace them.
 	local offer = phase == "idle" and S.offer and game:state() == "gamble"
@@ -333,7 +417,7 @@ local function refresh()
 	W.stakeRow:SetShown(not offerRow)
 	for _, pill in ipairs(W.pills) do
 		pill:setSelected(pill.stake == game.stake)
-		pill:setEnabled(not busy and not status)
+		pill:setEnabled(not busy and not status and not auto)
 	end
 	W.stakeValue:SetText(fmt(game.stake))
 	W.stakeSub:SetText(string.format(L.STAKE_SUB, #T2.lines, fmt(game.stake / #T2.lines)))
@@ -344,20 +428,38 @@ local function refresh()
 	W.soloBtn:setEnabled(not busy)
 	W.guildBtn:setEnabled(not busy)
 	W.sound:setIcon(db.sound and Theme.icons.soundOn or Theme.icons.soundOff)
+	W.sessionBtn:setSelected(W.sessionPanel:IsShown())
 
-	-- Secondary row: paytable, officer, refill (solo) or cash out (guild), or the balance (free
-	-- games).
+	-- Secondary row: paytable, officer, refill (solo) or cash out (guild), bonus buy (solo), or
+	-- the balance (free games). The shown buttons take the slots from the left.
 	local officer = isOfficer()
-	W.officer:SetShown(officer)
-	W.refill:SetShown(S.mode == "solo" and not S.free)
-	Skin.rect(W.refill, W.frame, officer and Lay.refill or Lay.officer)
-	W.refill:setEnabled(not busy)
+	local solo = S.mode == "solo" and not S.free
 	local guild = S.mode == "guild" and not S.free
+	local buy = solo and type(game.buy) == "function" and supported() and T2.buyPrice ~= nil
+	W.officer:SetShown(officer)
+	W.refill:SetShown(solo)
+	W.refill:setEnabled(not busy and not auto)
 	W.cashout:SetShown(guild)
-	Skin.rect(W.cashout, W.frame, officer and Lay.refill or Lay.officer)
-	W.cashout:setEnabled(guild and phase == "idle" and Cashout.canOpen(game))
+	W.cashout:setEnabled(guild and phase == "idle" and not auto and Cashout.canOpen(game))
 	W.cashout:setSelected(Cashout.isShown())
+	W.buy:SetShown(buy)
 	W.footBalance:SetShown(S.free and true or false)
+	local row = W.rowList
+	row[1], row[2], row[3], row[4] = W.payToggle, nil, nil, nil
+	if officer then row[#row + 1] = W.officer end
+	if solo then row[#row + 1] = W.refill end
+	if guild then row[#row + 1] = W.cashout end
+	if buy then row[#row + 1] = W.buy end
+	local slots = #row > 3 and Lay.row4 or Lay.row3
+	for i, b in ipairs(row) do
+		Skin.rect(b, W.frame, slots[i])
+	end
+	if buy then
+		local price = T2.buyPrice * game.stake
+		local w = slots[#row][3]
+		W.buy.label:SetText(string.format(w < Lay.buyWide and L.BUY_SHORT or L.BUY, fmt(price)))
+		W.buy:setEnabled(phase == "idle" and not auto and not status)
+	end
 
 	-- Guild status over the reels (state 10).
 	if status then
@@ -648,9 +750,8 @@ local function leaveFree()
 	end
 	S.free = false
 	hideExpansions()
-	local stops = S.result and S.result.round.stops
 	for r = 1, REELS do
-		W.reels[r]:setStrip(T2.reels[r], stops and stops[r] or 0)
+		W.reels[r]:setStrip(T2.reels[r], S.baseStops[r] or 0)
 	end
 	setFreeLook(false)
 end
@@ -666,7 +767,7 @@ local function timed(step, t)
 end
 
 local function countStep(step, silent)
-	local d = math.min(step.dur, Theme.timing.lineCount)
+	local d = math.min(step.dur, tm().lineCount)
 	countTo("total", step.from, step.total, silent and 0 or d)
 	if step.game > 0 then
 		countTo("freeWin", step.freeWin - step.amount, step.freeWin, silent and 0 or d)
@@ -688,14 +789,16 @@ H.spin = {
 		if step.game == 0 then
 			sfx("reelStart")
 		end
-		local t0 = S.now + step.delay
+		local t0, timing = S.now + step.delay, tm()
 		for r = 1, REELS do
-			W.reels[r]:spin(t0, step.stops[r], step.stopAt[r])
+			W.reels[r]:spin(t0, step.stops[r], step.stopAt[r], timing, step.decel and step.decel[r])
 		end
+		S.teaseState = step.tease and 0 or nil -- 0 waiting, 1 teasing, 2 the last reel landed
 		startSpinSound()
 	end,
 	update = function(step)
 		local now, running = S.now, false
+		local last = 0
 		for r = 1, REELS do
 			local reel = W.reels[r]
 			local ev, landedToo = reel:update(now)
@@ -710,11 +813,30 @@ H.spin = {
 			end
 			if reel:isSpinning() then
 				running = true
+				if not reel.landedFired then last = r end
 			end
 		end
 		local tease = step.tease
 		if tease then
 			local on = not W.reels[tease - 1]:isSpinning()
+			if on and S.teaseState == 0 then
+				-- The teased reels run on alone: the tension rises (two tomes only).
+				S.teaseState = 1
+				if step.teaseKind == "books" then
+					stopRiser()
+					riserSound = playSound("teaseRiser")
+				end
+			end
+			if S.teaseState == 1 and last == 0 then
+				-- The last reel landed: hit or miss.
+				S.teaseState = 2
+				stopRiser()
+				if step.teaseHit then
+					playSound("teaseHit")
+				elseif step.teaseKind == "books" then
+					playSound("teaseMiss")
+				end
+			end
 			local ta = Theme.alpha.tease
 			local a = ta[1] + (ta[2] - ta[1]) * Anim.pulse(now, Theme.timing.flashFreq)
 			for r = 1, REELS do
@@ -735,6 +857,8 @@ H.spin = {
 	end,
 	finish = function(step)
 		stopSpinSound()
+		stopRiser()
+		S.teaseState = nil
 		hideTease()
 		for r = 1, REELS do
 			W.reels[r]:setStop(step.stops[r])
@@ -743,14 +867,20 @@ H.spin = {
 }
 
 H.allLines = {
-	enter = function(step)
+	enter = function(step, silent)
 		clearShow()
 		dimAll()
 		for _, l in ipairs(step.lines) do
-			showLine(l.line, l.count)
+			showLine(l.line, l.count, 1, step.amount and not silent)
 		end
 		if step.scatter.win > 0 then
 			markBooks(S.window)
+		end
+		if step.amount then
+			-- All wins at once (turbo): the step counts them up together.
+			setWinText(winLine(step.amount, S.result.stake), Theme.tones.win)
+			countStep(step, silent)
+			sfx("lineWin", silent)
 		end
 	end,
 	update = function(step, t)
@@ -825,7 +955,7 @@ H.expand = {
 		S.expandFired = 0
 	end,
 	update = function(step, t)
-		local per = Theme.timing.expandReel
+		local per = tm().expandReel
 		for k, r in ipairs(step.reels) do
 			local u = clamp01((t - (k - 1) * per) / per)
 			if u > 0 and k > S.expandFired then
@@ -879,21 +1009,26 @@ H.intro = {
 	enter = function(step, silent)
 		clearShow()
 		dimAll()
-		markBooks(S.window)
-		local books = 0
-		for r = 1, REELS do
-			for row = 1, ROWS do
-				if S.window[r][row] == T2.scatter.symbol then books = books + 1 end
+		if step.bought then
+			-- A bought series: no tomes on the reels, straight to the banner and the tome.
+			setWinText(string.format(L.FREE_BOUGHT, step.freeOf), Theme.tones.free)
+		else
+			markBooks(S.window)
+			local books = 0
+			for r = 1, REELS do
+				for row = 1, ROWS do
+					if S.window[r][row] == T2.scatter.symbol then books = books + 1 end
+				end
 			end
+			setWinText(string.format(L.FREE_TRIGGER, books, step.freeOf), Theme.tones.free)
 		end
-		setWinText(string.format(L.FREE_TRIGGER, books, step.freeOf), Theme.tones.free)
 		S.introStage = 0
 		S.introSilent = silent
 		sfx("freeStart", silent)
 	end,
 	update = function(step, t)
-		local tm = Theme.timing
-		if t < tm.introPulse then
+		local tm = tm()
+		if t < tm.introPulse and not step.bought then
 			pulseLit(t)
 			return false
 		end
@@ -953,24 +1088,55 @@ H.summary = {
 }
 
 -- Big win (state 08): rays turn behind the banner, a shine sweeps over it, coins rain.
+local TICK_KEYS = {}
+for i = 1, 16 do TICK_KEYS[i] = "countTick" .. i end
+
+-- The count-up starts at BIG WIN and steps up (HUGE WIN, LEGENDARY) when the amount passes each
+-- threshold: a new title, the tier sound, a short window shake and more coins. A ladder of
+-- ticks rises in pitch through the count (fewer effects: one quiet tick, no shake).
 H.big = {
 	enter = function(step, silent)
 		clearShow()
 		W.reelShade:Show()
+		local first = silent and step.level or step.tiers[1].level
 		if not silent and fxOn() then
 			W.rays:start(S.now)
-			W.rain:start(S.now)
+			W.rain:start(S.now, Theme.layout.coinsTier[first])
 		end
-		showBanner("big", L["BIG_WIN_" .. step.level], not silent)
-		countTo("banner", 0, step.total, silent and 0 or step.dur * 0.8)
+		showBanner("big", L["BIG_WIN_" .. first], not silent)
+		countTo("banner", 0, step.total, silent and 0 or step.count)
+		S.bigTier, S.bigTick = silent and #step.tiers or 1, silent and #step.ticks or 0
 		sfx("bigWin", silent)
+		if not silent and not fxOn() then
+			playSound("countTickSoft")
+		end
 	end,
 	update = function(step, t)
 		local a = Theme.alpha.bigTitle
 		W.bannerTitle:SetAlpha(a[1] + (a[2] - a[1]) * Anim.pulse(t, Theme.timing.pulseFreq))
+		local tiers = step.tiers
+		while S.bigTier < #tiers and t >= tiers[S.bigTier + 1].at do
+			S.bigTier = S.bigTier + 1
+			local level = tiers[S.bigTier].level
+			W.bannerTitle:SetText(L["BIG_WIN_" .. level])
+			playSound("tierStep")
+			if fxOn() then
+				W.bannerPop:start(S.now, true)
+				W.rain:setCount(Theme.layout.coinsTier[level])
+				startShake()
+			end
+		end
+		local ticks = step.ticks
+		while S.bigTick < #ticks and t >= ticks[S.bigTick + 1].at do
+			S.bigTick = S.bigTick + 1
+			if fxOn() then
+				playSound(TICK_KEYS[ticks[S.bigTick].n])
+			end
+		end
 		return t >= step.dur
 	end,
 	finish = function()
+		stopShake()
 		hideBanner()
 	end,
 }
@@ -1013,22 +1179,35 @@ local function showResting()
 	end
 end
 
+local autoAfterRound, updateSession -- defined with autoplay and the session panel below
+
 local function endRound()
 	S.phase = "idle"
 	S.plan, S.si = nil, nil
 	stopSpinSound()
+	stopRiser()
+	stopShake()
 	hideTease()
 	leaveFree()
 	hideBanner()
 	showResting()
-	countTo("balance", S.balanceShown, restBalance(), Theme.timing.countUp)
+	countTo("balance", S.balanceShown, restBalance(), tm().countUp)
+	S.tm = nil
 	S.offer = S.game:state() == "gamble"
 	if S.offer then
 		setWinText(string.format(L.OFFER_HINT, fmt(S.game.pending)), Theme.tones.win)
 	elseif not (S.result and S.result.win > 0) then
 		idleText()
 	end
+	if S.result and not S.result.counted then
+		S.result.counted = true
+		S.stats:round(S.mode, S.result)
+		updateSession()
+	end
 	saveGame()
+	if S.auto then
+		autoAfterRound()
+	end
 	refresh()
 end
 
@@ -1078,14 +1257,22 @@ local function settleRound()
 	end
 end
 
+-- r: a result of game:spin() or game:buy() (a bought series costs r.cost).
 local function startRound(r, before)
 	S.result, S.offer, S.counts, S.messageUntil = r, false, {}, nil
 	setWinText("")
 	setTotalShown(nil)
 	clearShow()
 	hideExpansions()
-	setBalanceShown(before - r.stake)
-	S.plan = Plan.build(r.round, Theme.timing, T2)
+	setBalanceShown(before - (r.cost or r.stake))
+	-- The base reels to come back to after free games: the round's, or (a bought series has no
+	-- base game) where they stand now.
+	local stops = r.round.stops
+	for i = 1, REELS do
+		S.baseStops[i] = stops and stops[i] or math.floor(W.reels[i].x + 0.5) % W.reels[i].n
+	end
+	S.tm = Theme.timingFor(db.turbo)
+	S.plan = Plan.build(r.round, S.tm, T2)
 	S.si, S.quick = 0, false
 	S.phase = "round"
 	Cashout.conceal()
@@ -1099,11 +1286,106 @@ end
 
 local function quickStop()
 	for i = 1, REELS do
-		W.reels[i]:quickStop(S.now, (i - 1) * Theme.timing.quickStagger)
+		W.reels[i]:quickStop(S.now, (i - 1) * tm().quickStagger)
 	end
 end
 
+---------------------------------------------------------------------------------------------
+-- Autoplay: rounds started by the window's clock, never by a click, so nothing on this path
+-- may read the guild info (Roster.refreshInfo runs on clicks only). Rules in UI/Auto.lua.
+
+local AUTO_STOP_LINES = {
+	free = "AUTO_END_FREE", win = "AUTO_END_WIN", below = "AUTO_END_BELOW", done = "AUTO_END_DONE",
+	click = "AUTO_END_CLICK", combat = "AUTO_END_COMBAT", mode = "AUTO_END_MODE", close = "AUTO_END_CLOSE",
+	payout = "AUTO_END_PAYOUT",
+}
+
+-- Ends autoplay. why: a key of AUTO_STOP_LINES, or a refusal code from spin().
+local function stopAuto(why)
+	if not S.auto then
+		return
+	end
+	S.auto, S.autoNext = nil, nil
+	if W.frame then
+		local key = AUTO_STOP_LINES[why]
+		local line = key and L[key] or string.format(L.AUTO_END_CODE, codeLine(why))
+		if why ~= "close" and S.phase == "idle" then
+			message(line, (why == "done" or why == "click") and Theme.tones.muted or Theme.tones.lose)
+		end
+		refresh()
+	end
+end
+SlotFrame.stopAuto = stopAuto
+
+-- Takes an open offer without a sound or a message (autoplay never gambles).
+local function quietTake()
+	if S.game:state() ~= "gamble" then
+		return
+	end
+	S.game:take()
+	S.offer = false
+	clearShow()
+	countTo("balance", S.balanceShown, S.game.balance, tm().countUp)
+end
+
+-- After a fully shown round: stop on a condition, else take the win and plan the next round.
+function autoAfterRound()
+	local why = S.auto:after(S.result, S.game.balance)
+	if why then
+		stopAuto(why)
+		return
+	end
+	quietTake()
+	S.autoNext = S.now + tm().autoPause
+end
+
+-- One autoplay round (from onUpdate when S.autoNext is due).
+local function autoStep()
+	S.autoNext = nil
+	local game = S.game
+	if S.mode == "guild" and game:status() == "payout" then
+		stopAuto("payout")
+		return
+	end
+	if S.auto.left and S.auto.left <= 0 then
+		stopAuto("done")
+		return
+	end
+	quietTake()
+	local before = game.balance
+	local r, err = game:spin()
+	if not r then
+		if S.auto:refused(err) == "retry" then
+			S.autoNext = S.now + tm().autoRetry -- guild interval: try again, never faster
+			return
+		end
+		stopAuto(err)
+		return
+	end
+	S.auto:take()
+	startRound(r, before)
+end
+
+-- Starts autoplay with the panel's choices.
+function SlotFrame.startAuto()
+	if S.auto or S.phase ~= "idle" or not supported() or statusLine() then
+		return false
+	end
+	local o = S.autoOpts
+	S.auto = Auto.new({ rounds = o.rounds, stopFree = o.stopFree, stopWin = o.stopWin, stopBelow = o.stopBelow })
+	S.autoNext = S.now
+	W.autoPanel:Hide()
+	playSound("click")
+	refresh()
+	return true
+end
+
 function SlotFrame.spin()
+	if S.auto then
+		-- A click (or Space) on the spin button ends autoplay; the running round plays on.
+		stopAuto("click")
+		return
+	end
 	if S.phase == "flip" or S.phase == "pick" then
 		return
 	end
@@ -1128,6 +1410,25 @@ function SlotFrame.spin()
 	local r, err = game:spin()
 	if not r then
 		message(codeLine(err), Theme.tones.lose)
+		refresh()
+		return
+	end
+	startRound(r, before)
+end
+
+-- Bonus buy (solo only): pays tbl.buyPrice x the stake and plays a free-game series. The guild
+-- game has no buy() (docs/table-t2-spec.md, "Bought free games (solo only)").
+function SlotFrame.buy()
+	if S.mode ~= "solo" or S.phase ~= "idle" or S.auto or type(S.game.buy) ~= "function" then
+		return
+	end
+	if S.game:state() == "gamble" then
+		quietTake()
+	end
+	local before = S.game.balance
+	local r, err = S.game:buy()
+	if not r then
+		message(err == "no_funds" and L.NO_FUNDS_BUY or codeLine(err), Theme.tones.lose)
 		refresh()
 		return
 	end
@@ -1260,6 +1561,8 @@ local function updateFlip()
 			playSound("gambleLose")
 		end
 		countTo("balance", S.balanceShown, restBalance(), t.countUp)
+		S.stats:gamble(S.mode, res)
+		updateSession()
 		saveGame()
 	end
 	if dt >= t.gambleFlip + t.gambleHold then
@@ -1280,7 +1583,7 @@ local function updateFlip()
 end
 
 function SlotFrame.refill()
-	if S.mode ~= "solo" or S.phase ~= "idle" then
+	if S.mode ~= "solo" or S.phase ~= "idle" or S.auto then
 		return
 	end
 	local res = S.game:refill()
@@ -1295,7 +1598,7 @@ end
 
 -- Opens (or re-opens) the cash-out overlay; hides it when it is shown.
 function SlotFrame.cashout()
-	if S.mode ~= "guild" or S.phase ~= "idle" then
+	if S.mode ~= "guild" or S.phase ~= "idle" or S.auto then
 		return
 	end
 	if Cashout.isShown() then
@@ -1314,7 +1617,7 @@ function SlotFrame.cashout()
 end
 
 function SlotFrame.setStake(v)
-	if S.phase ~= "idle" then
+	if S.phase ~= "idle" or S.auto then
 		return
 	end
 	if S.game:state() == "gamble" then
@@ -1343,12 +1646,16 @@ local function stopFx()
 	end
 	hideLandFlashes()
 	W.spinGlow:Hide()
+	stopShake()
+	stopRiser()
+	SlotFrame.tickerIdle()
 end
 
 -- Finishes everything at once (round, card, count-ups) so no result stays hidden.
 -- Used when the window closes and before the window changes to another game.
 local function settle()
 	stopSpinSound()
+	stopRiser()
 	if S.phase == "round" then
 		settleRound()
 	end
@@ -1367,6 +1674,8 @@ end
 
 local function updateEffects(now)
 	local t = Theme.timing
+	updateShake(now)
+	SlotFrame.tickerUpdate(now)
 	W.bannerPop:update(now)
 	W.shine:update(now)
 	W.rays:update(now)
@@ -1428,6 +1737,13 @@ local function onUpdate(_, elapsed)
 
 	if S.phase == "flip" then
 		updateFlip()
+	end
+
+	-- Autoplay: the next round once the last one is fully shown and the pause is over.
+	if S.auto and S.autoNext and now >= S.autoNext and S.phase == "idle" and next(S.counts) == nil then
+		if not pcall(autoStep) then
+			stopAuto("error")
+		end
 	end
 
 	updateEffects(now)
@@ -1560,7 +1876,7 @@ local function frameAt(parent, level, r)
 end
 
 local LEVEL = { reels = 2, cells = 5, reelFrame = 7, lines = 8, status = 12, card = 12, stage = 14, banner = 16,
-	stageTop = 18, paytable = 30, cashout = 32, rain = 40 }
+	stageTop = 18, session = 26, paytable = 30, cashout = 32, autoPanel = 34, rain = 40 }
 
 local function buildReels(f)
 	local Lay, c = Theme.layout, Theme.colors
@@ -1872,8 +2188,252 @@ local function secondary(parent, r, icon, text, onClick)
 	return b
 end
 
+---------------------------------------------------------------------------------------------
+-- Autoplay panel (over the reels, above the Auto button): rounds, stop conditions, start.
+
+local function syncAutoPanel()
+	local o = S.autoOpts
+	for _, b in ipairs(W.autoRounds) do b:setSelected(b.value == o.rounds) end
+	for _, b in ipairs(W.autoWins) do b:setSelected(b.value == (o.stopWin or 0)) end
+	W.autoFree:setSelected(o.stopFree)
+	W.autoStart:setEnabled(S.phase == "idle" and not S.auto and supported() and not statusLine())
+end
+
+function SlotFrame.toggleAutoPanel(show)
+	if show == nil then
+		show = not W.autoPanel:IsShown()
+	end
+	if show then
+		syncAutoPanel()
+		W.autoPanel:Show()
+	else
+		W.autoBelow:ClearFocus()
+		W.autoPanel:Hide()
+	end
+	refresh()
+end
+
+local function buildAutoPanel(f)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	local holder = frameAt(f, LEVEL.autoPanel)
+	W.autoPanel = holder
+	local panel = Skin.panel(holder, f, Lay.autoPanel, "overlay")
+	panel:EnableMouse(true)
+	local title = Skin.textIn(panel, f, Lay.autoTitle, "title", fs.heading, c.gold, "LEFT")
+	title:SetText(L.AUTO_TITLE)
+	local close = Skin.button(panel, "icon", Lay.autoClose[3], Lay.autoClose[4], function()
+		SlotFrame.toggleAutoPanel(false)
+	end, { icon = Theme.icons.close, iconOnly = true, iconSize = Lay.iconSize - 2 })
+	Skin.rect(close, f, Lay.autoClose)
+
+	local function label(r, text)
+		local l = Skin.textIn(panel, f, r, "label", fs.label, c.muted, "LEFT")
+		l:SetText(Skin.upper(text))
+	end
+	local function choice(r, text, onClick)
+		local b = Skin.button(panel, "toggle", r[3], r[4], onClick, { size = fs.smallButton })
+		Skin.rect(b, f, r)
+		b.label:SetText(text)
+		return b
+	end
+
+	label(Lay.autoRoundsLabel, L.AUTO_ROUNDS)
+	W.autoRounds = {}
+	for i, v in ipairs(Auto.ROUNDS) do
+		local r = Lay.autoRounds
+		local b = choice({ r[1] + (i - 1) * Lay.autoRoundsStep, r[2], r[3], r[4] }, v > 0 and fmt(v) or L.AUTO_ENDLESS,
+			function()
+				S.autoOpts.rounds = v
+				syncAutoPanel()
+			end)
+		b.value = v
+		W.autoRounds[i] = b
+	end
+	W.autoFree = choice(Lay.autoFree, L.AUTO_STOP_FREE, function()
+		S.autoOpts.stopFree = not S.autoOpts.stopFree
+		syncAutoPanel()
+	end)
+	label(Lay.autoWinLabel, L.AUTO_STOP_WIN)
+	W.autoWins = {}
+	for i, v in ipairs(Auto.WINS) do
+		local r = Lay.autoWin
+		local b = choice({ r[1] + (i - 1) * Lay.autoWinStep, r[2], r[3], r[4] },
+			v > 0 and string.format(L.AUTO_TIMES, v) or L.AUTO_OFF, function()
+				S.autoOpts.stopWin = v
+				syncAutoPanel()
+			end)
+		b.value = v
+		W.autoWins[i] = b
+	end
+	label(Lay.autoBelowLabel, L.AUTO_STOP_BELOW)
+	W.autoBelow = Skin.editBox(panel, Lay.autoBelow[3], Lay.autoBelow[4], "number", fs.lineField)
+	Skin.rect(W.autoBelow.holder, f, Lay.autoBelow)
+	Skin.call(W.autoBelow, "SetMaxLetters", 10)
+	W.autoBelow:SetScript("OnTextChanged", function(self, userInput)
+		local text = self:GetText() or ""
+		local clean = text:gsub("%D", ""):sub(1, 10)
+		if userInput and clean ~= text then
+			self:SetText(clean)
+		end
+		S.autoOpts.stopBelow = tonumber(clean)
+	end)
+	W.autoStart = Skin.button(panel, "primary", Lay.autoStart[3], Lay.autoStart[4], SlotFrame.startAuto,
+		{ size = fs.heading })
+	Skin.rect(W.autoStart, f, Lay.autoStart)
+	W.autoStart.label:SetText(L.AUTO_START)
+	local note = Skin.textIn(panel, f, Lay.autoNote, "label", fs.payNote, c.muted, "LEFT")
+	Skin.call(note, "SetWordWrap", true)
+	note:SetText(L.AUTO_NOTE)
+	holder:Hide()
+end
+
+---------------------------------------------------------------------------------------------
+-- Session panel (over the reels, toggled by the header button): this session's numbers for
+-- the current mode (UI/Session.lua), reset on login and by its reset button.
+
+local SESSION_ROWS = { "rounds", "staked", "won", "net", "best", "streak", "series" }
+
+function updateSession()
+	if not W.sessionRows or not W.sessionPanel:IsShown() then
+		return
+	end
+	local s = S.stats:get(S.mode)
+	local c = Theme.colors
+	W.sessionTitle:SetText(Skin.upper(L.SESSION) .. " · " .. (S.mode == "guild" and L.GUILD or L.SOLO))
+	local v = W.sessionRows
+	v.rounds:SetText(fmt(s.rounds))
+	v.staked:SetText(fmt(s.staked))
+	v.won:SetText(fmt(s.won))
+	v.net:SetText((s.net > 0 and "+" or "") .. fmt(s.net))
+	Skin.color(v.net, s.net > 0 and c.goldLight or s.net < 0 and c.lose or c.number)
+	if s.best > 0 then
+		local m = s.bestMult % 1 == 0 and string.format("%d", s.bestMult) or string.format("%.1f", s.bestMult)
+		v.best:SetText(fmt(s.best) .. "  " .. Theme.esc(c.muted) .. "×" .. m .. "|r")
+	else
+		v.best:SetText("–")
+	end
+	if s.streak > 0 then
+		v.streak:SetText(string.format(L.STREAK_WIN, s.streak))
+	elseif s.streak < 0 then
+		v.streak:SetText(string.format(L.STREAK_LOSE, -s.streak))
+	else
+		v.streak:SetText("–")
+	end
+	v.series:SetText(fmt(s.series))
+end
+
+function SlotFrame.toggleSession()
+	W.sessionPanel:SetShown(not W.sessionPanel:IsShown())
+	updateSession()
+	playSound("click")
+	refresh()
+end
+
+local function buildSessionPanel(f)
+	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	local holder = frameAt(f, LEVEL.session)
+	W.sessionPanel = holder
+	local panel = Skin.panel(holder, f, Lay.sessionPanel, "overlay")
+	W.sessionTitle = Skin.textIn(panel, f, Lay.sessionTitle, "label", fs.section, c.gold, "LEFT")
+	W.sessionReset = Skin.button(panel, "secondary", Lay.sessionReset[3], Lay.sessionReset[4], function()
+		S.stats:reset(S.mode)
+		updateSession()
+		playSound("click")
+	end, { size = fs.smallButton })
+	Skin.rect(W.sessionReset, f, Lay.sessionReset)
+	W.sessionReset.label:SetText(L.SESSION_RESET)
+	W.sessionRows = {}
+	local r = Lay.sessionRow
+	for i, key in ipairs(SESSION_ROWS) do
+		local y = r[2] + (i - 1) * Lay.sessionRowStep
+		local name = Skin.textIn(panel, f, { r[1], y, r[3] - Lay.sessionValueW, r[4] }, "label", fs.sessionRow, c.muted,
+			"LEFT")
+		name:SetText(L["SESSION_" .. string.upper(key)])
+		W.sessionRows[key] = Skin.textIn(panel, f, { r[1] + r[3] - Lay.sessionValueW, y, Lay.sessionValueW, r[4] },
+			"number", fs.sessionRow + 2, c.number, "RIGHT")
+	end
+	holder:Hide()
+end
+
+---------------------------------------------------------------------------------------------
+-- Guild ticker on the footer line: big wins and free games of the guild (session event
+-- "ticker", Game/Guild.lua), one after another, level-coloured. Guild mode only, "/gs ticker".
+
+function SlotFrame.tickerIdle()
+	S.tickerEntry = nil
+	if W.ticker then
+		W.ticker:Hide()
+		W.footer:Show()
+	end
+end
+
+function SlotFrame.tickerUpdate(now)
+	if not W.ticker then
+		return
+	end
+	local entry, t
+	if db.ticker ~= false and S.mode == "guild" then
+		entry, t = S.tickerQ:update(now)
+	end
+	if not entry then
+		if S.tickerEntry or W.ticker:IsShown() then
+			SlotFrame.tickerIdle()
+		end
+		return
+	end
+	local Lay, tim = Theme.layout, Theme.timing
+	if entry ~= S.tickerEntry then
+		S.tickerEntry = entry
+		local ok, text, level = pcall(Ticker.text, entry, L, fmt)
+		W.ticker:SetText(ok and text or "")
+		Skin.color(W.ticker, ok and Theme.tickerColors[level] or Theme.colors.footer)
+		W.footer:Hide()
+		W.ticker:Show()
+		Skin.rect(W.ticker, W.frame, Lay.ticker)
+		W.ticker:SetAlpha(fxOn() and 0 or 1)
+		S.tickerRest = false
+	end
+	if fxOn() then
+		-- Slides in from the right and fades in, fades out at the end.
+		local fade = tim.tickerFade
+		local a = math.min(1, t / fade, (tim.tickerShow - t) / fade)
+		W.ticker:SetAlpha(a > 0 and a or 0)
+		local u = t / tim.tickerSlide
+		if u < 1 then
+			Skin.rect(W.ticker, W.frame, Lay.ticker, -Lay.tickerSlide * (1 - Anim.easeOutQuad(u)), 0)
+		elseif not S.tickerRest then
+			Skin.rect(W.ticker, W.frame, Lay.ticker)
+		end
+		S.tickerRest = u >= 1
+	end
+end
+
+local function onTicker(data)
+	if db.ticker == false or S.mode ~= "guild" or type(data) ~= "table" then
+		return
+	end
+	S.tickerQ:push(data)
+end
+
+-- On entering guild mode: the newest few entries of session:ticker(), when the session has it.
+local function seedTicker(session)
+	S.tickerQ:clear()
+	if db.ticker == false or not session or type(session.ticker) ~= "function" then
+		return
+	end
+	local ok, list = pcall(session.ticker, session)
+	if ok and type(list) == "table" then
+		for i = math.min(#list, Theme.tickerSeed), 1, -1 do
+			if type(list[i]) == "table" then
+				S.tickerQ:push(list[i])
+			end
+		end
+	end
+end
+
 local function build()
 	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
+	S.tickerQ = Ticker.new(Theme.timing.tickerShow, Theme.tickerQueue)
 
 	local f = CreateFrame("Frame", FRAME_NAME, UIParent)
 	W.frame = f
@@ -1883,7 +2443,10 @@ local function build()
 	f:SetMovable(true)
 	f:EnableMouse(true)
 	f:RegisterForDrag("LeftButton")
-	f:SetScript("OnDragStart", function(self) self:StartMoving() end)
+	f:SetScript("OnDragStart", function(self)
+		stopShake()
+		self:StartMoving()
+	end)
 	f:SetScript("OnDragStop", function(self)
 		self:StopMovingOrSizing()
 		savePosition()
@@ -1910,6 +2473,7 @@ local function build()
 		refresh()
 	end)
 	W.close = iconButton(f, Lay.close, Theme.icons.close, function() f:Hide() end)
+	W.sessionBtn = iconButton(f, Lay.session, Theme.icons.coin, function() SlotFrame.toggleSession() end)
 	local divAnchor = CreateFrame("Frame", nil, f)
 	Skin.rect(divAnchor, f, Lay.divider)
 	Skin.nine(f, divAnchor, Theme.slices.divider, "ARTWORK")
@@ -1948,6 +2512,23 @@ local function build()
 	W.spinGlow:Hide()
 	W.spin = Skin.button(f, "primary", Lay.spin[3], Lay.spin[4], SlotFrame.spin)
 	Skin.rect(W.spin, f, Lay.spin)
+	-- Autoplay and turbo between the stakes and the spin button.
+	W.auto = Skin.button(f, "secondary", Lay.auto[3], Lay.auto[4], function()
+		if S.auto then
+			stopAuto("click")
+		else
+			SlotFrame.toggleAutoPanel()
+		end
+	end, { size = fs.smallButton })
+	Skin.rect(W.auto, f, Lay.auto)
+	W.auto.label:SetText(L.AUTO)
+	W.turbo = Skin.button(f, "toggle", Lay.turbo[3], Lay.turbo[4], function()
+		db.turbo = not db.turbo
+		playSound("click")
+		refresh()
+	end, { size = fs.smallButton })
+	Skin.rect(W.turbo, f, Lay.turbo)
+	W.turbo.label:SetText(L.TURBO)
 
 	-- Secondary row.
 	W.payToggle = secondary(f, Lay.paytable, Theme.icons.paytable, L.PAYTABLE, function()
@@ -1964,6 +2545,9 @@ local function build()
 	W.refill = secondary(f, Lay.refill, Theme.icons.coin, L.REFILL, SlotFrame.refill)
 	W.cashout = secondary(f, Lay.refill, Theme.icons.coin, L.CASHOUT, SlotFrame.cashout)
 	W.cashout:Hide()
+	W.buy = Skin.button(f, "secondary", Lay.refill[3], Lay.refill[4], SlotFrame.buy, { size = fs.smallButton })
+	W.buy:Hide()
+	W.rowList = {}
 	local fb = CreateFrame("Frame", nil, f)
 	Skin.rect(fb, f, Lay.footBalance)
 	W.footBalance = fb
@@ -1978,6 +2562,8 @@ local function build()
 	-- Footer
 	W.footer = Skin.textIn(f, f, Lay.footer, "label", fs.footer, c.footer, "CENTER")
 	W.footer:SetText(L.FOOTER)
+	W.ticker = Skin.textIn(f, f, Lay.ticker, "label", fs.ticker, c.footer, "CENTER")
+	W.ticker:Hide()
 
 	buildStatus(f)
 	buildCard(f)
@@ -1992,6 +2578,7 @@ local function build()
 		fmt = fmt,
 		refresh = refresh,
 		afterRequest = function(line)
+			stopAuto("payout")
 			applyGame()
 			message(line, Theme.tones.win)
 			refresh()
@@ -1999,6 +2586,8 @@ local function build()
 		allowSelf = function() return db.selfTest == true end,
 		guildMode = function() return S.mode == "guild" end,
 	})
+	buildSessionPanel(f)
+	buildAutoPanel(f)
 
 	f:SetScript("OnUpdate", onUpdate)
 	f:SetScript("OnKeyDown", onKeyDown)
@@ -2008,7 +2597,8 @@ local function build()
 	end)
 	f:SetScript("OnHide", function()
 		-- Finish everything at once so a closed window never hides a pending result, and stop
-		-- every effect.
+		-- every effect. Closing the window ends autoplay.
+		stopAuto("close")
 		settle()
 		stopFx()
 		updateKeyboard()
@@ -2071,6 +2661,7 @@ local function useMode(mode)
 		return false
 	end
 	if W.frame then
+		stopAuto("mode")
 		settle()
 		if S.game:state() == "gamble" then
 			S.game:take()
@@ -2081,6 +2672,12 @@ local function useMode(mode)
 	end
 	S.game, S.mode = game, mode
 	if W.frame then
+		updateSession()
+		if mode == "guild" then
+			seedTicker(session)
+		else
+			S.tickerQ:clear()
+		end
 		applyGame()
 		SlotFrame.showLock()
 	end
@@ -2143,7 +2740,12 @@ local function onMainEvent(name, data)
 		elseif (data.status == "failed" or data.status == "timeout") and not busy then
 			message(string.format(L.BUY_FAILED, tostring(data.code or data.status)), Theme.tones.lose)
 		end
+	elseif name == "ticker" then
+		onTicker(data)
 	elseif name == "payout" then
+		if S.auto and S.mode == "guild" and S.game:status() == "payout" then
+			stopAuto("payout") -- an open payout request ends autoplay
+		end
 		if Cashout.onPayout(data) and S.mode == "guild" then
 			S.paid = { from = S.balanceShown, amount = data.amount, officer = data.officer }
 			playSound("payoutDone")
@@ -2237,6 +2839,25 @@ local function slash(msg)
 		db.fx = not db.fx
 		chat(db.fx and L.FX_ON or L.FX_OFF)
 		if W.frame and not db.fx then stopFx() end
+	elseif msg == "turbo" then
+		initDB()
+		db.turbo = not db.turbo
+		chat(db.turbo and L.TURBO_ON or L.TURBO_OFF)
+		if W.frame then refresh() end
+	elseif msg == "ticker" then
+		initDB()
+		db.ticker = not db.ticker
+		chat(db.ticker and L.TICKER_ON or L.TICKER_OFF)
+		if W.frame and not db.ticker then
+			S.tickerQ:clear()
+			SlotFrame.tickerIdle()
+		end
+	elseif msg == "auto" then
+		ensure()
+		if not W.frame:IsShown() then
+			W.frame:Show()
+		end
+		SlotFrame.toggleAutoPanel(true)
 	elseif msg == "guild" or msg == "solo" then
 		ensure()
 		SlotFrame.setMode(msg)
@@ -2290,6 +2911,11 @@ events:SetScript("OnEvent", function(_, event, arg1)
 	if event == "ADDON_LOADED" and arg1 == addonName then
 		initDB()
 	elseif event == "PLAYER_REGEN_DISABLED" then
+		-- Combat ends autoplay and any shake.
+		if W.frame then
+			stopAuto("combat")
+			stopShake()
+		end
 		-- Fires just before combat lockdown starts: release the keyboard while still allowed.
 		local f = W.frame
 		if f and f.EnableKeyboard then

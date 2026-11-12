@@ -183,6 +183,9 @@ function Theme.esc(c)
 		math.floor(c[3] * 255 + 0.5))
 end
 
+Theme.tickerQueue = 5 -- ticker entries waiting at most (older ones are dropped)
+Theme.tickerSeed = 3 -- entries of session:ticker() shown on entering guild mode
+
 -- Guild ticker: entry level -> colour (anything else: footer colour).
 Theme.tickerColors = {
 	big = Theme.colors.goldLight, huge = hex("ffa94d"), legendary = hex("ff6b6b"), free = Theme.colors.freeHint,

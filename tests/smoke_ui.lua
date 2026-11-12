@@ -19,7 +19,11 @@
 
 local failures = 0
 
-local SOUND_BOOK, SOUND_FREE, SOUND_EXPAND, SOUND_BIG = 875, 8959, 31578, 8960
+local SOUND_BOOK, SOUND_EXPAND, SOUND_BIG = 875, 31578, 8960
+local MEDIA = "Interface\\AddOns\\GuildSlots\\Media\\"
+local SOUND_FREE = MEDIA .. "free_start.ogg"
+local SOUND_TIER, SOUND_TICK = MEDIA .. "tier_step.ogg", MEDIA .. "count_tick_"
+local SOUND_RISER, SOUND_HIT, SOUND_MISS = MEDIA .. "tension_riser.ogg", MEDIA .. "tease_hit.ogg", MEDIA .. "tease_miss.ogg"
 
 local OPTIONAL = { "CreateLine", "SetRotation", "SetClipsChildren", "SetBlendMode" }
 
@@ -383,19 +387,53 @@ local function scenario(locale, lean)
 	assert(W.bannerTitle:GetText() == L.FREE_OVER, "summary banner")
 	assert(onBaseStrips() and not S.free and not W.freeBar:IsShown(), "back to the base reels")
 	assert(W.bgTiles.tex[1]:GetTexture() == Theme.tex.bg, "wood again")
+	local px = { W.frame:GetPoint(1) }
+	local tierSounds, tickSounds = countSound(SOUND_TIER), 0
+	for i = 1, 8 do tickSounds = tickSounds + countSound(SOUND_TICK .. i .. ".ogg") end
 	local big = untilStep("big")
 	assert(big.level == 3, "118x is legendary")
 	ticks(5)
-	assert(W.bannerTitle:GetText() == L.BIG_WIN_3, "big win banner")
+	assert(W.bannerTitle:GetText() == L.BIG_WIN_1, "the banner starts at BIG WIN")
 	assert(W.bannerArt:GetTexture() == Theme.tex.bannerBig, "big win banner art")
 	assert(W.rain.coins[1]:IsShown() and W.rays.tex:IsShown(), "coin rain and rays")
+	assert(W.rain.count == Theme.layout.coinsTier[1], "first tier: fewer coins")
 	assert(W.bannerPop.frame:GetScale() < 1.12 + 1e-9, "banner pops")
 	local raysCoord = W.rays.tex._coord[1]
 	ticks(30)
 	assert(W.rays.tex._coord[1] ~= raysCoord, "rays turn")
-	local onScreen = 0
-	for _, coin in ipairs(W.rain.coins) do if coin:IsShown() then onScreen = onScreen + 1 end end
-	assert(onScreen > 5 and #W.rain.coins <= 30, "coins fall, at most 30")
+	-- Tier steps: HUGE, then LEGENDARY, each with a shake that moves the window and puts it back.
+	local shook, titles = false, { [L.BIG_WIN_1] = true }
+	guard = 0
+	while step() == big do
+		stub.tick(1 / 60)
+		titles[W.bannerTitle:GetText()] = true
+		local _, _, _, x, y = W.frame:GetPoint(1)
+		if x ~= px[4] or y ~= px[5] then shook = true end
+		assert(W.frame:GetNumPoints() == 1, "one anchor while shaking")
+		guard = guard + 1
+		assert(guard < 2000, "big win never ends")
+		if S.bigTier == 3 and not titles.checked then
+			titles.checked = true
+			assert(W.rain.count == Theme.layout.coinsTier[3], "more coins at the top tier")
+			local onScreen = 0
+			for _, coin in ipairs(W.rain.coins) do if coin:IsShown() then onScreen = onScreen + 1 end end
+			assert(onScreen > 5 and #W.rain.coins <= 30, "coins fall, at most 30")
+		end
+	end
+	assert(titles[L.BIG_WIN_2] and titles[L.BIG_WIN_3], "the banner stepped up through HUGE to LEGENDARY")
+	assert(shook, "the window shook at a tier step")
+	local qx = { W.frame:GetPoint(1) }
+	for i = 1, 5 do assert(qx[i] == px[i], "window position restored exactly (" .. i .. ")") end
+	assert(countSound(SOUND_TIER) == tierSounds + 2, "one tier sound per step up")
+	local ladder, lastTick = 0, 0
+	for _, snd in ipairs(stub.sounds) do
+		local n = type(snd) == "string" and tonumber(snd:match("count_tick_(%d)%.ogg$"))
+		if n then
+			ladder = ladder + 1
+			lastTick = n
+		end
+	end
+	assert(ladder - tickSounds >= 10 and lastTick == 8, "a rising ladder of count ticks")
 	assert(countSound(SOUND_BIG) == bigSounds + 1, "big win sound")
 	settle()
 	assert(not W.rain.coins[1]:IsShown() and not W.rays.tex:IsShown(), "celebration over")
@@ -536,15 +574,264 @@ local function scenario(locale, lean)
 	if W.offerRow:IsShown() then W.take:Click() end
 	queueFreeRound(19)
 	W.spin:Click()
+	local lowPoint = { W.frame:GetPoint(1) }
+	local soft, ladderBefore = countSound(MEDIA .. "count_tick_soft.ogg"), 0
+	for i = 1, 8 do ladderBefore = ladderBefore + countSound(SOUND_TICK .. i .. ".ogg") end
+	local tiersBefore = countSound(SOUND_TIER)
 	untilStep("big")
 	ticks(5)
 	assert(W.banner:IsShown() and W.bannerAmount:GetText() ~= "", "banner and count-up still shown")
 	assert(not W.rain.coins[1]:IsShown() and not W.rays.tex:IsShown(), "no coin rain, no rays")
 	assert(W.bannerPop.frame:GetScale() == 1, "no pop")
+	while step() and step().kind == "big" do
+		stub.tick(1 / 60)
+		local _, _, _, x, y = W.frame:GetPoint(1)
+		assert(x == lowPoint[4] and y == lowPoint[5], "no shake with fewer effects")
+	end
+	assert(countSound(MEDIA .. "count_tick_soft.ogg") == soft + 1, "one quiet tick instead of the ladder")
+	local ladderAfter = 0
+	for i = 1, 8 do ladderAfter = ladderAfter + countSound(SOUND_TICK .. i .. ".ogg") end
+	assert(ladderAfter == ladderBefore, "no tick ladder with fewer effects")
+	assert(countSound(SOUND_TIER) == tiersBefore + 2, "the banner still steps up")
+	assert(W.bannerTitle:GetText() == L.BIG_WIN_3 or not W.banner:IsShown(), "and reaches LEGENDARY")
 	settle()
 	if W.offerRow:IsShown() then W.take:Click() end
 	stub.slash("/gs", "fx")
 	assert(GuildSlotsDB.fx == true, "all effects again")
+
+	-- 11c. Every sound the theme names as a file exists on disk.
+	local files = 0
+	for key, snd in pairs(Theme.sounds) do
+		if type(snd) == "string" and snd:find("%.ogg$") then
+			files = files + 1
+			local fh = io.open("GuildSlots/" .. snd:gsub("\\", "/"))
+			assert(fh, "sound file missing for " .. key .. ": " .. snd)
+			fh:close()
+		end
+	end
+	assert(files >= 16, "the theme names the generated sounds")
+
+	-- 11d. Anticipation: two tomes, the riser runs while the teased reels turn; a third tome
+	-- brings the hit sting, none the miss thud. The teased reels brake longer.
+	local function riserRuns() return stub.isPlaying("tension_riser") end
+	queue(40, 35, 0, 0, 0)
+	local misses, hits = countSound(SOUND_MISS), countSound(SOUND_HIT)
+	W.spin:Click()
+	local sp = step()
+	assert(sp.tease == 3 and sp.teaseKind == "books" and sp.teaseHit == false, "two tomes, no third")
+	assert(sp.decel[3] > Theme.timing.decel, "teased reels brake longer")
+	assert(W.reels[3].plan.h == sp.decel[3], "the reel got the longer braking")
+	local heard = false
+	guard = 0
+	while step() == sp do
+		stub.tick(1 / 60)
+		heard = heard or riserRuns()
+		guard = guard + 1
+		assert(guard < 1000, "teased spin never ends")
+	end
+	assert(heard, "tension riser while the teased reels turn")
+	assert(not riserRuns(), "riser stopped when the last reel landed")
+	assert(countSound(SOUND_MISS) == misses + 1 and countSound(SOUND_HIT) == hits, "miss thud")
+	settle()
+	if W.offerRow:IsShown() then W.take:Click() end
+	queueFreeRound(19)
+	W.spin:Click()
+	untilStep("allLines")
+	assert(not riserRuns(), "riser stopped")
+	assert(countSound(SOUND_HIT) == hits + 1, "hit sting on the third tome")
+	settle()
+	if W.offerRow:IsShown() then W.take:Click() end
+
+	-- 11e. Turbo: the same round in clearly less time, the same end state.
+	local function timed(fn)
+		local t0 = GetTime()
+		fn()
+		settle()
+		return GetTime() - t0
+	end
+	local b0 = S.game.balance
+	queueFreeRound(19)
+	local normal = timed(function() W.spin:Click() end)
+	local normalBalance, normalShown = S.game.balance - b0, W.winAmount:GetText()
+	if W.offerRow:IsShown() then W.take:Click() end
+	W.turbo:Click()
+	assert(GuildSlotsDB.turbo == true and W.turbo.selected, "turbo saved and shown")
+	b0 = S.game.balance
+	queueFreeRound(19)
+	local turbo = timed(function() W.spin:Click() end)
+	assert(turbo < normal * 0.6, "turbo is clearly faster: " .. turbo .. " s vs " .. normal .. " s")
+	assert(S.game.balance - b0 == normalBalance and W.winAmount:GetText() == normalShown, "same end state")
+	assert(W.offerRow:IsShown(), "offer after a turbo round")
+	shownMatches("after turbo")
+	W.take:Click()
+	stub.slash("/gs", "turbo")
+	assert(GuildSlotsDB.turbo == false and not W.turbo.selected, "/gs turbo toggles it off")
+
+	-- 11f. Session panel after a known sequence of rounds.
+	W.sessionBtn:Click()
+	assert(W.sessionPanel:IsShown(), "session panel open")
+	W.sessionReset:Click()
+	assert(W.sessionRows.rounds:GetText() == "0", "reset")
+	queue(0, 0, 0, 0, 0)
+	W.spin:Click()
+	settle()
+	queue(1, 16, 0, 0, 0)
+	W.spin:Click()
+	settle()
+	W.take:Click()
+	queueFreeRound(19)
+	W.spin:Click()
+	settle()
+	W.take:Click()
+	local R = W.sessionRows
+	assert(R.rounds:GetText() == "3", "3 rounds")
+	assert(R.staked:GetText() == fmt(30), "30 staked")
+	assert(R.won:GetText() == fmt(1215), "won 30 + 1185")
+	assert(R.net:GetText() == "+" .. fmt(1185), "net")
+	assert(R.best:GetText():find(fmt(1185), 1, true) and R.best:GetText():find("118.5", 1, true), "best win with multiplier")
+	assert(R.streak:GetText() == string.format(L.STREAK_WIN, 2), "two won in a row")
+	assert(R.series:GetText() == "1", "one series")
+	W.sessionBtn:Click()
+	assert(not W.sessionPanel:IsShown(), "session panel closed")
+
+	-- 11g. Autoplay.
+	local function runAuto(maxTicks)
+		guard = 0
+		while S.auto do
+			stub.tick(1 / 60)
+			guard = guard + 1
+			assert(guard < (maxTicks or 20000), "autoplay never stops")
+		end
+		settle()
+	end
+	local function startAuto(rounds, stopFree, stopWin, below)
+		W.auto:Click()
+		assert(W.autoPanel:IsShown(), "autoplay panel opens")
+		for _, b in ipairs(W.autoRounds) do if b.value == rounds then b:Click() end end
+		if (S.autoOpts.stopFree and true or false) ~= stopFree then W.autoFree:Click() end
+		for _, b in ipairs(W.autoWins) do if b.value == stopWin then b:Click() end end
+		stub.type(W.autoBelow, below and tostring(below) or "")
+		W.autoStart:Click()
+		assert(S.auto and not W.autoPanel:IsShown(), "autoplay runs, panel closed")
+	end
+	local function rounds() return S.stats:get("solo").rounds end
+	-- 10 rounds, a line win among them taken automatically, never gambled.
+	W.sessionReset:Click()
+	for i = 1, 10 do
+		if i == 3 then queue(1, 16, 0, 0, 0) else queue(0, 0, 0, 0, 0) end
+	end
+	b0 = S.game.balance
+	local gambles, realGamble = 0, S.game.gamble
+	S.game.gamble = function(...) gambles = gambles + 1 return realGamble(...) end
+	startAuto(10, false, 0)
+	assert(W.spin.label:GetText() == string.format(L.AUTO_STOP, 10), "spin button: STOP AUTO (10 left)")
+	guard = 0
+	while S.phase ~= "round" do
+		stub.tick(1 / 60)
+		guard = guard + 1
+		assert(guard < 120, "autoplay starts within the count-up")
+	end
+	assert(W.spin.label:GetText() == string.format(L.AUTO_STOP, 9), "first round: 9 left")
+	assert(W.spin.enabled and not W.pills[1].enabled, "stop stays possible, stakes locked")
+	ticks(2)
+	runAuto()
+	assert(rounds() == 10, "ten rounds played: " .. rounds())
+	assert(S.game.balance == b0 - 100 + 30, "the line win was taken: " .. S.game.balance)
+	assert(gambles == 0 and S.game:state() == "idle", "never gambled")
+	S.game.gamble = nil -- back to the method
+	assert(W.win:GetText() == L.AUTO_END_DONE, "finished line")
+	assert(W.spin.label:GetText() == L.SPIN, "spin button back")
+	shownMatches("after autoplay")
+	-- Stop on free games: the round plays through, the offer stays for the player.
+	queue(0, 0, 0, 0, 0)
+	queueFreeRound(19)
+	startAuto(25, true, 0)
+	runAuto()
+	assert(S.result.round.free and S.auto == nil, "stopped after the free games")
+	assert(W.win:GetText() == L.AUTO_END_FREE, "free-games stop line")
+	assert(W.offerRow:IsShown(), "the series win is offered, not taken")
+	W.take:Click()
+	-- Stop on a single win of 20x the stake (the 3x line win does not stop it).
+	queue(1, 16, 0, 0, 0)
+	queueFreeRound(19)
+	startAuto(25, false, 20)
+	runAuto()
+	assert(S.result.win == 1185 and W.win:GetText() == L.AUTO_END_WIN, "stopped on the 118x win")
+	W.take:Click()
+	-- Stop below a typed balance.
+	for _ = 1, 5 do queue(0, 0, 0, 0, 0) end
+	local limit = S.game.balance - 25
+	startAuto(25, false, 0, limit)
+	runAuto()
+	assert(S.game.balance < limit and S.game.balance >= limit - 10, "stopped just below the limit")
+	assert(W.win:GetText() == L.AUTO_END_BELOW, "below line")
+	stub.type(W.autoBelow, "")
+	-- No funds.
+	S.game.balance = 25
+	for _ = 1, 3 do queue(0, 0, 0, 0, 0) end
+	startAuto(10, false, 0)
+	runAuto()
+	assert(S.game.balance == 5, "two rounds, then no funds")
+	assert(W.win:GetText() == string.format(L.AUTO_END_CODE, L.NO_FUNDS), "no-funds line")
+	W.refill:Click()
+	-- A click on the spin button stops it; the running round plays on.
+	startAuto(0, false, 0)
+	assert(W.spin.label:GetText() == L.AUTO_STOP_ENDLESS, "until stopped")
+	ticks(3)
+	assert(S.phase == "round", "a round runs")
+	W.spin:Click()
+	assert(S.auto == nil and S.phase == "round", "stopped, the round goes on")
+	settle()
+	if W.offerRow:IsShown() then W.take:Click() end
+	-- Combat stops it.
+	startAuto(0, false, 0)
+	ticks(3)
+	stub.fire("PLAYER_REGEN_DISABLED")
+	stub.combat = true
+	assert(S.auto == nil, "combat stops autoplay")
+	settle()
+	stub.combat = false
+	stub.fire("PLAYER_REGEN_ENABLED")
+	if W.offerRow:IsShown() then W.take:Click() end
+	-- Closing the window stops it.
+	startAuto(0, false, 0)
+	ticks(3)
+	stub.slash("/gs")
+	assert(not W.frame:IsShown() and S.auto == nil and S.phase == "idle", "closing stops and settles")
+	stub.slash("/gs", "auto")
+	assert(W.frame:IsShown() and W.autoPanel:IsShown(), "/gs auto opens the panel")
+	W.auto:Click()
+	assert(not W.autoPanel:IsShown(), "Auto closes it again")
+	if W.offerRow:IsShown() then W.take:Click() end
+	shownMatches("after autoplay stops")
+
+	-- 11h. Bonus buy (solo): pays 64 x the stake, plays ten free games from the intro on.
+	assert(W.buy:IsShown() and W.buy.label:GetText():find(fmt(640), 1, true), "buy button with the price")
+	b0 = S.game.balance
+	queue(5, 33, 55, 50, 5, 29)
+	for _ = 1, 19 do queue(1, 1, 1, 1, 1) end
+	local freeBefore = countSound(SOUND_FREE)
+	W.buy:Click()
+	assert(S.phase == "round" and step().kind == "intro" and step().bought, "starts with the intro")
+	assert(W.balance:GetText() == fmt(b0 - 640), "price taken at once")
+	assert(W.win:GetText() == string.format(L.FREE_BOUGHT, 10), "bought line")
+	assert(countSound(SOUND_FREE) == freeBefore + 1, "free-games sting")
+	ticks(10)
+	assert(W.banner:IsShown() and W.bannerTitle:GetText() == string.format(L.FREE_GAMES, 10), "intro banner")
+	untilStep("spin", 1)
+	assert(S.free and W.reels[1].strip == T2.freeReels[1], "free games")
+	assert(not W.buy:IsShown(), "no buy button during the series")
+	untilStep("summary")
+	settle()
+	assert(S.game.balance == b0 - 640 + 1075, "balance minus the price plus the series win")
+	assert(W.offerRow:IsShown() and S.game.pending == 1075, "take / gamble on the series win")
+	assert(onBaseStrips(), "back on the base reels")
+	shownMatches("after the bought series")
+	W.take:Click()
+	S.game.balance = 600
+	W.buy:Click()
+	assert(S.phase == "idle" and W.win:GetText() == L.NO_FUNDS_BUY, "not without the price")
+	W.refill:Click()
 
 	-- 12. Random rounds with gambles, skips, frame times 5..60 ms.
 	for i = 1, 80 do

@@ -160,6 +160,36 @@ capped win, five-of-a-kind through wilds and a scatter win without free games (s
 trying spin numbers), and at least two T2 accounts with purchases, spins and gamble steps.
 `tests/test_vectors_t2.lua` compares `Engine.round` field by field and replays the accounts.
 
+## 9. Bought free games (solo only)
+
+In solo mode (play money) the player can buy a free-game series directly: the price is
+`tbl.buyPrice` (64) times the current stake. The series has no base game: it starts with 10 free
+games, draws the expanding symbol `X` once, and follows every free-game rule of section 5
+(retriggers add 10, at most 50 games, the cap applies to the series win). The take / gamble
+offer afterwards risks the series win like any round win.
+
+```
+Tables.playBought(tbl, stake, cap, draw) -> round     draw.symbol(), draw.free(i) as in playRound
+round = { kind = "lines", stake, lineBet, lines = {}, scatter = { count = 0, win = 0 }, base = 0,
+          bought = true, cost = tbl.buyPrice * stake, free = { symbol, awarded, win, games }, win }
+```
+
+`Tables.playRound` and `Tables.playBought` share one free-game loop, so the rules cannot drift
+apart; `Engine.round`, the ledger and every vector are unchanged. `Solo` has `game:buy()` (codes
+`no_funds`, `busy` while a take / gamble offer is open, `unsupported` for a non-lines table) and
+`info().buy = { price = 64 }`; the solo rng is drawn in the order symbol, then the stops of each
+free game.
+
+Expected value: one series is worth about 60.1 × the stake on average (3·10^6 simulated series:
+60.09), so the price of 64 gives a return of about 94 %, a little below the 95 % of a normal
+round. `tests/test_bought.lua` simulates 200,000 series with a fixed seed and checks a mean
+return of 0.92 .. 0.96 of the price.
+
+Not in guild mode: there is no buy button and the guild game has no `buy()`. At security level
+0 a player's client knows its own purchase key and can compute every coming series in advance,
+so it could buy only the good ones. Bought series stay solo until witnesses exist that make a
+series unknown before it is paid for.
+
 ## Clarifications
 
 Readings fixed after the Lua implementation and the Python reference were compared; the vectors

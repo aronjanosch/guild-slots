@@ -257,6 +257,123 @@ local function officerFlow(locale, unknown)
 	end
 	assert(env.count("SPIN") >= spins + 2, "more spins sent")
 	assert(env.count("GAM") >= 1, "a gamble step was sent")
+	if W.offerRow:IsShown() then W.take:Click() end
+
+	-- No bonus buy in guild mode.
+	assert(not W.buy:IsShown() and session:game().buy == nil, "no bonus buy in guild mode")
+	assert(session:game():info().buy == nil, "no buy price in the guild info")
+
+	-- Autoplay in guild mode: turbo rounds are shorter than the spin interval, so autoplay has
+	-- to wait; it never sends more than one SPIN per 1.5 s and never gambles.
+	local spinTimes = {}
+	local sendAll = C_ChatInfo.SendAddonMessage
+	C_ChatInfo.SendAddonMessage = function(prefix, text, ...)
+		if text:find("^1|SPIN|") then spinTimes[#spinTimes + 1] = GetTime() end
+		if text:find("^1|GAM|") then error("autoplay gambled") end
+		return sendAll(prefix, text, ...)
+	end
+	local function startAuto(rounds)
+		W.auto:Click()
+		assert(W.autoPanel:IsShown(), "autoplay panel")
+		for _, b in ipairs(W.autoRounds) do if b.value == rounds then b:Click() end end
+		if S.autoOpts.stopFree then W.autoFree:Click() end
+		W.autoWins[#W.autoWins]:Click() -- no win stop
+		W.autoStart:Click()
+		assert(S.auto, "autoplay runs in guild mode")
+	end
+	W.turbo:Click()
+	env.pump(120)
+	local autoSpins = env.count("SPIN")
+	local gameObj, waits = session:game(), 0
+	gameObj.spin = function(self)
+		local r, code = getmetatable(self).__index.spin(self)
+		if code == "wait" then waits = waits + 1 end
+		return r, code
+	end
+	startAuto(10)
+	local guard = 0
+	while S.auto do
+		env.pump(1)
+		guard = guard + 1
+		assert(guard < 60 * 60, "guild autoplay never ends")
+	end
+	settle(env)
+	assert(env.count("SPIN") == autoSpins + 10, "ten SPINs: " .. (env.count("SPIN") - autoSpins))
+	for i = 2, #spinTimes do
+		assert(spinTimes[i] - spinTimes[i - 1] >= 1.5 - 1e-9, "at most one SPIN per 1.5 s: " .. (spinTimes[i] - spinTimes[i - 1]))
+	end
+	assert(waits > 0, "autoplay met the interval and waited")
+	gameObj.spin = nil
+	assert(W.balance:GetText() == fmt(ns, resting(session:game())), "balance matches after autoplay")
+	if W.offerRow:IsShown() then W.take:Click() end
+	-- An open payout request stops autoplay.
+	startAuto(0)
+	env.pump(10)
+	session.request = { reqId = "r1", officer = "Alice Smith", amount = 1, status = "wait_officer", time = 0 }
+	session.env.onEvent("payout", session:payout())
+	assert(S.auto == nil, "a payout request stops autoplay")
+	settle(env)
+	session.request = nil
+	session:game():refresh()
+	session.env.onEvent("payout", nil)
+	if W.offerRow:IsShown() then W.take:Click() end
+	-- A mode switch stops it.
+	env.pump(120)
+	startAuto(0)
+	env.pump(5)
+	stub.slash("/gs", "solo")
+	assert(S.auto == nil and S.mode == "solo", "a mode switch stops autoplay")
+	stub.slash("/gs", "guild")
+	C_ChatInfo.SendAddonMessage = sendAll
+	W.turbo:Click()
+	if W.offerRow:IsShown() then W.take:Click() end
+
+	-- Guild ticker on the footer line, fed by the session's "ticker" event.
+	local fire = session.env.onEvent
+	fire("ticker", { player = "Bob Jones", n = 7, stake = 50, win = 5000, mult = 100, level = "legendary" })
+	fire("ticker", { player = "Bob Jones", n = 8, stake = 50, win = 0, mult = 0, free = 10, symbol = "M", level = "free" })
+	env.pump(1)
+	assert(W.ticker:IsShown() and not W.footer:IsShown(), "ticker replaces the footer")
+	assert(W.ticker:GetText() == string.format(L.TICKER_WIN, "Bob Jones", fmt(ns, 5000), "100"), "win entry: "
+		.. tostring(W.ticker:GetText()))
+	local tc = ns.Theme.tickerColors
+	assert(W.ticker:GetAlpha() < 1, "fades in")
+	env.pump(math.ceil(ns.Theme.timing.tickerShow * 60) + 1)
+	assert(W.ticker:GetText() == string.format(L.TICKER_FREE, "Bob Jones", 10), "then the free-games entry")
+	assert(tc.free and tc.legendary, "level colours")
+	env.pump(math.ceil(ns.Theme.timing.tickerShow * 60) + 1)
+	assert(not W.ticker:IsShown() and W.footer:IsShown(), "footer back when the queue is empty")
+	-- Fewer effects: no motion.
+	stub.slash("/gs", "fx")
+	fire("ticker", { player = "Bob Jones", n = 9, stake = 10, win = 300, mult = 30, level = "big" })
+	env.pump(1)
+	assert(W.ticker:IsShown() and W.ticker:GetAlpha() == 1, "shown at once with fewer effects")
+	stub.slash("/gs", "fx")
+	-- Off switch.
+	stub.slash("/gs", "ticker")
+	assert(GuildSlotsDB.ticker == false and not W.ticker:IsShown(), "/gs ticker turns it off")
+	fire("ticker", { player = "Bob Jones", n = 10, stake = 10, win = 300, mult = 30, level = "big" })
+	env.pump(2)
+	assert(not W.ticker:IsShown() and W.footer:IsShown(), "no entries while off")
+	stub.slash("/gs", "ticker")
+	assert(GuildSlotsDB.ticker == true, "back on")
+	-- Not in solo mode.
+	stub.slash("/gs", "solo")
+	fire("ticker", { player = "Bob Jones", n = 11, stake = 10, win = 300, mult = 30, level = "big" })
+	env.pump(2)
+	assert(not W.ticker:IsShown(), "no ticker in solo mode")
+	-- Entering guild mode shows the newest entries of session:ticker(), when there is one.
+	local had = rawget(session, "ticker")
+	session.ticker = function()
+		return { { player = "Carol", win = 2000, mult = 40, level = "big" }, { player = "Dave", win = 1, mult = 0.1, level = "big" } }
+	end
+	stub.slash("/gs", "guild")
+	env.pump(1)
+	assert(W.ticker:GetText():find("Dave", 1, true), "oldest of the newest first")
+	session.ticker = had
+	env.pump(math.ceil(ns.Theme.timing.tickerShow * 60) * 2 + 2)
+	assert(not W.ticker:IsShown(), "seeded entries shown and gone")
+
 	local guildBalance = session:game().balance
 
 	-- Switch to solo and back: both balances kept.
