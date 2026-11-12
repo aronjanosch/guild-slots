@@ -1,0 +1,4 @@
+.claude/
+luac.out
+__pycache__/
+*.pyc
