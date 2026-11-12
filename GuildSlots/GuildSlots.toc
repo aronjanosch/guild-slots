@@ -11,6 +11,7 @@ Core\Engine.lua
 Core\Ledger.lua
 Core\Verify.lua
 Core\Proto.lua
+Core\Pack.lua
 
 Locale\enUS.lua
 Locale\deDE.lua
