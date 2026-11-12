@@ -9,7 +9,16 @@ local SAMPLES = {
 	{ "HELLO", { version = "0.3.0", n = 0, head = "-" } },
 	{ "HELLO", { version = "1.0-beta", n = 57, head = H32 } },
 	{ "BUY1", { buyId = H16, player = "Some Player", tokens = 1000000000, commit = H64, time = 1700000000, lineHash = "deadbeef" } },
-	{ "BUY2", { buyId = H16, nonce = H32, head = H32 } },
+	{ "BUY2", { buyId = H16, nonce = H32, head = H64, anchors = 0 } },
+	{ "BUY2", { buyId = H16, nonce = H32, head = H64, anchors = 2147483648 } },
+	{ "PAYREQ", { reqId = H16, officer = "Some Officer", amount = 9007199254740991, head = H32, count = 2147483648 } },
+	{ "LOGREQ", { reqId = H16, player = "Some Player" } },
+	{ "LOG", { reqId = H16, seq = 1, total = 1, payload = "x" } },
+	{ "LOG", { reqId = H16, seq = 200, total = 200, payload = "=B|a|b\ns10*3\ng|" .. string.rep("y", 185) } },
+	{ "PAY", { reqId = H16, payId = H16, player = "Some Player", amount = 1, balanceAfter = 0, time = 1700000000, head = H32, anchors = 2 } },
+	{ "REJECT", { reqId = H16, player = "Some Player", reason = "declined" } },
+	{ "REJECT", { reqId = H16, player = "P", reason = "bad_log" } },
+	{ "OSYNC", { player = "Some Player", anchors = 1, head = H32, time = 0 } },
 	{ "BUY3", { buyId = H16, seed = H32 } },
 	{ "SPIN", { n = 2147483648, stake = 1000000, level = 2, head = H32, A = 10000 } },
 	{ "GAM", { n = 1, g = 5, amount = 9007199254740991, level = 0, head = H32, A = 0 } },
@@ -71,6 +80,72 @@ t.test("encode codes", function()
 	t.eq(code, "bad_field", "version too long")
 end)
 
+t.test("LOG takes everything after the fifth bar as payload", function()
+	local msg = Proto.decode("1|LOG|" .. H16 .. "|2|3|a|b||c\nd|")
+	t.ok(msg, "decodes")
+	t.eq(msg.seq, 2, "seq")
+	t.eq(msg.total, 3, "total")
+	t.eq(msg.payload, "a|b||c\nd|", "payload with bars and newline")
+	t.eq(Proto.encode("LOG", { reqId = H16, seq = 1, total = 1, payload = "a|b" }), "1|LOG|" .. H16 .. "|1|1|a|b", "encode")
+	local longest = assert(Proto.encode("LOG", { reqId = H16, seq = 200, total = 200, payload = string.rep("\255", 200) }))
+	t.ok(#longest <= Proto.MAX, "longest LOG fits")
+end)
+
+t.test("encode codes for the payout messages", function()
+	local cases = {
+		{ "BUY2", { buyId = H16, nonce = H32, head = H32, anchors = 0 }, "short head in BUY2" },
+		{ "BUY2", { buyId = H16, nonce = H32, head = H64 }, "BUY2 without anchors" },
+		{ "BUY2", { buyId = H16, nonce = H32, head = H64, anchors = 2147483649 }, "anchors too high" },
+		{ "PAYREQ", { reqId = H16, officer = "O", amount = 0, head = H32, count = 1 }, "amount 0" },
+		{ "PAYREQ", { reqId = H16, officer = "O", amount = 1, head = H32, count = 0 }, "count 0" },
+		{ "PAYREQ", { reqId = H16, officer = "O|x", amount = 1, head = H32, count = 1 }, "bad officer" },
+		{ "LOGREQ", { reqId = H32, player = "P" }, "long reqId" },
+		{ "LOG", { reqId = H16, seq = 0, total = 1, payload = "x" }, "seq 0" },
+		{ "LOG", { reqId = H16, seq = 2, total = 1, payload = "x" }, "seq above total" },
+		{ "LOG", { reqId = H16, seq = 1, total = 201, payload = "x" }, "total 201" },
+		{ "LOG", { reqId = H16, seq = 1, total = 1, payload = "" }, "empty payload" },
+		{ "LOG", { reqId = H16, seq = 1, total = 1, payload = string.rep("x", 201) }, "payload 201" },
+		{ "LOG", { reqId = H16, seq = 1, total = 1, payload = "a\0b" }, "NUL in payload" },
+		{ "PAY", { reqId = H16, payId = H16, player = "P", amount = 0, balanceAfter = 0, time = 1, head = H32, anchors = 1 }, "pay 0" },
+		{ "PAY", { reqId = H16, payId = H16, player = "P", amount = 1, balanceAfter = 0, time = 1, head = H32, anchors = 0 }, "anchors 0" },
+		{ "REJECT", { reqId = H16, player = "P", reason = "nope" }, "unknown reason" },
+		{ "OSYNC", { player = "P", anchors = 0, head = H32, time = 1 }, "osync anchors 0" },
+	}
+	for _, c in ipairs(cases) do
+		local text, code = Proto.encode(c[1], c[2])
+		t.eq(text, nil, c[3])
+		t.eq(code, "bad_field", c[3])
+	end
+	for _, reason in ipairs({ "declined", "mismatch", "expired", "busy", "too_large", "bad_log" }) do
+		t.ok(Proto.encode("REJECT", { reqId = H16, player = "P", reason = reason }), reason)
+	end
+end)
+
+t.test("decode rejects malformed payout messages", function()
+	local bad = {
+		"1|BUY2|" .. H16 .. "|" .. H32 .. "|" .. H32,
+		"1|BUY2|" .. H16 .. "|" .. H32 .. "|" .. H64,
+		"1|BUY2|" .. H16 .. "|" .. H32 .. "|" .. H64 .. "|01",
+		"1|LOG|" .. H16 .. "|1|1|",
+		"1|LOG|" .. H16 .. "|1|1",
+		"1|LOG|" .. H16 .. "|2|1|x",
+		"1|LOG|" .. H16 .. "|0|1|x",
+		"1|LOG|" .. H16 .. "|1|201|x",
+		"1|LOG|" .. H16 .. "|1|1|" .. string.rep("x", 201),
+		"1|LOG|" .. H16 .. "|1|1|a\0",
+		"1|LOG|" .. H16:upper() .. "|1|1|x",
+		"1|PAYREQ|" .. H16 .. "|O|1|" .. H32 .. "|1|",
+		"1|PAYREQ|" .. H16 .. "|O|1|" .. H32,
+		"1|LOGREQ|" .. H16 .. "|",
+		"1|PAY|" .. H16 .. "|" .. H16 .. "|P|1|0|1|" .. H32 .. "|0",
+		"1|REJECT|" .. H16 .. "|P|other",
+		"1|OSYNC|P|1|" .. H32,
+	}
+	for _, text in ipairs(bad) do
+		t.eq(Proto.decode(text), nil, "rejects " .. text)
+	end
+end)
+
 t.test("the longest valid BUY1 fits into 255 bytes", function()
 	-- With the field limits of this milestone no valid message reaches "too_long"; the check in
 	-- encode guards future fields.
@@ -109,7 +184,7 @@ t.test("decode survives random text", function()
 		x = (x * 1103515245 + 12345) % 2147483648
 		return x % n
 	end
-	local alphabet = "1|BUYSPINGAMHELLO0123456789abcdef-.:;,\0\255 "
+	local alphabet = "1|BUYSPINGAMHELLOPAYREQLOGJCTOSYNC0123456789abcdef-.:;,\n\0\255 "
 	for _ = 1, 3000 do
 		local parts = {}
 		for i = 1, r(80) do

@@ -50,17 +50,21 @@ local function addSession(w, name, opts)
 		version = opts.version or "0.3.0",
 		onEvent = function(ev, data) s.events[#s.events + 1] = { ev, data } end,
 		allowSelf = opts.allowSelf,
+		stepBudget = opts.stepBudget,
 	}
 	s.session = Guild.new(s.env)
 	w.sessions[#w.sessions + 1] = s.session
 	return s
 end
 
+-- w.drop(text) -> true loses a message on the way (it still shows in w.log).
 local function flush(w)
 	while #w.queue > 0 do
 		local m = table.remove(w.queue, 1)
-		for _, session in ipairs(w.sessions) do
-			session:onMessage(m[1], m[2])
+		if not (w.drop and w.drop(m[2])) then
+			for _, session in ipairs(w.sessions) do
+				session:onMessage(m[1], m[2])
+			end
 		end
 	end
 end
@@ -193,7 +197,7 @@ t.test("officer timeout: no BUY2 within 30 s, the seed is never sent", function(
 	t.eq(find(o.session:purchases(), buyId).status, "timeout", "timeout at 30 s")
 	t.eq(sentTypes(w, "Olga"):find("BUY3"), nil, "no BUY3")
 	-- A late BUY2 changes nothing.
-	inject(w, "Pia", "BUY2", { buyId = buyId, nonce = string.rep("1", 32), head = string.rep("2", 32) })
+	inject(w, "Pia", "BUY2", { buyId = buyId, nonce = string.rep("1", 32), head = string.rep("2", 64), anchors = 0 })
 	t.eq(find(o.session:purchases(), buyId).status, "timeout", "late BUY2 ignored")
 	t.eq(sentTypes(w, "Olga"):find("BUY3"), nil, "still no BUY3")
 end)
@@ -563,6 +567,574 @@ t.test("a newer version raises one update notice per session", function()
 	t.eq(notices(), 1, "once per session")
 end)
 
+-- Payout ----------------------------------------------------------------------------------------
+
+local Pack = ns.Pack
+local LINE_PAY = "GSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T2"
+local H32 = string.rep("ab", 16)
+
+-- Every session ticks, then the bus is flushed; `rounds` times, one second apart.
+local function pump(w, rounds)
+	for _ = 1, rounds or 1 do
+		for _, session in ipairs(w.sessions) do
+			session:tick()
+		end
+		flush(w)
+		w.now = w.now + 1
+	end
+end
+
+-- Spins `count` times, gambling on every other offer and taking the rest.
+local function play(w, p, count)
+	local g = p.session:game()
+	for i = 1, count do
+		w.now = w.now + 2
+		if g:state() == "gamble" then
+			if i % 2 == 0 then assert(g:gamble()) else g:take() end
+		elseif g.balance >= g.stake then
+			assert(g:spin())
+		end
+		flush(w)
+	end
+end
+
+-- Officer Olga, player Pia, listener Tom; Pia bought 1000 tokens on a T2 table.
+local function payWorld(opts)
+	opts = opts or {}
+	local w = newWorld()
+	w.line = LINE_PAY
+	local o = addSession(w, "Olga", { stepBudget = opts.stepBudget })
+	local p = addSession(w, "Pia")
+	local tom = addSession(w, "Tom")
+	local buyId = assert(o.session:grant("Pia", opts.tokens or 1000))
+	flush(w)
+	return w, o, p, tom, buyId
+end
+
+local function last(list, field, value)
+	for i = #list, 1, -1 do
+		if list[i][field] == value then
+			return list[i]
+		end
+	end
+end
+
+local function req(o, reqId)
+	return last(o.session:requests(), "reqId", reqId)
+end
+
+-- Runs a request up to the officer's report.
+local function untilReady(w, o, reqId, rounds)
+	flush(w)
+	for _ = 1, rounds or 50 do
+		local r = req(o, reqId)
+		if not r or r.status ~= "fetching" and r.status ~= "checking" then
+			break
+		end
+		pump(w)
+	end
+	return req(o, reqId)
+end
+
+local function events(s, name)
+	local out = {}
+	for _, ev in ipairs(s.events) do
+		if ev[1] == name then
+			out[#out + 1] = ev[2]
+		end
+	end
+	return out
+end
+
+local function replaceSession(w, old, new)
+	for i, s in ipairs(w.sessions) do
+		if s == old.session then
+			table.remove(w.sessions, i)
+			break
+		end
+	end
+	return new
+end
+
+t.test("a full payout: officer checks, confirms, the player and a third client hold the same anchor", function()
+	local w, o, p, tom = payWorld()
+	play(w, p, 30)
+	local balance = p.session:game().balance
+	local reqId, code = p.session:requestPayout("Olga", 100)
+	t.ok(reqId, "request: " .. tostring(code))
+	t.eq(p.session:payout().status, "wait_officer", "waits for the officer")
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "report ready")
+	t.eq(r.player, "Pia", "player")
+	t.eq(r.amount, 100, "amount")
+	t.eq(r.progress, 1, "progress")
+	t.eq(r.received, r.total, "all chunks")
+	t.eq(r.report.light, "green", "green report")
+	t.eq(r.report.balance, balance, "replayed balance")
+	t.eq(r.report.state, nil, "no replayed state in the public record")
+	t.eq(p.session:payout().status, "wait_decision", "player waits for the decision")
+	t.eq(p.session:payout().sent, p.session:payout().total, "all chunks sent")
+	local payId, c2 = o.session:confirm(reqId)
+	t.ok(payId, "confirm: " .. tostring(c2))
+	flush(w)
+	t.eq(p.session:payout().status, "paid", "paid")
+	t.eq(p.session:game().balance, balance - 100, "balance after")
+	t.eq(p.session:game():status(), "ok", "lock ended")
+	t.eq(req(o, reqId).status, "paid", "officer side paid")
+	-- The stored account replays to balanceAfter and ends with the payout entry.
+	local entries = account(p, "Pia").entries
+	local state = Ledger.replay(GUILD, "Pia", entries)
+	t.eq(state.balance, balance - 100, "replays to balanceAfter")
+	local e = Ledger.decode(entries[#entries])
+	t.eq(e.type, "P", "payout entry")
+	t.eq(e.payId, payId, "payId")
+	t.eq(e.officer, "Olga", "officer")
+	t.eq(e.balanceAfter, balance - 100, "balanceAfter")
+	-- The same anchor everywhere.
+	local want = Ledger.shortHead(state)
+	for _, s in ipairs({ o, p, tom }) do
+		local a = s.session:anchor("Pia")
+		t.eq(a.anchors, 2, s.env.me .. " anchors")
+		t.eq(a.head, want, s.env.me .. " head")
+		t.eq(a.by, "Olga", s.env.me .. " by")
+		t.eq(s.env.store.seen[GUILD].Pia[payId], true, s.env.me .. " saw the payout")
+	end
+	-- Events for the UI.
+	local statuses = {}
+	for _, d in ipairs(events(p, "payout")) do statuses[#statuses + 1] = d.status end
+	t.eq(table.concat(statuses, ","), "wait_officer,sending,wait_decision,paid", "player events")
+	statuses = {}
+	for _, d in ipairs(events(o, "request")) do statuses[#statuses + 1] = d.status end
+	t.eq(table.concat(statuses, ","), "fetching,checking,ready,paid", "officer events")
+	t.eq(events(o, "request")[1].chunks, nil, "no account text in the event")
+	-- The finished request is stored without the account text.
+	local stored = o.env.store.requests[#o.env.store.requests]
+	t.eq(stored.reqId, reqId, "stored")
+	t.eq(stored.report.state, nil, "no state stored")
+end)
+
+t.test("a partial payout, more spins, then a second payout with a green anchor check", function()
+	local w, o, p = payWorld()
+	play(w, p, 10)
+	local id1 = assert(p.session:requestPayout("Olga", 50))
+	untilReady(w, o, id1)
+	assert(o.session:confirm(id1))
+	flush(w)
+	t.eq(p.session:payout().status, "paid", "first paid")
+	play(w, p, 10)
+	local id2 = assert(p.session:requestPayout("Olga", p.session:game().balance))
+	local r = untilReady(w, o, id2)
+	t.eq(r.status, "ready", "ready")
+	t.eq(r.report.light, "green", "green")
+	for _, f in ipairs(r.report.findings) do
+		t.ok(f.check ~= 1, "no anchor finding: " .. tostring(f.code))
+	end
+	assert(o.session:confirm(id2))
+	flush(w)
+	t.eq(p.session:game().balance, 0, "paid out to zero")
+	t.eq(o.session:anchor("Pia").anchors, 3, "three anchors")
+end)
+
+t.test("a player who hides a payout gets a red anchor_mismatch", function()
+	local w, o, p = payWorld()
+	play(w, p, 10)
+	local old = {}
+	for i, e in ipairs(account(p, "Pia").entries) do old[i] = e end
+	local id1 = assert(p.session:requestPayout("Olga", 200))
+	untilReady(w, o, id1)
+	assert(o.session:confirm(id1))
+	flush(w)
+	-- Pia puts the account from before the payout back and restarts.
+	local store = p.env.store
+	store.accounts[GUILD].Pia.entries = old
+	local p2 = replaceSession(w, p, addSession(w, "Pia", { store = store }))
+	t.eq(p2.session:game().balance, p.session:game().balance + 200, "the payout is gone")
+	local id2 = assert(p2.session:requestPayout("Olga", 100))
+	local r = untilReady(w, o, id2)
+	t.eq(r.status, "ready", "ready")
+	t.eq(r.report.light, "red", "red")
+	local found = false
+	for _, f in ipairs(r.report.findings) do
+		if f.code == "anchor_mismatch" then found = true end
+	end
+	t.ok(found, "anchor_mismatch")
+end)
+
+t.test("the game is locked while a request is open", function()
+	local w, o, p = payWorld()
+	local g = p.session:game()
+	-- Spin until there is a gamble offer, so the request has to take it.
+	for _ = 1, 200 do
+		if g:state() == "gamble" then break end
+		w.now = w.now + 2
+		assert(g:spin())
+		flush(w)
+	end
+	t.eq(g:state(), "gamble", "an offer is open")
+	local balance = g.balance
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	t.eq(g:state(), "idle", "offer taken")
+	t.eq(g.balance, balance, "balance unchanged by the take")
+	t.eq(g:status(), "payout", "status")
+	w.now = w.now + 2
+	local _, code = g:spin()
+	t.eq(code, "payout", "spin locked")
+	_, code = g:gamble()
+	t.eq(code, "payout", "gamble locked")
+	_, code = p.session:requestPayout("Olga", 10)
+	t.eq(code, "busy", "second request")
+	-- A purchase for the player is refused while the request is open.
+	local buyId = assert(o.session:grant("Pia", 100))
+	flush(w)
+	local pp = find(p.session:purchases(), buyId, "player")
+	t.eq(pp.status, "failed", "purchase refused")
+	t.eq(pp.code, "busy", "busy")
+	untilReady(w, o, reqId)
+	t.eq(g:status(), "payout", "still locked while waiting for the decision")
+	assert(o.session:reject(reqId))
+	flush(w)
+	t.eq(g:status(), "ok", "unlocked after the decision")
+	w.now = w.now + 2
+	t.ok(g:spin(), "spins again")
+end)
+
+t.test("requestPayout refusals", function()
+	local w = newWorld()
+	w.line = LINE_PAY
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia")
+	local _, code = p.session:requestPayout("Olga", 1)
+	t.eq(code, "no_account", "no account")
+	assert(o.session:grant("Pia", 100))
+	flush(w)
+	_, code = p.session:requestPayout("Olga", 0)
+	t.eq(code, "bad_amount", "zero")
+	_, code = p.session:requestPayout("Olga", 101)
+	t.eq(code, "bad_amount", "more than the balance")
+	_, code = p.session:requestPayout("Olga", 1.5)
+	t.eq(code, "bad_amount", "fraction")
+	_, code = p.session:requestPayout("Paul", 10)
+	t.eq(code, "bad_officer", "not an officer")
+	_, code = p.session:requestPayout("Ol|ga", 10)
+	t.eq(code, "bad_officer", "bad name")
+	_, code = o.session:requestPayout("Olga", 10)
+	t.eq(code, "no_account", "officer has no account")
+	w.refuse = true
+	_, code = p.session:requestPayout("Olga", 10)
+	t.eq(code, "send", "queue refused")
+	t.eq(p.session:payout(), nil, "nothing recorded")
+	w.refuse = false
+	-- An open purchase blocks a request.
+	local w2 = newWorld()
+	w2.line = LINE_PAY
+	local p2 = addSession(w2, "Pia")
+	buy1(w2, "00000000000000f1", { line = LINE_PAY })
+	inject(w2, "Olga", "BUY3", { buyId = "00000000000000f1", seed = SEED })
+	t.eq(p2.session:game().balance, 300, "funded")
+	buy1(w2, "00000000000000f2", { line = LINE_PAY })
+	_, code = p2.session:requestPayout("Olga", 10)
+	t.eq(code, "busy", "purchase open")
+	-- A broken account.
+	local store = p.env.store
+	local entries = store.accounts[GUILD].Pia.entries
+	entries[#entries + 1] = "S|9|10|0|ok|"
+	local p3 = addSession(w, "Pia", { store = store })
+	_, code = p3.session:requestPayout("Olga", 10)
+	t.eq(code, "broken", "broken")
+end)
+
+t.test("officer refusals: confirm, reject and a second request of the same player", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	-- Only the PAYREQ and the LOGREQ: the officer is still fetching.
+	w.drop = function(text) return text:find("|LOG|", 1, true) ~= nil end
+	flush(w)
+	local _, code = o.session:confirm(reqId)
+	t.eq(code, "not_ready", "not ready")
+	_, code = o.session:confirm("0000000000000000")
+	t.eq(code, "unknown", "unknown")
+	_, code = o.session:reject(reqId, "nope")
+	t.eq(code, "bad_reason", "bad reason")
+	-- Another request of Pia while one is open: busy.
+	inject(w, "Pia", "PAYREQ", { reqId = "00000000000000e1", officer = "Olga", amount = 1, head = H32, count = 1 })
+	local rej = w.log[#w.log].msg
+	t.eq(rej.type, "REJECT", "rejected")
+	t.eq(rej.reason, "busy", "busy")
+	t.eq(rej.reqId, "00000000000000e1", "for the second request")
+	t.eq(p.session:payout().status, "wait_decision", "the first request goes on")
+	-- A PAYREQ to someone who is not an officer here is ignored.
+	local before = #w.log
+	inject(w, "Tom", "PAYREQ", { reqId = "00000000000000e2", officer = "Pia", amount = 1, head = H32, count = 1 })
+	t.eq(#w.log, before, "no reply")
+end)
+
+t.test("reject: the player sees the reason and plays on", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local balance = p.session:game().balance
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	untilReady(w, o, reqId)
+	t.eq(o.session:reject(reqId), true, "rejected")
+	flush(w)
+	local pay = p.session:payout()
+	t.eq(pay.status, "rejected", "player rejected")
+	t.eq(pay.code, "declined", "reason")
+	t.eq(req(o, reqId).status, "rejected", "officer rejected")
+	t.eq(req(o, reqId).code, "declined", "officer code")
+	t.eq(p.session:game().balance, balance, "nothing paid")
+	local _, code = o.session:confirm(reqId)
+	t.eq(code, "unknown", "no confirm after a reject")
+end)
+
+t.test("expiry on both sides after 300 s, and confirm after 270 s", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	untilReady(w, o, reqId)
+	w.now = w.now + 299 - 5
+	o.session:tick()
+	p.session:tick()
+	t.eq(p.session:payout().status, "wait_decision", "still waiting just before 300 s")
+	w.now = w.now + 6
+	o.session:tick()
+	p.session:tick()
+	t.eq(p.session:payout().status, "expired", "player expired")
+	t.eq(req(o, reqId).status, "expired", "officer expired")
+	t.eq(p.session:game():status(), "ok", "lock ended")
+	-- Confirm at 270 s: REJECT expired.
+	local id2 = assert(p.session:requestPayout("Olga", 10))
+	untilReady(w, o, id2)
+	w.now = req(o, id2).time + 270
+	local _, code = o.session:confirm(id2)
+	t.eq(code, "expired", "too late to confirm")
+	flush(w)
+	t.eq(req(o, id2).status, "expired", "officer expired")
+	t.eq(p.session:payout().status, "rejected", "player got the REJECT")
+	t.eq(p.session:payout().code, "expired", "reason expired")
+end)
+
+t.test("mismatch: the account changed between PAYREQ and LOG", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	-- The stored account loses its last entry before the LOG goes out.
+	table.remove(account(p, "Pia").entries)
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "failed", "failed")
+	t.eq(r.code, "mismatch", "mismatch")
+	t.eq(p.session:payout().status, "rejected", "player rejected")
+	t.eq(p.session:payout().code, "mismatch", "reason")
+	-- Same number of entries, another head: found after the replay. Pam (no session) sends Pia's
+	-- entries, which replay under her name to other heads than the one in her PAYREQ.
+	local entries = account(p, "Pia").entries
+	local id2 = "00000000000000e3"
+	inject(w, "Pam", "PAYREQ", { reqId = id2, officer = "Olga", amount = 1, head = H32, count = #entries })
+	t.eq(w.log[#w.log].msg.type, "LOGREQ", "officer asks Pam for the log")
+	local chunks = Pack.split(Pack.encode(entries))
+	for i, c in ipairs(chunks) do
+		inject(w, "Pam", "LOG", { reqId = id2, seq = i, total = #chunks, payload = c })
+	end
+	t.eq(req(o, id2).status, "checking", "checking")
+	r = untilReady(w, o, id2)
+	t.eq(r.status, "failed", "failed after the replay")
+	t.eq(r.code, "mismatch", "head mismatch")
+	local rej = last(w.log, "sender", "Olga").msg
+	t.eq(rej.type, "REJECT", "REJECT sent")
+	t.eq(rej.player, "Pam", "to Pam")
+	t.eq(rej.reason, "mismatch", "reason")
+end)
+
+t.test("a LOG that does not unpack is rejected as bad_log", function()
+	local w, o = payWorld()
+	local id = "00000000000000e4"
+	inject(w, "Pam", "PAYREQ", { reqId = id, officer = "Olga", amount = 1, head = H32, count = 1 })
+	inject(w, "Pam", "LOG", { reqId = id, seq = 2, total = 2, payload = "\n" })
+	inject(w, "Mallory", "LOG", { reqId = id, seq = 1, total = 2, payload = "s10" }) -- not the player
+	t.eq(req(o, id).received, 1, "one chunk from Pam")
+	inject(w, "Pam", "LOG", { reqId = id, seq = 1, total = 2, payload = "s10" })
+	t.eq(req(o, id).status, "failed", "failed")
+	t.eq(req(o, id).code, "bad_log", "bad_log")
+	t.eq(w.log[#w.log].msg.reason, "bad_log", "REJECT bad_log")
+end)
+
+t.test("too_large: more than 200 chunks fails before anything is sent", function()
+	local w = newWorld()
+	w.line = LINE_PAY
+	local o = addSession(w, "Olga")
+	local entries = {}
+	for i = 1, 230 do
+		entries[i] = Ledger.encode({
+			type = "B", buyId = string.format("%016x", i), officer = "Olga", tokens = 1, commit = ns.Engine.commit(SEED),
+			seed = SEED, nonce = string.rep("7", 32), time = 1234, line = LINE_PAY,
+		})
+	end
+	t.ok(#Pack.split(Pack.encode(entries)) > 200, "over 200 chunks")
+	local p = addSession(w, "Pia", { store = { accounts = { [GUILD] = { Pia = { entries = entries } } } } })
+	t.eq(p.session:game().balance, 230, "replayed")
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	flush(w)
+	t.eq(p.session:payout().status, "failed", "failed")
+	t.eq(p.session:payout().code, "too_large", "too_large")
+	t.eq(sentTypes(w, "Pia"), "PAYREQ", "no LOG sent")
+	t.eq(p.session:game():status(), "ok", "lock ended")
+	t.eq(req(o, reqId).status, "fetching", "the officer waits until expiry")
+end)
+
+t.test("chunk loss: the request never completes and expires", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	w.drop = function(text) return text:find("^1|LOG|%x+|1|") ~= nil end
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	untilReady(w, o, reqId, 5)
+	t.eq(req(o, reqId).status, "fetching", "still fetching")
+	w.now = w.now + 300
+	pump(w)
+	t.eq(req(o, reqId).status, "expired", "officer expired")
+	t.eq(p.session:payout().status, "expired", "player expired")
+end)
+
+t.test("a refused LOG send is retried on the next tick", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	-- PAYREQ out, LOGREQ back; then the queue refuses.
+	local n = 0
+	local send = p.env.send
+	p.env.send = function(text)
+		if text:find("|LOG|", 1, true) then
+			n = n + 1
+			if n == 1 then return nil, "full" end
+		end
+		return send(text)
+	end
+	flush(w)
+	t.eq(p.session:payout().status, "sending", "sending")
+	t.eq(p.session:payout().sent, 0, "nothing sent yet")
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "ready after the retry")
+end)
+
+t.test("verification is spread over ticks", function()
+	local w, o, p = payWorld({ stepBudget = 10 })
+	play(w, p, 40)
+	local count = #account(p, "Pia").entries
+	t.ok(count > 30, "entries " .. count)
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	flush(w)
+	t.eq(req(o, reqId).status, "checking", "checking before the first tick")
+	t.eq(req(o, reqId).progress, 0, "nothing done")
+	o.session:tick()
+	local r = req(o, reqId)
+	t.eq(r.status, "checking", "still checking")
+	t.near(r.progress, 10 / count, 1e-9, "one budget done")
+	local ticks = 1
+	while req(o, reqId).status == "checking" do
+		o.session:tick()
+		ticks = ticks + 1
+	end
+	t.eq(req(o, reqId).status, "ready", "ready")
+	t.eq(ticks, math.ceil(count / 10) + (count % 10 == 0 and 1 or 0), "ticks")
+end)
+
+t.test("self payout with allowSelf", function()
+	local w = newWorld()
+	w.line = LINE_PAY
+	local o = addSession(w, "Olga", { allowSelf = true })
+	assert(o.session:grant("Olga", 500))
+	flush(w)
+	play(w, o, 6)
+	local balance = o.session:game().balance
+	local reqId = assert(o.session:requestPayout("Olga", 20))
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "ready")
+	assert(o.session:confirm(reqId))
+	flush(w)
+	t.eq(o.session:payout().status, "paid", "paid")
+	t.eq(o.session:game().balance, balance - 20, "balance")
+	-- Without allowSelf the own name is not an officer to ask.
+	o.env.allowSelf = false
+	local _, code = o.session:requestPayout("Olga", 1)
+	t.eq(code, "bad_officer", "own name")
+end)
+
+t.test("anchors from purchases heard by a third client", function()
+	local w, o, p, tom, buyId = payWorld()
+	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+	for _, s in ipairs({ o, p, tom }) do
+		local a = s.session:anchor("Pia")
+		t.ok(a, s.env.me .. " has an anchor")
+		t.eq(a.anchors, 1, "anchors")
+		t.eq(a.head, Ledger.shortHead(state), "head after the purchase")
+		t.eq(a.time, 1000, "time of the purchase")
+		t.eq(a.by, "Olga", "by")
+		t.eq(s.env.store.seen[GUILD].Pia[buyId], true, "seen")
+	end
+	-- A second purchase moves the anchor on.
+	play(w, p, 3)
+	w.now = w.now + 5
+	assert(o.session:grant("Pia", 100))
+	flush(w)
+	state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+	t.eq(tom.session:anchor("Pia").anchors, 2, "second purchase")
+	t.eq(tom.session:anchor("Pia").head, Ledger.shortHead(state), "head after the second purchase")
+	-- A listener with another settings line hashes another entry: seen, but no anchor.
+	local w2 = newWorld()
+	w2.line = LINE_PAY
+	local o2 = addSession(w2, "Olga")
+	addSession(w2, "Pia")
+	local other = addSession(w2, "Tom", { line = "GSLOTS1;L=0" })
+	local id2 = assert(o2.session:grant("Pia", 100))
+	flush(w2)
+	t.eq(other.session:anchor("Pia"), nil, "no anchor with another line")
+	t.eq(other.env.store.seen[GUILD].Pia[id2], true, "seen anyway")
+	-- A BUY3 with a wrong seed, or without a BUY2, stores nothing.
+	local w3 = newWorld()
+	local t3 = addSession(w3, "Tom")
+	buy1(w3, "00000000000000c1")
+	inject(w3, "Pia", "BUY2", { buyId = "00000000000000c1", nonce = H32, head = H32 .. H32, anchors = 0 })
+	inject(w3, "Olga", "BUY3", { buyId = "00000000000000c1", seed = string.rep("6", 32) })
+	buy1(w3, "00000000000000c2")
+	inject(w3, "Olga", "BUY3", { buyId = "00000000000000c2", seed = SEED })
+	t.eq(t3.session:anchor("Pia"), nil, "no anchor")
+	t.eq(t3.env.store.seen, nil, "nothing seen")
+end)
+
+t.test("OSYNC brings the newest anchors to a client that was offline", function()
+	local w, o, p = payWorld()
+	local want = o.session:anchor("Pia")
+	-- Later: Olga logs in again, Tim was never online before.
+	local w2 = newWorld()
+	w2.now = w.now + 1000
+	w2.line = LINE_PAY
+	local o2 = addSession(w2, "Olga", { store = o.env.store })
+	local tim = addSession(w2, "Tim")
+	o2.session:tick()
+	flush(w2)
+	w2.now = w2.now + 19
+	o2.session:tick()
+	flush(w2)
+	t.eq(sentTypes(w2, "Olga"):find("OSYNC"), nil, "not before 20 s")
+	w2.now = w2.now + 1
+	o2.session:tick()
+	flush(w2)
+	t.eq(sentTypes(w2, "Olga"), "HELLO,OSYNC", "one OSYNC")
+	local a = tim.session:anchor("Pia")
+	t.eq(a.anchors, want.anchors, "anchors")
+	t.eq(a.head, want.head, "head")
+	t.eq(a.by, "Olga", "by the sender")
+	w2.now = w2.now + 100
+	o2.session:tick()
+	flush(w2)
+	t.eq(sentTypes(w2, "Olga"), "HELLO,OSYNC", "only once")
+	-- From a non-officer, or not higher: ignored.
+	inject(w2, "Tim", "OSYNC", { player = "Pia", anchors = 9, head = H32, time = 1 })
+	t.eq(tim.session:anchor("Pia").anchors, want.anchors, "non-officer ignored")
+	inject(w2, "Olga", "OSYNC", { player = "Pia", anchors = want.anchors, head = H32, time = 1 })
+	t.eq(tim.session:anchor("Pia").head, want.head, "not higher ignored")
+	t.eq(p.session:anchor("Pia").anchors, 1, "the player's own copy")
+end)
+
 -- What is ignored -------------------------------------------------------------------------------
 
 t.test("ignored messages change nothing and produce no reply", function()
@@ -574,9 +1146,9 @@ t.test("ignored messages change nothing and produce no reply", function()
 	w.queue = {}
 	local H32 = string.rep("a", 32)
 	inject(w, "Mallory", "BUY3", { buyId = buyId, seed = H32 }) -- not an officer
-	inject(w, "Pia", "BUY2", { buyId = "ffffffffffffffff", nonce = H32, head = H32 }) -- unknown buyId
+	inject(w, "Pia", "BUY2", { buyId = "ffffffffffffffff", nonce = H32, head = H32 .. H32, anchors = 0 }) -- unknown buyId
 	inject(w, "Olga", "BUY3", { buyId = "ffffffffffffffff", seed = H32 }) -- unknown buyId
-	inject(w, "Paul", "BUY2", { buyId = buyId, nonce = H32, head = H32 }) -- not the player
+	inject(w, "Paul", "BUY2", { buyId = buyId, nonce = H32, head = H32 .. H32, anchors = 0 }) -- not the player
 	inject(w, "Pia", "BUY1", { buyId = buyId, player = "Pia", tokens = 1, commit = string.rep("b", 64),
 		time = 1, lineHash = Proto.lineHash(LINE) }) -- BUY1 from a non-officer
 	t.eq(find(o.session:purchases(), buyId).status, "wait_nonce", "officer still waits")
@@ -587,16 +1159,25 @@ end)
 
 t.test("onMessage survives any text", function()
 	local w, o, p = funded(1000)
+	-- A finished payout and a second one left open, so mutated payout messages meet open state.
+	play(w, p, 6)
+	local id1 = assert(p.session:requestPayout("Olga", 10))
+	untilReady(w, o, id1)
+	assert(o.session:confirm(id1))
+	flush(w)
+	play(w, p, 4)
+	assert(p.session:requestPayout("Olga", 10))
+	flush(w)
 	local x = 987654321
 	local function r(n)
 		x = (x * 1103515245 + 12345) % 2147483648
 		return x % n
 	end
-	local samples = {}
+	local samples = { assert(Proto.encode("OSYNC", { player = "Pia", anchors = 3, head = H32, time = 5 })) }
 	for _, e in ipairs(w.log) do
 		samples[#samples + 1] = e.text
 	end
-	local alphabet = "1|BUY23SPINGAMHELLO0123456789abcdef-.\0\255"
+	local alphabet = "1|BUY23SPINGAMHELLOPAYREQLOGJCTOSYNC0123456789abcdef-.=*\n\0\255"
 	local senders = { "Olga", "Pia", "Mallory", "", "A|B", false }
 	for i = 1, 2000 do
 		local text
@@ -616,6 +1197,13 @@ t.test("onMessage survives any text", function()
 		for _, s in ipairs({ o.session, p.session }) do
 			local ok, err = pcall(s.onMessage, s, sender, text)
 			t.ok(ok, "raised: " .. tostring(err))
+		end
+		if i % 50 == 0 then
+			w.now = w.now + 7
+			for _, s in ipairs({ o.session, p.session }) do
+				local ok, err = pcall(s.tick, s)
+				t.ok(ok, "tick raised: " .. tostring(err))
+			end
 		end
 	end
 	for _, bad in ipairs({ 42, {}, true }) do
