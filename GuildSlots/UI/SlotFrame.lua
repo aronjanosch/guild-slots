@@ -177,7 +177,7 @@ local function startShake()
 		return
 	end
 	local point, rel, relPoint, x, y = f:GetPoint(1)
-	if not point or f:GetNumPoints() ~= 1 then
+	if type(point) ~= "string" or (type(f.GetNumPoints) == "function" and f:GetNumPoints() ~= 1) then
 		return
 	end
 	shake.point, shake.rel, shake.relPoint, shake.x, shake.y = point, rel or UIParent, relPoint or point, x or 0, y or 0
@@ -399,6 +399,7 @@ local function refresh()
 	W.spin:setEnabled(auto or phase == "round" or (phase == "idle" and not status))
 	W.auto:setEnabled(auto or (phase == "idle" and not status and supported()))
 	W.auto:setSelected(auto or W.autoPanel:IsShown())
+	W.autoStart:setEnabled(phase == "idle" and not auto and not status and supported() and not inCombat())
 	W.turbo:setSelected(db.turbo and true or false)
 
 	-- Stakes, or the take / gamble buttons that replace them.
@@ -1368,7 +1369,7 @@ end
 
 -- Starts autoplay with the panel's choices.
 function SlotFrame.startAuto()
-	if S.auto or S.phase ~= "idle" or not supported() or statusLine() then
+	if S.auto or S.phase ~= "idle" or not supported() or statusLine() or inCombat() then
 		return false
 	end
 	local o = S.autoOpts
@@ -2196,7 +2197,7 @@ local function syncAutoPanel()
 	for _, b in ipairs(W.autoRounds) do b:setSelected(b.value == o.rounds) end
 	for _, b in ipairs(W.autoWins) do b:setSelected(b.value == (o.stopWin or 0)) end
 	W.autoFree:setSelected(o.stopFree)
-	W.autoStart:setEnabled(S.phase == "idle" and not S.auto and supported() and not statusLine())
+	W.autoStart:setEnabled(S.phase == "idle" and not S.auto and supported() and not statusLine() and not inCombat())
 end
 
 function SlotFrame.toggleAutoPanel(show)
