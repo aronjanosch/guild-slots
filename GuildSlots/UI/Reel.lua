@@ -100,9 +100,13 @@ function Reel:spin(now, target, stopAt)
 		target = target,
 		n = self.n,
 		stopAt = stopAt,
+		nudgeTime = t.nudgeTime,
+		nudge = t.nudge,
 		accel = t.accel,
 		decel = t.decel,
+		quickDecel = t.quickDecel,
 		speed = t.speed,
+		minReseatSpeed = t.minReseatSpeed,
 		bounce = t.bounce,
 		overshoot = t.overshoot,
 	})

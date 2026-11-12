@@ -31,7 +31,16 @@ local function scenario(locale)
 	-- ns.random must be set before SlotFrame loads; inject through a preloaded ns.
 	local ns = {}
 	ns.random = preset.random
-	stub.loadAddon("GuildSlots", "GuildSlots", ns)
+	local _, loaded = stub.loadAddon("GuildSlots", "GuildSlots", ns)
+	-- TOC and files must not drift apart: every .lua under GuildSlots/ is listed.
+	local listed = {}
+	for _, path in ipairs(loaded) do listed[path] = true end
+	local find = io.popen("find GuildSlots -name '*.lua' | sort")
+	for path in find:lines() do
+		assert(listed[path], path .. " is not listed in GuildSlots.toc")
+	end
+	find:close()
+	assert(ns.Engine and ns.Ledger, "Core Engine and Ledger loaded from the TOC")
 
 	stub.fire("ADDON_LOADED", "OtherAddon")
 	stub.fire("ADDON_LOADED", "GuildSlots")

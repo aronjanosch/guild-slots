@@ -18,7 +18,8 @@ Check the character screen's AddOns list: "Guild Slots" is listed and not "out o
 1. `/gslots` and `/gs` open and close the window. `Escape` closes it.
 2. Drag the window, `/reload`, open it again: same position. `/gs reset` centres it.
 3. Spin a few times with the mouse. Watch:
-   - reels scroll **downwards** and stop left to right (about 0.9 s, 1.3 s, 1.7 s) with a small bounce;
+   - each reel twitches up a little, speeds up and scrolls **downwards** at the same speed every
+     spin (28 rows/s), then stops left to right (about 0.9 s, 1.3 s, 1.7 s) with a small bounce;
    - symbols are cut off cleanly at the top and bottom edge of the reels (clipping);
    - all 7 icons show (copper, silver and gold coin, potion, sword, murloc, dragon) and none is a
      green question mark;
@@ -43,8 +44,10 @@ Check the character screen's AddOns list: "Guild Slots" is listed and not "out o
 - Every Lua error (full text from the error popup or chat), with what you clicked before.
 - Clipping: clean edges, or do icons spill over the reel panel?
 - Icons: any missing (question mark)? Which ones?
-- Animation: smooth or stuttering? Reel 1 can run fast; does it flicker badly? Any visible jump
-  when a reel lands?
+- Animation: smooth or stuttering? Does the cruise read as a downward blur, or do the reels seem
+  to run backwards or strobe (then `Theme.timing.speed` needs to change; tell the frame rate)?
+  Once per spin, mid-run, each reel's strip jumps by whole rows so it lands on its stop: is that
+  jump visible? Any visible jump when a reel lands or after a quick stop?
 - Fonts: readable, right size? (Theme falls back to the default game font if `ARIALN.TTF` fails.)
 - Sounds: which ones play, which are silent, which fit badly. The names are placeholders in
   `GuildSlots/UI/Theme.lua` (`Theme.sounds`).

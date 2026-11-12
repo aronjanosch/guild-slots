@@ -88,10 +88,20 @@ Theme.fonts = {
 
 -- All times in seconds.
 Theme.timing = {
-	accel = 0.18, -- ramp up to full speed
-	decel = 0.35, -- braking before a reel lands
-	speed = 16, -- minimum rows per second while running
-	stop = { 0.9, 1.3, 1.7 }, -- landing time per reel
+	-- Every spin of a reel has the same shape: nudge, ramp, cruise, braking, bounce.
+	-- Cruise speed: 28 rows/s is 0.47 rows per frame at 60 fps, a blur that still reads as
+	-- moving down. Above 30 rows/s (0.5 rows per frame) the evenly spaced icon gaps alias and
+	-- seem to run backwards at 60 fps.
+	speed = 28,
+	nudgeTime = 0.1, -- short backwards nudge before the start
+	nudge = 0.12, -- nudge depth in rows
+	accel = 0.2, -- ramp up to full speed
+	decel = 0.4, -- braking before a reel lands
+	quickDecel = 0.2, -- braking after a quick stop (SPIN while running)
+	minReseatSpeed = 20, -- strip re-seats only at or above this speed
+	-- Landing time per reel; Anim.plan shifts it by at most 1/(2 * speed) s so the reel
+	-- travels whole rows.
+	stop = { 0.9, 1.3, 1.7 },
 	anticipation = 0.8, -- extra time for reel 3 when reels 1 and 2 match
 	bounce = 0.22, -- landing bounce duration
 	overshoot = 0.18, -- landing overshoot in rows

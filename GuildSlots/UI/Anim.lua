@@ -23,74 +23,131 @@ function Anim.easeOutQuad(u)
 	return 1 - (1 - u) * (1 - u)
 end
 
--- opts: start, target (0-based stops), n (strip length), stopAt (landing time, s),
--- accel (s to reach speed), decel (s of constant braking before stopAt),
--- speed (minimum rows/s), bounce (s), overshoot (rows).
--- Speed profile: linear ramp up, cruise, linear braking to 0 at stopAt. The cruise speed is
--- chosen so the reel travels a whole number of rows and lands exactly on `target`, which
--- makes the speed vary a little from spin to spin.
+-- Reel plan. opts:
+--   start, target   0-based stops; n strip length
+--   stopAt          landing time in s (anticipation just passes a later stopAt)
+--   nudgeTime, nudge  short backwards nudge before the start (s, rows; 0 = none)
+--   accel           s of linear ramp up to `speed`
+--   speed           cruise speed in rows/s, the same for every spin and reel
+--   decel           s of constant braking that ends at stopAt
+--   quickDecel      s of braking after a quick stop
+--   bounce, overshoot  landing bounce (s, rows)
+--   minReseatSpeed  a re-seat is only allowed at or above this speed (default speed * 0.6)
+--
+-- Every spin of a reel has the same speed profile: nudge, ramp, cruise, braking, bounce. Only
+-- the cruise length depends on stopAt. To land on `target` anyway, the strip position is
+-- re-seated once in the middle of the cruise: a jump of whole rows that cannot be seen at
+-- cruise speed. For that, the landing time is shifted by at most 1/(2 * speed) s so the
+-- profile itself travels whole rows (p.landAt is the real landing time). After the
+-- jump the reel runs through the true strip, so the last rows before landing are the real
+-- neighbours of the stop.
 function Anim.plan(o)
-	local n = o.n
-	local eff = o.stopAt - o.accel / 2 - o.decel / 2
-	if eff <= 0 then
-		eff = 1e-3
-	end
-	local nominal = o.speed * eff
-	local residue = (o.start - o.target) % n
-	local k = math.ceil((nominal - residue) / n)
-	if k < 0 then k = 0 end
-	local d = residue + k * n
-	return {
+	local p = {
 		start = o.start,
 		target = o.target,
-		n = n,
-		stopAt = o.stopAt,
-		accel = o.accel,
-		decel = o.decel,
+		n = o.n,
+		v = o.speed,
+		tn = o.nudgeTime or 0,
+		nudge = o.nudge or 0,
+		ta = o.accel,
+		quickDecel = o.quickDecel or o.decel,
 		bounce = o.bounce or 0,
 		overshoot = o.overshoot or 0,
-		distance = d,
-		v = d / eff,
+		minReseat = o.minReseatSpeed or o.speed * 0.6,
 	}
+	-- Shift the landing time a little so the profile travels a whole number of rows; then the
+	-- re-seat is a whole-row jump for every target.
+	local travel = p.v * (o.stopAt - p.tn - p.ta / 2 - o.decel / 2)
+	local stopAt = o.stopAt + (floor(travel + 0.5) - travel) / p.v
+	p.cruiseAt = p.tn + p.ta
+	p.decelAt = stopAt - o.decel
+	assert(p.decelAt >= p.cruiseAt, "Anim.plan: stopAt too early for nudge + accel + decel")
+	p.h = o.decel
+	p.landAt = stopAt
+	p.jumps = {}
+	Anim.reseat(p, (p.cruiseAt + p.decelAt) / 2)
+	return p
 end
 
-local function landTime(p)
-	if p.snap and p.snap < p.stopAt then
-		return p.snap
-	end
-	return p.stopAt
-end
-
-local function travelled(p, t)
+-- Distance travelled by the speed profile alone (no re-seats, no bounce).
+local function raw(p, t)
+	local v = p.v
 	if t <= 0 then
 		return 0
 	end
-	local v, a, h, T = p.v, p.accel, p.decel, p.stopAt
-	local braking = T - h
-	-- Ramp up (cut short if braking starts before the ramp ends; only with odd timings).
-	if t < a and t < braking then
-		return v * t * t / (2 * a)
+	if t < p.tn then
+		return -p.nudge * sin(pi * t / p.tn)
 	end
-	local rampEnd = v * a / 2
-	if t < braking then
-		return rampEnd + v * (t - a)
+	if t < p.cruiseAt then
+		local u = t - p.tn
+		return v * u * u / (2 * p.ta)
 	end
-	local u = t - braking
-	return p.distance - v * (h - u) * (h - u) / (2 * h)
+	local cruiseEnd = v * p.ta / 2 + v * (p.decelAt - p.cruiseAt)
+	if t < p.decelAt then
+		return v * p.ta / 2 + v * (t - p.cruiseAt)
+	end
+	local u = math.min(t, p.landAt) - p.decelAt
+	return cruiseEnd + v * u - v * u * u / (2 * p.h)
 end
 
--- Travelled rows at time t (seconds since the spin started), including the landing bounce.
+local function jumped(p, t)
+	local sum = 0
+	for _, j in ipairs(p.jumps) do
+		if t >= j.t then
+			sum = sum + j.rows
+		end
+	end
+	return sum
+end
+
+-- Replaces all re-seats at or after `at` by one at `at` that makes the reel land on target.
+function Anim.reseat(p, at)
+	assert(Anim.speed(p, at) >= p.minReseat, "Anim.reseat: reel too slow to hide a re-seat")
+	local kept = {}
+	for _, j in ipairs(p.jumps) do
+		if j.t < at then
+			kept[#kept + 1] = j
+		end
+	end
+	p.jumps = kept
+	local need = (p.start - p.target) % p.n -- rows to travel, modulo whole turns
+	local rows = (need - raw(p, p.landAt) - jumped(p, at)) % p.n
+	if math.abs(rows - floor(rows + 0.5)) < 1e-9 then
+		rows = floor(rows + 0.5) % p.n
+	end
+	kept[#kept + 1] = { t = at, rows = rows }
+end
+
+-- Speed in rows/s at time t (positive = downwards).
+function Anim.speed(p, t)
+	local v = p.v
+	if t <= 0 or t >= p.landAt then
+		return 0
+	end
+	if t < p.tn then
+		return -p.nudge * pi / p.tn * cos(pi * t / p.tn)
+	end
+	if t < p.cruiseAt then
+		return v * (t - p.tn) / p.ta
+	end
+	if t < p.decelAt then
+		return v
+	end
+	return v * (1 - (t - p.decelAt) / p.h)
+end
+
+-- Travelled rows at time t (seconds since the spin started), with re-seats and bounce.
 function Anim.distance(p, t)
-	local L = landTime(p)
-	if t < L then
-		return travelled(p, t)
+	local d = raw(p, t) + jumped(p, t)
+	if t >= p.landAt then
+		d = floor(d + 0.5) -- whole rows by construction; drop float noise
 	end
 	local b = p.bounce
-	if b <= 0 or t >= L + b then
-		return p.distance
+	if t > p.landAt and b > 0 and t < p.landAt + b then
+		local k = (t - p.landAt) / b
+		d = d + p.overshoot * sin(pi * k) * (1 - k)
 	end
-	local k = (t - L) / b
-	return p.distance + p.overshoot * sin(pi * k) * (1 - k)
+	return d
 end
 
 function Anim.position(p, t)
@@ -98,18 +155,24 @@ function Anim.position(p, t)
 end
 
 function Anim.landed(p, t)
-	return t >= landTime(p)
+	return t >= p.landAt
 end
 
 function Anim.done(p, t)
-	return t >= landTime(p) + p.bounce
+	return t >= p.landAt + p.bounce
 end
 
--- Quick stop: land at time `at` (jumping to the target) unless the reel lands earlier anyway.
+-- Quick stop requested at time `at`: braking starts at `at` (or at full speed, if the reel is
+-- still starting) with the short quickDecel, after one re-seat. No effect once braking began.
 function Anim.quickStop(p, at)
-	if not p.snap or at < p.snap then
-		p.snap = at
+	local from = math.max(at, p.cruiseAt)
+	if from >= p.decelAt then
+		return
 	end
+	p.decelAt = from
+	p.h = p.quickDecel
+	p.landAt = from + p.quickDecel
+	Anim.reseat(p, from)
 end
 
 -- The five strip stops around position x with their rows (-2.x .. 2.x).

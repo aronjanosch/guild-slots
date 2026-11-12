@@ -259,19 +259,24 @@ function stub.slash(cmd, msg)
 	error("unknown slash command " .. cmd)
 end
 
--- Loads the addon files listed in the TOC, in order, with (addonName, ns).
+-- Loads every file listed in the TOC, in order, with (addonName, ns). A listed file that is
+-- missing or does not compile is an error. Returns ns and the list of loaded paths.
 function stub.loadAddon(dir, name, ns)
 	ns = ns or {}
+	local loaded = {}
 	local toc = assert(io.open(dir .. "/" .. name .. ".toc"))
 	for line in toc:lines() do
 		line = line:gsub("\r", ""):gsub("^%s+", ""):gsub("%s+$", "")
 		if line ~= "" and not line:match("^#") then
 			local path = dir .. "/" .. line:gsub("\\", "/")
-			assert(loadfile(path))(name, ns)
+			local chunk, err = loadfile(path)
+			assert(chunk, "TOC file " .. path .. ": " .. tostring(err))
+			chunk(name, ns)
+			loaded[#loaded + 1] = path
 		end
 	end
 	toc:close()
-	return ns
+	return ns, loaded
 end
 
 return stub

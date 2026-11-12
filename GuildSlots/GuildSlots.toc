@@ -7,7 +7,9 @@
 Core\Sha256.lua
 Core\Tables.lua
 Core\Settings.lua
-# Core\Engine.lua, Core\Ledger.lua and Core\Verify.lua go here once they exist.
+Core\Engine.lua
+Core\Ledger.lua
+# Core\Verify.lua goes here once it exists.
 
 Locale\enUS.lua
 Locale\deDE.lua
