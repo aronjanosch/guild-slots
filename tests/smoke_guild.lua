@@ -173,7 +173,7 @@ local function officerFlow(locale, unknown)
 	assert(W.balance:GetText() == fmt(ns, 500), "window shows 500")
 	assert(W.win:GetText() == string.format(L.CREDIT, fmt(ns, 500), "Alice Smith"), "credit line")
 
-	-- A spin through the window; the server clock stands still.
+	-- A spin through the window.
 	local spins = env.count("SPIN")
 	W.spin:Click()
 	assert(S.phase == "spinning", "spinning in guild mode")
@@ -184,11 +184,29 @@ local function officerFlow(locale, unknown)
 		W.take:Click()
 	end
 
-	-- Right away again: wait.
-	W.spin:Click()
-	assert(S.phase == "idle", "no spin within the interval")
-	assert(W.win:GetText() == L.WAIT, "wait line")
-	assert(env.count("SPIN") == spins + 1, "no second SPIN")
+	-- A quick-stopped spin ends inside the spin interval; the next click must wait. A win
+	-- with a long count-up can outlast the interval, so try until a short one comes up.
+	local waited = false
+	for _ = 1, 20 do
+		env.pump(120) -- 2 s: interval over, budget refills
+		local before = env.count("SPIN")
+		W.spin:Click()
+		W.spin:Click() -- quick stop
+		local t0 = GetTime()
+		settle(env)
+		if W.offerRow:IsShown() then
+			W.take:Click()
+		end
+		if GetTime() - t0 < 1.2 then
+			W.spin:Click()
+			assert(S.phase == "idle", "no spin within the interval")
+			assert(W.win:GetText() == L.WAIT, "wait line")
+			assert(env.count("SPIN") == before + 1, "no second SPIN")
+			waited = true
+			break
+		end
+	end
+	assert(waited, "never got a spin short enough to test the interval")
 
 	-- Later: spins and gamble steps go through (until at least one gamble step was played).
 	local i = 0

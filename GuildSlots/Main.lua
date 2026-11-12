@@ -81,6 +81,19 @@ local function onEvent(name, data)
 	dispatch(name, data)
 end
 
+-- Server time with a fraction: GetServerTime() has whole seconds, which is too coarse for
+-- the spin interval. Anchor it once and let the frame clock run from there.
+local clockBase, clockStart
+local function now()
+	if type(GetTime) ~= "function" then
+		return Roster.serverTime()
+	end
+	if not clockBase then
+		clockBase, clockStart = Roster.serverTime(), GetTime()
+	end
+	return clockBase + (GetTime() - clockStart)
+end
+
 local function create(guild, me)
 	local saved = db()
 	if type(saved.guild) ~= "table" then
@@ -89,7 +102,7 @@ local function create(guild, me)
 	env = {
 		guild = guild,
 		me = me,
-		now = Roster.serverTime,
+		now = now,
 		randomHex = Roster.randomHex,
 		send = function(text) return Comm.send(text, "GUILD") end,
 		budget = Comm.budget,
