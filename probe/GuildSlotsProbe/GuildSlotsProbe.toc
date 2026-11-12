@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Guild Slots Probe
+## Notes: Dev-only API probe for guild-slots (milestone 0). /gsprobe for commands. Results land in SavedVariables.
+## Author: Aron
+## Version: 0.1.0
+## SavedVariables: GuildSlotsProbeDB
+Sha256.lua
+Probe.lua
