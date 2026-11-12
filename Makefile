@@ -1,6 +1,6 @@
 LUAJIT ?= luajit
 
-.PHONY: test vectors sounds
+.PHONY: test vectors sounds media
 
 test:
 	$(LUAJIT) tests/run.lua
@@ -15,3 +15,6 @@ vectors:
 
 sounds:
 	python3 tools/gen_sounds.py
+
+media:
+	python3 tools/build_media.py
