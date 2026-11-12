@@ -339,6 +339,33 @@ current `K` and empty contributions; `sum` and `expected = 20 * rtp` (uncapped).
 - One fixed account with a known final balance and head.
 - One manipulated account per check of section 7.
 
+## Clarifications
+
+Readings fixed after the Lua implementation and the Python reference were compared. The vectors
+pin all of them.
+
+- `a | b` always inserts the `|`, also after a literal: `K` hashes `GS1|K|<buyId>|<seed>|<nonce>`,
+  `h0` hashes `GS1|KONTO|<guild>|<player>`, `hi` hashes `<h(i-1), 64 hex>|<text>`.
+- Empty contributions leave a trailing `|`: `spin|5|`, `gam|5|1|`, entry text `S|1|10|0|ok|`.
+- `lot` takes the witness **name**. For a gamble step it uses kind `gam` with that step's `n` and `g`.
+- Numbers have at most 16 digits and must be below 2^53. Decoding is canonical:
+  `encode(decode(text)) == text`.
+- `decode` rejects malformed, unsorted or duplicate contributions, `g = 0`, payout amount 0 and a
+  settings line outside 1..120 bytes with `bad_entry`. More than 8 contributions is `bad_contribs`
+  in `apply`. Whether the settings line parses is `bad_settings`, after `bad_commit` and `dup_buy`.
+- `n` and `g` carry across purchases; a purchase only resets pending. Purchase ids and payout ids
+  are separate sets.
+- A void gamble step advances `g` and nothing else, so a step beyond `G` is `bad_gamble`. A void spin
+  still needs a stake from `E`; the balance is not checked. The level shape rules (range of `A`, no
+  contribution from the player, lottery) apply to void entries too; only the minimum count is waived.
+- Limit of 8 contributions: sort by (lot, name), take 8, sort by name. `Engine.contribs` keeps one
+  entry per name (lowest lot).
+- `info.head` from `Ledger.apply` is the full 64-char head. `Ledger.replay` accepts entries as
+  tables or as text forms.
+- `Tables.window`: above = stop - 1, below = stop + 1, both wrapping.
+- Settings: an empty segment (`;;`, trailing `;`) and a repeated key (known or unknown) make the
+  line invalid.
+
 ## Deviations from the design
 
 Decided for milestone 1; to be confirmed and carried back into the design document.
