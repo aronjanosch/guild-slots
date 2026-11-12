@@ -21,7 +21,7 @@ flow. Accounts are not secret (SPIN is public already).
 | `BUY2` (changed) | player | `buyId` (16 hex), `nonce` (32 hex), `head` (**64** hex, full head before the purchase), `anchors` (number of B and P entries before the purchase, 0..2^31) |
 | `PAYREQ` | player | `reqId` (16 hex), `officer` (name), `amount` (1..2^53-1), `head` (32 hex, current short head), `count` (number of entries, 1..2^31) |
 | `LOGREQ` | officer | `reqId` (16 hex), `player` (name) |
-| `LOG` | player | `reqId` (16 hex), `seq` (1..total), `total` (1..200), `payload` (the rest of the message, 1..200 bytes, may contain `|`) |
+| `LOG` | player | `reqId` (16 hex), `seq` (1..total), `total` (1..2^31; the officer refuses more than 200), `payload` (the rest of the message, 1..200 bytes, may contain `|`) |
 | `PAY` | officer | `reqId` (16 hex), `payId` (16 hex), `player` (name), `amount`, `balanceAfter` (0..2^53-1), `time` (server seconds), `head` (32 hex, short head after the payout entry), `anchors` (B and P entries including this one) |
 | `REJECT` | officer | `reqId` (16 hex), `player` (name), `reason` (`declined`, `mismatch`, `expired`, `busy`, `too_large`, `bad_log`) |
 | `OSYNC` | officer | `player` (name), `anchors` (1..2^31), `head` (32 hex), `time` (server seconds of the anchored entry) |
@@ -134,6 +134,7 @@ Player status: `wait_officer` (PAYREQ sent), `sending` (LOG chunks going out), `
 store.anchors[guild][player] = { anchors, head, time, by }
 store.seen[guild][player]    = { [buyId or payId] = true }
 store.requests               = finished payout requests of this client (last 50)
+store.payout[guild][player]  = the player's last own request (see Clarifications)
 ```
 
 ## 5. Tests
@@ -146,6 +147,39 @@ request; expiry on both sides; reject; `mismatch` when the account changed betwe
 `LOG`; `too_large`; chunk loss (never complete → expiry); verification spread over ticks; self
 payout with `allowSelf`; anchors from purchases heard by a third client; `OSYNC` to a client that was
 offline; the stored account after `PAY` replays with `Ledger.replay` to `balanceAfter`.
+
+## Clarifications
+
+Rules fixed after the first implementation; the tests in `tests/test_guild.lua` pin them.
+
+- **Request survives a reload.** The player's last request is kept in
+  `store.payout[guild][player] = { reqId, officer, amount, time, status, code, sent, total, head, count }`
+  (`head`/`count`: short head and number of entries at the request; no account text). A new session
+  restores it: an open request locks the game again and still answers `LOGREQ` and accepts
+  `PAY`/`REJECT`; a request restored in `sending` sends all chunks again (the officer ignores chunks it
+  already has; if the rebuilt account no longer gives the same number of chunks, status `failed`,
+  code `mismatch`). The record stays until a new request replaces it.
+- **Late PAY.** After the 300 s the status is `expired` and the lock ends, but a `PAY` for that last
+  request is still accepted. It only succeeds while the account is unchanged since the request: after
+  further spins the entry fails with the ledger code (usually `bad_balance`) or `head_mismatch`, and the
+  account stays as it was. A `PAY` for an older request than the last one is ignored.
+- **Amount.** The player applies a `PAY` only when `amount` equals the requested amount and `player`
+  is the own name; otherwise status `failed`, code `amount_mismatch`, account unchanged.
+- **Size limits.** `Pack.MAX_ENTRIES = 100000` is the default limit of `Pack.decode(text, limit)`; the
+  officer decodes with `limit = count`. A `PAYREQ` with `count` above `Pack.MAX_ENTRIES`, or a first
+  `LOG` announcing `total > 200`, gets `REJECT too_large` and the request ends `failed`/`too_large`
+  (that is the reading of the `too_large` reason). A log that unpacks to more than `count` entries is
+  `mismatch`; any other unpack failure is `bad_log`.
+- **Head check.** `count` is compared right after unpacking, `head` after the replay and only when the
+  replay succeeded; a failed replay gives a red report and `confirm` refuses with `no_replay`.
+- **`live` in `store.heard`.** `HELLO` carries the head after the last entry, check 4 needs the head
+  before entry `n` (step `g`). So `store.heard[guild][player]` also holds `live = { n, g, head }` from
+  the last `SPIN`/`GAM` (a `HELLO` keeps it), and Verify's `heard` is `live`.
+- **Order of codes.** `requestPayout`: `broken`, `no_account`, `bad_amount`, `bad_officer`, `busy`,
+  `send` (a broken account has no state, so `broken` comes first). The open gamble offer is taken only
+  after the queue accepted `PAYREQ`. `game:status()`: `broken`, then `payout`, then the milestone-3
+  codes. `confirm`: `unknown`, `not_ready`, `expired`, `no_replay`, `amount_too_high`, a ledger code,
+  `send`. `reject`: `bad_reason`, `unknown`, `send`.
 
 ## Deviations from the design (milestone 4)
 
