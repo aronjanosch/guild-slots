@@ -265,7 +265,9 @@ function RULES.S(state, e)
 	for _, v in ipairs(s.E) do
 		if v == e.stake then allowed = true end
 	end
-	if not allowed then
+	-- A lines table (T2) needs a stake that splits evenly over its lines.
+	local lineCount = state.tbl.lineCount
+	if not allowed or (lineCount and e.stake % lineCount ~= 0) then
 		return nil, "bad_stake"
 	end
 	if not checkContribs(state, e, "spin", 0) then
@@ -278,6 +280,14 @@ function RULES.S(state, e)
 		return nil, "no_funds"
 	end
 	local tbl = state.tbl
+	if tbl.kind == "lines" then
+		local round = Engine.round(state.keyed, e.n, e.contribs, tbl, e.stake, s.C)
+		local win = round.win
+		local balance = state.balance - e.stake + win
+		local pending = gambleOpen(s, win) and win or 0
+		return { n = e.n, g = 0, balance = balance, pending = pending },
+			{ type = "S", round = round, multiplier = win / e.stake, win = win, balance = balance, pending = pending }
+	end
 	local s1, s2, s3 = Engine.spin(state.keyed, e.n, e.contribs, tbl)
 	local multiplier = Tables.multiplier(tbl, s1, s2, s3)
 	local win = Tables.win(tbl, e.stake, s.C, s1, s2, s3)

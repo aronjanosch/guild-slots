@@ -146,6 +146,56 @@ function Engine.spin(K, n, contribs, tbl)
 	return uint32be(R, 1) % #r[1], uint32be(R, 5) % #r[2], uint32be(R, 9) % #r[3]
 end
 
+-- One round of a lines table (docs/table-t2-spec.md section 5): the base game plus every free
+-- game it awards. One HMAC without free games, one more per free game. No input checks: the
+-- ledger passes a valid table, stake and cap.
+function Engine.round(K, n, contribs, tbl, stake, cap)
+	local evaluate = ns.Tables.evaluateLines
+	local nText = dec(n)
+	local R = hmacRaw(K, "spin|" .. nText .. "|" .. contribs)
+	local strips = tbl.reels
+	local stops = {}
+	for r = 1, #strips do
+		stops[r] = uint32be(R, 4 * r - 3) % #strips[r]
+	end
+	local base = evaluate(tbl, strips, stops, stake, nil)
+	local round = {
+		kind = "lines", n = n, stake = stake, lineBet = stake / tbl.lineCount,
+		stops = stops, window = base.window, lines = base.lines, scatter = base.scatter,
+		base = base.win,
+	}
+	local win = base.win
+	local trigger, award, limit = tbl.scatter.trigger, tbl.scatter.games, tbl.maxFree
+	if base.scatter.count >= trigger then
+		local symbols = tbl.expanding
+		local X = symbols[uint32be(R, 21) % #symbols + 1]
+		local freeStrips, games, freeWin = tbl.freeReels, {}, 0
+		local left, played = award, 0
+		while left > 0 and played < limit do
+			played, left = played + 1, left - 1
+			local F = hmacRaw(K, "free|" .. nText .. "|" .. dec(played) .. "|" .. contribs)
+			local fstops = {}
+			for r = 1, #freeStrips do
+				fstops[r] = uint32be(F, 4 * r - 3) % #freeStrips[r]
+			end
+			local game = evaluate(tbl, freeStrips, fstops, stake, X)
+			game.retrigger = game.scatter.count >= trigger
+			if game.retrigger then
+				left = left + award
+			end
+			games[played] = game
+			freeWin = freeWin + game.win
+		end
+		round.free = { symbol = X, awarded = played, win = freeWin, games = games }
+		win = win + freeWin
+	end
+	if cap and cap > 0 and win > cap then
+		win = cap
+	end
+	round.win = win
+	return round
+end
+
 function Engine.gamble(K, n, g, contribs)
 	local R = hmacRaw(K, "gam|" .. dec(n) .. "|" .. dec(g) .. "|" .. contribs)
 	return byte(R, 1) < 128

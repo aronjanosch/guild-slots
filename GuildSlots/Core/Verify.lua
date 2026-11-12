@@ -64,11 +64,18 @@ local function luckIndex(l)
 	return { spins = count, steps = l.steps, maxWin = l.maxWin, total = total, timing = timing, risk = risk }
 end
 
--- Look-ahead (level 0): the next 20 spins with the current key and no contributions.
+-- Look-ahead (level 0): the next 20 spins with the current key and no contributions. For a lines
+-- table the multiplier is the uncapped round win / stake, which does not depend on the stake;
+-- the round is played at a stake of one line bet per line.
 local function lookahead(state)
 	local tbl, sum = state.tbl, 0
 	for k = 1, LOOKAHEAD do
-		sum = sum + Tables.multiplier(tbl, Engine.spin(state.keyed, state.n + k, "", tbl))
+		if tbl.kind == "lines" then
+			local stake = tbl.lineCount
+			sum = sum + Engine.round(state.keyed, state.n + k, "", tbl, stake, 0).win / stake
+		else
+			sum = sum + Tables.multiplier(tbl, Engine.spin(state.keyed, state.n + k, "", tbl))
+		end
 	end
 	return { count = LOOKAHEAD, sum = sum, expected = LOOKAHEAD * Tables.stats(tbl, 1, 0).rtp }
 end
