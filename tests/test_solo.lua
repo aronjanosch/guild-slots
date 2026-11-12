@@ -201,14 +201,14 @@ local function seqList(list)
 	return seq(unpack(list))
 end
 
-t.test("T2 is the default table with stakes 10, 50, 100", function()
+t.test("T3 is the default table with stakes 10, 50, 100", function()
 	local g = Solo.new({ rng = seq() })
-	t.eq(g.tbl.id, "T2", "table")
+	t.eq(g.tbl.id, "T3", "table")
 	t.eq(table.concat(g.stakes, ","), "10,50,100", "stakes")
 end)
 
 t.test("a T2 losing round carries the round and no T1 fields", function()
-	local g = Solo.new({ rng = seq(0, 0, 0, 0, 0) })
+	local g = Solo.new({ table = "T2", rng = seq(0, 0, 0, 0, 0) })
 	local r = g:spin()
 	t.eq(r.kind, "spin", "kind")
 	t.eq(r.stake, 10, "stake")
@@ -225,7 +225,7 @@ t.test("a T2 losing round carries the round and no T1 fields", function()
 end)
 
 t.test("a T2 line win pays and offers the gamble", function()
-	local g = Solo.new({ rng = seq(1, 16, 0, 0, 0) })
+	local g = Solo.new({ table = "T2", rng = seq(1, 16, 0, 0, 0) })
 	local r = g:spin()
 	t.eq(r.win, 30, "win")
 	t.eq(#r.round.lines, 1, "one line")
@@ -240,7 +240,7 @@ t.test("T2 free games: symbol from rng(9), ten games, a retrigger adds ten", fun
 	-- base, X = M (index 5), game 1 retriggers, games 2..20 lose.
 	local values = { 40, 35, 52, 0, 0, 5, 33, 55, 50, 5, 29 }
 	for _, v in ipairs(rep({ 1, 1, 1, 1, 1 }, 19)) do values[#values + 1] = v end
-	local g = Solo.new({ rng = seqList(values) })
+	local g = Solo.new({ table = "T2", rng = seqList(values) })
 	local r = g:spin()
 	local free = r.round.free
 	t.ok(free, "free games")
@@ -258,7 +258,7 @@ t.test("T2 free games stop at 50 and the cap limits the round win", function()
 	-- Every free game retriggers.
 	local values = { 40, 35, 52, 0, 0, 5 }
 	for _, v in ipairs(rep({ 33, 55, 50, 5, 29 }, 50)) do values[#values + 1] = v end
-	local g = Solo.new({ rng = seqList(values), cap = 5000 })
+	local g = Solo.new({ table = "T2", rng = seqList(values), cap = 5000 })
 	local r = g:spin()
 	t.eq(r.round.free.awarded, 50, "at most 50 games")
 	t.eq(r.win, 5000, "capped")
@@ -266,7 +266,7 @@ t.test("T2 free games stop at 50 and the cap limits the round win", function()
 end)
 
 t.test("T2 info gives pays, lines, scatter and the return rate", function()
-	local info = Solo.new({ rng = seq() }):info()
+	local info = Solo.new({ table = "T2", rng = seq() }):info()
 	t.eq(info.kind, "lines", "kind")
 	t.eq(info.pays.L[5], 5000, "L five")
 	t.eq(#info.lines, 10, "lines")

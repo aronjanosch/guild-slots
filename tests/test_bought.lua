@@ -98,7 +98,7 @@ t.test("Solo:buy pays the price and the series, codes for the refusals", functio
 	for _ = 2, 20 do
 		for _, v in ipairs({ 1, 1, 1, 1, 1 }) do rng[#rng + 1] = v end
 	end
-	local g = Solo.new({ rng = seq(unpack(rng)) })
+	local g = Solo.new({ table = "T2", rng = seq(unpack(rng)) })
 	t.eq(g:info().buy.price, 64, "info shows the price")
 	local r = g:buy()
 	t.eq(r.kind, "buy", "kind")
@@ -143,4 +143,30 @@ t.test("200,000 bought series return about 94 % of the price", function()
 	end
 	local ret = sum / N / 10 / T2.buyPrice
 	t.ok(ret >= 0.92 and ret <= 0.96, "mean return " .. ret)
+end)
+
+t.test("200,000 bought T3 series return about 93 % of the price", function()
+	-- Exact: 59.51 x the stake per series (tools/ref/t3_stats.json), 0.930 of the price 64.
+	local T3 = Tables.get("T3")
+	local seed = 20261113
+	local function rng(n)
+		local hi = math.floor(seed / 127773)
+		seed = 16807 * (seed - hi * 127773) - 2836 * hi
+		if seed <= 0 then seed = seed + 2147483647 end
+		return seed % n
+	end
+	local draw = {
+		symbol = function() return rng(#T3.expanding) end,
+		free = function()
+			local s = {}
+			for r = 1, 5 do s[r] = rng(#T3.freeReels[r]) end
+			return s
+		end,
+	}
+	local N, sum = 200000, 0
+	for _ = 1, N do
+		sum = sum + Tables.playBought(T3, 10, 0, draw).win
+	end
+	local ret = sum / N / 10 / T3.buyPrice
+	t.ok(ret >= 0.91 and ret <= 0.95, "mean return " .. ret)
 end)

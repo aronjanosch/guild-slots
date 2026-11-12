@@ -265,7 +265,7 @@ function RULES.S(state, e)
 	for _, v in ipairs(s.E) do
 		if v == e.stake then allowed = true end
 	end
-	-- A lines table (T2) needs a stake that splits evenly over its lines.
+	-- A lines table (T2, T3) needs a stake that splits evenly over its lines.
 	local lineCount = state.tbl.lineCount
 	if not allowed or (lineCount and e.stake % lineCount ~= 0) then
 		return nil, "bad_stake"

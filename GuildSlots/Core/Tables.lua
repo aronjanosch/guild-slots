@@ -46,52 +46,73 @@ local function charStrips(list)
 	return strips
 end
 
-local function newLinesTable()
-	return {
-		id = "T2",
-		kind = "lines",
-		reels = charStrips({
-			"KTMKDSGTCDTGWTGWSKMSKDGSWKDWLMSCTKDGSTWCB",
-			"KTGWSKWGKTWGKSWGMKSTWGSMGKTDSLCWKMTBCDWG",
-			"WGDSMTWDSMWSKTSDTGKWCSTGMWSGTKGCDKMDLGWCSWMLKTGKWTLSBDM",
-			"TGSWMGTMWTKWSGWKTGSTKSMWKGSMKGWKGWSMKTWGTWGBMLSTCD",
-			"WKSBKGSWTGMWKTMGWTGKDSBLTCGKM",
-		}),
-		freeReels = charStrips({
-			"SKGTWGKSTWKGWKSMTKGWDSMKDTGMSWDTKBTWLSGKC",
-			"SWKSDKSTWGTKGMKTCSKWSMWCTKGWTDMGSTWGLSDMGSKWLTGKMLKSCWTB",
-			"GTDGSKWTSWKSGTKSGTLWSGWKTWDGTMKDTKSDGLSGKTDCTWKGWMBTDKBMWSC",
-			"SDGSKMWGTKGSWDKTGDCMSWTGWKTWKCGSTDWMGWCKSBGDMSLDWCTKL",
-			"WGSTWSTGKSTGWTGKWGSKTSKGTBKWSMTGSTWDKTSKWGCMDSCKBDWLGST",
-		}),
-		rows = 3,
-		lineCount = 10,
-		-- Row (0 top, 1 middle, 2 bottom) on reels 1..5, per line.
-		lines = {
-			{ 1, 1, 1, 1, 1 }, { 0, 0, 0, 0, 0 }, { 2, 2, 2, 2, 2 }, { 0, 1, 2, 1, 0 }, { 2, 1, 0, 1, 2 },
-			{ 1, 2, 2, 2, 1 }, { 1, 0, 0, 0, 1 }, { 2, 2, 1, 0, 0 }, { 0, 0, 1, 2, 2 }, { 0, 1, 1, 1, 0 },
-		},
-		-- Multiples of the line bet for 2..5 of a kind; nil = no pay.
-		pays = {
-			K = { nil, nil, 5, 25, 100 }, S = { nil, nil, 5, 25, 100 }, G = { nil, nil, 5, 25, 100 },
-			T = { nil, nil, 5, 40, 150 }, W = { nil, nil, 5, 40, 150 },
-			M = { nil, 5, 30, 100, 750 }, D = { nil, 5, 30, 100, 750 },
-			C = { nil, 5, 40, 400, 2000 },
-			L = { nil, 10, 100, 1000, 5000 },
-		},
-		-- B: wild on lines, scatter pays in multiples of the stake for 3, 4, 5+ anywhere;
-		-- `trigger` or more books award `games` free games.
-		scatter = { symbol = "B", pays = { nil, nil, 2, 20, 200 }, trigger = 3, games = 10 },
-		-- Expanding symbol of a free-game series, by index 0..8.
-		expanding = { "K", "S", "G", "T", "W", "M", "D", "C", "L" },
-		-- Display order, best first.
-		order = { "L", "C", "D", "M", "W", "T", "G", "S", "K", "B" },
-		maxFree = 50,
-		-- Price of a bought free-game series in multiples of the stake (solo only; a series is
-		-- worth about 60.1 x the stake, so the return of a purchase is about 94 %).
-		buyPrice = 64,
-	}
+-- The rules every lines table shares (T2 and T3 differ only in their strips). Read-only.
+local LINES_RULES = {
+	rows = 3,
+	lineCount = 10,
+	-- Row (0 top, 1 middle, 2 bottom) on reels 1..5, per line.
+	lines = {
+		{ 1, 1, 1, 1, 1 }, { 0, 0, 0, 0, 0 }, { 2, 2, 2, 2, 2 }, { 0, 1, 2, 1, 0 }, { 2, 1, 0, 1, 2 },
+		{ 1, 2, 2, 2, 1 }, { 1, 0, 0, 0, 1 }, { 2, 2, 1, 0, 0 }, { 0, 0, 1, 2, 2 }, { 0, 1, 1, 1, 0 },
+	},
+	-- Multiples of the line bet for 2..5 of a kind; nil = no pay.
+	pays = {
+		K = { nil, nil, 5, 25, 100 }, S = { nil, nil, 5, 25, 100 }, G = { nil, nil, 5, 25, 100 },
+		T = { nil, nil, 5, 40, 150 }, W = { nil, nil, 5, 40, 150 },
+		M = { nil, 5, 30, 100, 750 }, D = { nil, 5, 30, 100, 750 },
+		C = { nil, 5, 40, 400, 2000 },
+		L = { nil, 10, 100, 1000, 5000 },
+	},
+	-- B: wild on lines, scatter pays in multiples of the stake for 3, 4, 5+ anywhere;
+	-- `trigger` or more books award `games` free games.
+	scatter = { symbol = "B", pays = { nil, nil, 2, 20, 200 }, trigger = 3, games = 10 },
+	-- Expanding symbol of a free-game series, by index 0..8.
+	expanding = { "K", "S", "G", "T", "W", "M", "D", "C", "L" },
+	-- Display order, best first.
+	order = { "L", "C", "D", "M", "W", "T", "G", "S", "K", "B" },
+	maxFree = 50,
+}
+
+-- buyPrice: price of a bought free-game series in multiples of the stake (solo only).
+local function newLinesTable(id, base, free, buyPrice)
+	local tbl = { id = id, kind = "lines", reels = charStrips(base), freeReels = charStrips(free), buyPrice = buyPrice }
+	for k, v in pairs(LINES_RULES) do
+		tbl[k] = v
+	end
+	return tbl
 end
+
+-- T2: a series is worth about 60.1 x the stake, so a purchase returns about 94 %.
+local T2 = newLinesTable("T2", {
+	"KTMKDSGTCDTGWTGWSKMSKDGSWKDWLMSCTKDGSTWCB",
+	"KTGWSKWGKTWGKSWGMKSTWGSMGKTDSLCWKMTBCDWG",
+	"WGDSMTWDSMWSKTSDTGKWCSTGMWSGTKGCDKMDLGWCSWMLKTGKWTLSBDM",
+	"TGSWMGTMWTKWSGWKTGSTKSMWKGSMKGWKGWSMKTWGTWGBMLSTCD",
+	"WKSBKGSWTGMWKTMGWTGKDSBLTCGKM",
+}, {
+	"SKGTWGKSTWKGWKSMTKGWDSMKDTGMSWDTKBTWLSGKC",
+	"SWKSDKSTWGTKGMKTCSKWSMWCTKGWTDMGSTWGLSDMGSKWLTGKMLKSCWTB",
+	"GTDGSKWTSWKSGTKSGTLWSGWKTWDGTMKDTKSDGLSGKTDCTWKGWMBTDKBMWSC",
+	"SDGSKMWGTKGSWDKTGDCMSWTGWKTWKCGSTDWMGWCKSBGDMSLDWCTKL",
+	"WGSTWSTGKSTGWTGKWGSKTSKGTBKWSMTGSTWDKTSKWGCMDSCKBDWLGST",
+}, 64)
+
+-- T3 (docs/table-t3-spec.md): T2 with two stops changed (base reel 2 stop 37 and free reel 1
+-- stop 30, D -> K; tools/ref/t3_tune.py), a return of about 92 %. A series is worth about
+-- 59.5 x the stake, so a purchase at 64 returns about 93 %.
+local T3 = newLinesTable("T3", {
+	"KTMKDSGTCDTGWTGWSKMSKDGSWKDWLMSCTKDGSTWCB",
+	"KTGWSKWGKTWGKSWGMKSTWGSMGKTDSLCWKMTBCKWG",
+	"WGDSMTWDSMWSKTSDTGKWCSTGMWSGTKGCDKMDLGWCSWMLKTGKWTLSBDM",
+	"TGSWMGTMWTKWSGWKTGSTKSMWKGSMKGWKGWSMKTWGTWGBMLSTCD",
+	"WKSBKGSWTGMWKTMGWTGKDSBLTCGKM",
+}, {
+	"SKGTWGKSTWKGWKSMTKGWDSMKDTGMSWKTKBTWLSGKC",
+	"SWKSDKSTWGTKGMKTCSKWSMWCTKGWTDMGSTWGLSDMGSKWLTGKMLKSCWTB",
+	"GTDGSKWTSWKSGTKSGTLWSGWKTWDGTMKDTKSDGLSGKTDCTWKGWMBTDKBMWSC",
+	"SDGSKMWGTKGSWDKTGDCMSWTGWKTWKCGSTDWMGWCKSBGDMSLDWCTKL",
+	"WGSTWSTGKSTGWTGKWGSKTSKGTBKWSMTGSTWDKTSKWGCMDSCKBDWLGST",
+}, 64)
 
 local BY_ID = {
 	T1 = newTable(
@@ -100,7 +121,8 @@ local BY_ID = {
 		{ K = 1, S = 2, G = 3, T = 5, W = 10, M = 20, D = 50 },
 		{ K = 5, S = 10, G = 15, T = 30, W = 60, M = 150, D = 500 }
 	),
-	T2 = newLinesTable(),
+	T2 = T2,
+	T3 = T3,
 }
 
 -- Cache of stats() results, keyed by table id, stake and cap.
@@ -112,6 +134,8 @@ local STATS_CACHE = {}
 local LINES_STATS = {
 	-- rtp and freeRate exact, hit and variance from 10^9 simulated rounds (tools/ref/t2_stats.py).
 	T2 = { rtp = 0.9499910643248847, hit = 0.324100448, variance = 62.9092862849537, freeRate = 0.005714817646609068 },
+	-- Same sources (tools/ref/t2_stats.py 1000000000 20260101 T3 -> tools/ref/t3_stats.json).
+	T3 = { rtp = 0.9199560947007686, hit = 0.312909203, variance = 61.38110165505235, freeRate = 0.005714817646609068 },
 }
 
 local function isStop(s)

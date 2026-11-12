@@ -21,11 +21,14 @@ local function isAmount(v)
 	return type(v) == "number" and v % 1 == 0 and v >= 0
 end
 
--- opts: rng (required), table ("T2"), start (1000), stakes ({10,50,100}),
+-- The table a solo game plays unless opts.table names another (docs/table-t3-spec.md).
+Solo.DEFAULT_TABLE = "T3"
+
+-- opts: rng (required), table (Solo.DEFAULT_TABLE), start (1000), stakes ({10,50,100}),
 -- maxGamble (3), cap (0 = none), balance (restore a saved balance).
 function Solo.new(opts)
 	assert(type(opts) == "table" and type(opts.rng) == "function", "Solo.new needs opts.rng")
-	local tbl = assert(ns.Tables.get(opts.table or "T2"), "unknown table")
+	local tbl = assert(ns.Tables.get(opts.table or Solo.DEFAULT_TABLE), "unknown table")
 	local start = opts.start or START
 	local g = setmetatable({
 		rng = opts.rng,
@@ -99,7 +102,7 @@ function Game:spin()
 	}
 end
 
--- A round of a lines table (T2), stops from rng: base stops, then the expanding symbol only
+-- A round of a lines table (T2, T3), stops from rng: base stops, then the expanding symbol only
 -- when free games are awarded, then the stops of each free game.
 function Game:spinRound(stake)
 	local tbl, rng = self.tbl, self.rng
