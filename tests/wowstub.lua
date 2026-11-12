@@ -6,6 +6,10 @@
 --   stub.combat, stub.mouseOver, stub.locale   switches
 --   stub.sounds, stub.chat  what was played / printed
 --   stub.unknown            method names called that the stub does not model (no-ops)
+--   stub.off                set of optional method names to hide, like a client without them
+--                           (CreateLine, SetRotation, SetClipsChildren, SetBlendMode, ...)
+--   stub.fontsFail          SetFont with a file under Interface\AddOns fails (returns false)
+--   stub.files              every add-on texture or font file set, path -> count
 --
 -- Arguments of the modelled methods are checked (numbers, anchor names), so a nil passed by
 -- a typo fails here instead of in the client.
@@ -19,6 +23,9 @@ local stub = {
 	chat = {},
 	unknown = {},
 	frames = {},
+	off = {},
+	fontsFail = false,
+	files = {},
 }
 
 local POINTS = {
@@ -36,6 +43,7 @@ local function isNum(v) return type(v) == "number" and v == v end
 local Object = {}
 local meta = {
 	__index = function(self, k)
+		if stub.off[k] then return nil end
 		local m = Object[k]
 		if m then return m end
 		if type(k) == "string" and k:match("^[A-Z]") then
@@ -149,8 +157,26 @@ function Object:CreateFontString(name, layer)
 	return new("FontString", name, self)
 end
 
-function Object:SetTexture(path)
+-- A file under Interface\AddOns\GuildSlots must exist (relative to the repo root).
+local function addonFile(path, what)
+	if type(path) ~= "string" or not path:find("^Interface\\AddOns\\") then
+		return false
+	end
+	check(path:find("^Interface\\AddOns\\GuildSlots\\"), what .. ": foreign add-on path " .. path)
+	local rel = path:gsub("^Interface\\AddOns\\", ""):gsub("\\", "/")
+	local fh = io.open(rel)
+	check(fh, what .. ": file missing: " .. rel)
+	fh:close()
+	stub.files[path] = (stub.files[path] or 0) + 1
+	return true
+end
+
+local WRAPS = { CLAMP = true, REPEAT = true, CLAMPTOBLACKADDITIVE = true, CLAMPTOBLACK = true, CLAMPTOWHITE = true, MIRROR = true }
+function Object:SetTexture(path, wrapH, wrapV)
 	check(path == nil or type(path) == "string" or isNum(path), "SetTexture: bad path")
+	check(wrapH == nil or WRAPS[wrapH], "SetTexture: bad horizontal wrap")
+	check(wrapV == nil or WRAPS[wrapV], "SetTexture: bad vertical wrap")
+	addonFile(path, "SetTexture")
 	self._texture = path
 end
 function Object:GetTexture() return self._texture end
@@ -158,12 +184,57 @@ function Object:SetColorTexture(r, g, b, a)
 	check(isNum(r) and isNum(g) and isNum(b) and (a == nil or isNum(a)), "SetColorTexture needs numbers")
 	self._texture = "color"
 end
-function Object:SetTexCoord(a, b, c, d)
+function Object:SetTexCoord(a, b, c, d, e, f, g, h)
+	if e ~= nil then -- eight values: UL, LL, UR, LR corners
+		local all = { a, b, c, d, e, f, g, h }
+		for i = 1, 8 do
+			check(isNum(all[i]) and all[i] >= -1e-9 and all[i] <= 1 + 1e-9, "SetTexCoord: corner value out of range")
+		end
+		self._coord = all
+		return
+	end
 	check(isNum(a) and isNum(b) and isNum(c) and isNum(d), "SetTexCoord needs four numbers")
 	check(a >= 0 and b <= 1 and c >= 0 and d <= 1 and a <= b and c <= d, "SetTexCoord out of range")
 	self._coord = { a, b, c, d }
 end
-function Object:SetVertexColor(r, g, b) check(isNum(r) and isNum(g) and isNum(b), "SetVertexColor needs numbers") end
+function Object:GetTexCoord()
+	local c = self._coord or { 0, 1, 0, 1 }
+	return unpack(c)
+end
+function Object:SetVertexColor(r, g, b, a)
+	check(isNum(r) and isNum(g) and isNum(b) and (a == nil or isNum(a)), "SetVertexColor needs numbers")
+	self._vertex = { r, g, b, a or 1 }
+end
+function Object:GetVertexColor()
+	local v = self._vertex or { 1, 1, 1, 1 }
+	return v[1], v[2], v[3], v[4]
+end
+local BLENDS = { ADD = true, BLEND = true, ALPHAKEY = true, DISABLE = true, MOD = true }
+function Object:SetBlendMode(m) check(BLENDS[m], "SetBlendMode: bad mode " .. tostring(m)); self._blend = m end
+function Object:SetRotation(r) check(isNum(r), "SetRotation needs a number") end
+function Object:SetDrawLayer(layer, sub)
+	check(LAYERS[layer], "SetDrawLayer: bad layer " .. tostring(layer))
+	check(sub == nil or (isNum(sub) and sub >= -8 and sub <= 7), "SetDrawLayer: bad sublevel")
+end
+function Object:SetScale(s) check(isNum(s) and s > 0, "SetScale needs a positive number"); self._scale = s end
+function Object:GetScale() return self._scale or 1 end
+
+-- Lines (CreateLine)
+function Object:CreateLine(name, layer, template, sublevel)
+	check(layer == nil or LAYERS[layer], "CreateLine: bad layer " .. tostring(layer))
+	check(sublevel == nil or (isNum(sublevel) and sublevel >= -8 and sublevel <= 7), "CreateLine: bad sublevel")
+	return new("Line", name, self)
+end
+local function linePoint(self, key, relPoint, rel, x, y)
+	check(self._kind == "Line", key .. " on a non-line")
+	check(POINTS[relPoint], key .. ": bad point " .. tostring(relPoint))
+	check(type(rel) == "table", key .. ": bad relative frame")
+	check(isNum(x) and isNum(y), key .. ": bad offset")
+	self[key] = { relPoint, rel, x, y }
+end
+function Object:SetStartPoint(relPoint, rel, x, y) linePoint(self, "_start", relPoint, rel, x, y) end
+function Object:SetEndPoint(relPoint, rel, x, y) linePoint(self, "_end", relPoint, rel, x, y) end
+function Object:SetThickness(n) check(isNum(n) and n > 0, "SetThickness needs a number"); self._thickness = n end
 
 function Object:SetText(t)
 	check(t == nil or type(t) == "string" or isNum(t), "SetText: bad value")
@@ -177,11 +248,25 @@ function Object:GetText() return self._text end
 function Object:SetTextColor(r, g, b) check(isNum(r) and isNum(g) and isNum(b), "SetTextColor needs numbers") end
 function Object:SetFont(path, size, flags)
 	check(type(path) == "string" and isNum(size), "SetFont: bad arguments")
+	check(flags == nil or type(flags) == "string", "SetFont: bad flags")
+	if addonFile(path, "SetFont") and stub.fontsFail then
+		return false
+	end
 	self._font = path
 	return true
 end
-function Object:GetFont() return self._font, 12, "" end
-function Object:SetFontObject(o) check(type(o) == "table", "SetFontObject: bad object") end
+function Object:GetFont()
+	if not self._font then return nil end
+	return self._font, 12, ""
+end
+function Object:SetShadowOffset(x, y) check(isNum(x) and isNum(y), "SetShadowOffset needs numbers") end
+function Object:SetShadowColor(r, g, b, a)
+	check(isNum(r) and isNum(g) and isNum(b) and (a == nil or isNum(a)), "SetShadowColor needs numbers")
+end
+function Object:SetFontObject(o)
+	check(type(o) == "table", "SetFontObject: bad object")
+	self._font = "object"
+end
 function Object:SetJustifyH(j) check(j == "LEFT" or j == "CENTER" or j == "RIGHT", "SetJustifyH: bad value") end
 
 function Object:Click(button)
