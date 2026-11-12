@@ -1,0 +1,35 @@
+name: test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y luajit
+
+      - name: Run tests (signed bit)
+        run: luajit tests/run.lua
+
+      - name: Run tests (unsigned bit, as the client)
+        run: luajit tests/run.lua --unsigned
+
+      - name: Run UI smoke test
+        run: |
+          if [ -f tests/smoke_ui.lua ]; then
+            luajit tests/smoke_ui.lua
+          else
+            echo "tests/smoke_ui.lua not present, skipping"
+          fi
+
+      - name: Regenerate test vectors and check for drift
+        run: |
+          if [ -f tools/ref/gen_vectors.py ]; then
+            python3 tools/ref/gen_vectors.py
+            git diff --exit-code tests/vectors.lua
+          else
+            echo "tools/ref/gen_vectors.py not present, skipping"
+          fi
