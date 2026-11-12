@@ -1,6 +1,6 @@
 LUAJIT ?= luajit
 
-.PHONY: test vectors
+.PHONY: test vectors sounds
 
 test:
 	$(LUAJIT) tests/run.lua
@@ -12,3 +12,6 @@ vectors:
 	else \
 		echo "tools/ref/gen_vectors.py not present, nothing to regenerate"; \
 	fi
+
+sounds:
+	python3 tools/gen_sounds.py

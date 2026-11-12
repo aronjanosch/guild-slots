@@ -15,6 +15,7 @@ local stub = {
 	mouseOver = false,
 	locale = "enUS",
 	sounds = {},
+	playing = {}, -- handle -> file of file sounds not stopped by StopSound
 	chat = {},
 	unknown = {},
 	frames = {},
@@ -229,6 +230,25 @@ function PlaySound(id, channel)
 	check(isNum(id), "PlaySound needs a soundkit id")
 	stub.sounds[#stub.sounds + 1] = id
 	return true
+end
+function PlaySoundFile(file, channel)
+	check(type(file) == "string" and file:find("^Interface\\AddOns\\GuildSlots\\"), "PlaySoundFile needs an addon path")
+	local rel = file:gsub("^Interface\\AddOns\\", ""):gsub("\\", "/")
+	local fh = io.open(rel)
+	check(fh, "sound file missing: " .. rel)
+	fh:close()
+	stub.sounds[#stub.sounds + 1] = file
+	stub.playing[#stub.sounds] = file
+	return true, #stub.sounds
+end
+function StopSound(handle)
+	stub.playing[handle] = nil
+end
+function stub.isPlaying(name)
+	for _, file in pairs(stub.playing) do
+		if file:find(name, 1, true) then return true end
+	end
+	return false
 end
 C_Timer = { After = function(_, fn) stub.timers = stub.timers or {}; table.insert(stub.timers, fn) end }
 

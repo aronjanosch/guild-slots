@@ -84,7 +84,14 @@ local function scenario(locale)
 	assert(W.spin.label:GetText() == L.STOP, "button reads STOP while spinning")
 	ticks(30)
 	assert(S.phase == "spinning", "still spinning after 0.5 s")
+	assert(stub.isPlaying("reel_spin"), "reel sound runs while spinning")
 	settle()
+	assert(not stub.isPlaying("reel_spin"), "reel sound stopped after the last reel")
+	local stops = 0
+	for _, snd in ipairs(stub.sounds) do
+		if snd == "Interface\\AddOns\\GuildSlots\\Media\\reel_stop.ogg" then stops = stops + 1 end
+	end
+	assert(stops == 3, "one stop sound per reel, got " .. stops)
 	assert(S.game.balance == 990, "990 after a loss")
 	shownMatches("after loss")
 	for i = 1, 3 do

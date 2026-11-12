@@ -47,18 +47,42 @@ local function inCombat()
 	return type(InCombatLockdown) == "function" and InCombatLockdown() and true or false
 end
 
+-- A Theme.sounds entry is a soundkit name, a soundkit id, or a file under the addon folder
+-- (anything ending in .ogg or .mp3). Returns the sound handle, if the client gave one.
 local function playSound(key)
 	if not db or db.sound == false then
 		return
 	end
 	local s = Theme.sounds[key]
+	if type(s) == "string" and s:find("%.[om][gp][g3]$") then
+		if type(PlaySoundFile) == "function" then
+			local ok, willPlay, handle = pcall(PlaySoundFile, "Interface\\AddOns\\" .. addonName .. "\\" .. s, "SFX")
+			return ok and willPlay and handle or nil
+		end
+		return
+	end
 	local id = s
 	if type(s) == "string" then
 		id = type(SOUNDKIT) == "table" and SOUNDKIT[s] or nil
 	end
 	if id and type(PlaySound) == "function" then
-		pcall(PlaySound, id, "SFX")
+		local ok, willPlay, handle = pcall(PlaySound, id, "SFX")
+		return ok and willPlay and handle or nil
 	end
+end
+
+-- The reel sound runs for as long as any reel turns.
+local spinSound
+local function stopSpinSound()
+	if spinSound and type(StopSound) == "function" then
+		pcall(StopSound, spinSound, 120)
+	end
+	spinSound = nil
+end
+
+local function startSpinSound()
+	stopSpinSound()
+	spinSound = playSound("reelSpin")
 end
 
 local function font(fs, size, flags)
@@ -349,6 +373,7 @@ function SlotFrame.spin()
 	end
 	S.phase = "spinning"
 	playSound("reelStart")
+	startSpinSound()
 	saveGame()
 	refresh()
 end
@@ -493,6 +518,7 @@ local function onUpdate(_, elapsed)
 		end
 		if not running then
 			W.tease:Hide()
+			stopSpinSound()
 			present()
 		end
 	end
@@ -813,6 +839,7 @@ local function build()
 		playSound("click")
 	end)
 	f:SetScript("OnHide", function()
+		stopSpinSound()
 		-- Finish everything at once so a closed window never hides a pending result.
 		if S.phase == "spinning" then
 			for i = 1, REELS do

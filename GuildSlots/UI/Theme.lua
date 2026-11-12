@@ -121,11 +121,13 @@ Theme.timing = {
 
 -- PLACEHOLDERS: soundkit names looked up in the client's SOUNDKIT table at runtime; a
 -- missing name plays nothing. Replace with better fitting kits after testing in the client.
--- A number instead of a name is played as a soundkit id directly.
+-- A number instead of a name is played as a soundkit id directly. A path ending in .ogg or
+-- .mp3 is a file of our own under the addon folder (built by tools/gen_sounds.py).
 Theme.sounds = {
 	click = "IG_MAINMENU_OPTION_CHECKBOX_ON",
 	reelStart = "IG_MAINMENU_OPEN",
-	reelStop = "U_CHAT_SCROLL_BUTTON",
+	reelSpin = "Media\\reel_spin.ogg", -- stopped when the last reel lands
+	reelStop = "Media\\reel_stop.ogg",
 	win = "LOOT_WINDOW_COIN_SOUND",
 	bigWin = "READY_CHECK",
 	gambleWin = "LOOT_WINDOW_COIN_SOUND",
