@@ -255,3 +255,87 @@ t.test("particles start at the emitter, fly within bounds and fade", function()
 	local x2 = Anim.particle(1, 0.5, 2)
 	t.eq(x1, x2, "deterministic")
 end)
+
+t.test("flipbook frames: looping wraps, a single play holds the last frame", function()
+	t.eq(Anim.frameAt(0, 12, 8, true), 1, "first frame at 0")
+	t.eq(Anim.frameAt(0.09, 12, 8, true), 2, "second frame after 1/12 s")
+	t.eq(Anim.frameAt(0.7, 12, 8, true), 1, "frame 9 wraps to 1")
+	t.eq(Anim.frameAt(0.7, 12, 8, false), 8, "single play holds frame 8")
+	t.eq(Anim.frameAt(-1, 12, 8, false), 1, "before the start: frame 1")
+	-- the tome: 8 frames in 0.8 s
+	t.eq(Anim.frameAt(0.79, 10, 8, false), 8, "tome on its last frame just before 0.8 s")
+	t.eq(Anim.frameAt(5, 10, 8, false), 8, "and holds it")
+end)
+
+t.test("sprite sheet coordinates are read row by row", function()
+	local l, r, top, b = Anim.gridCoord(1, 8, 1)
+	t.eq(l, 0) t.eq(r, 0.125) t.eq(top, 0) t.eq(b, 1)
+	l, r = Anim.gridCoord(8, 8, 1)
+	t.eq(l, 0.875) t.eq(r, 1)
+	l, r, top, b = Anim.gridCoord(6, 4, 2) -- second row, second column
+	t.eq(l, 0.25) t.eq(r, 0.5) t.eq(top, 0.5) t.eq(b, 1)
+end)
+
+t.test("banner pop: 0.2, overshoot to 1.12, settle at 1", function()
+	t.near(Anim.pop(0, 0.5), 0.2, 1e-9, "starts small")
+	t.near(Anim.pop(0.3, 0.5), 1.12, 1e-9, "peak at 60 %")
+	t.near(Anim.pop(0.5, 0.5), 1, 1e-9, "settles")
+	t.near(Anim.pop(9, 0.5), 1, 1e-9, "stays")
+	for i = 1, 49 do
+		local s = Anim.pop(i / 100, 0.5)
+		t.ok(s >= 0.2 and s <= 1.12 + 1e-9, "within 0.2 .. 1.12")
+	end
+end)
+
+t.test("card flip: width 1 -> 0 -> 1, the face changes at the middle", function()
+	local s, front = Anim.flip(0, 0.6)
+	t.near(s, 1, 1e-9) t.eq(front, false, "back first")
+	s, front = Anim.flip(0.3, 0.6)
+	t.near(s, 0, 1e-9, "edge-on at the middle") t.eq(front, true, "front from the middle")
+	s, front = Anim.flip(0.15, 0.6)
+	t.ok(s > 0 and s < 1 and not front, "turning, still the back")
+	s, front = Anim.flip(1, 0.6)
+	t.near(s, 1, 1e-9) t.eq(front, true, "front at the end")
+end)
+
+t.test("rotated rays: corner coordinates of a crop that turns about the centre", function()
+	-- 480 x 288 region over a 600 x 600 texture, not rotated: a centred crop.
+	local ulx, uly, llx, lly, urx, ury, lrx, lry = Anim.rays(0, 480, 288, 600)
+	t.near(ulx, 0.1, 1e-9) t.near(uly, 0.26, 1e-9)
+	t.near(llx, 0.1, 1e-9) t.near(lly, 0.74, 1e-9)
+	t.near(urx, 0.9, 1e-9) t.near(ury, 0.26, 1e-9)
+	t.near(lrx, 0.9, 1e-9) t.near(lry, 0.74, 1e-9)
+	-- a quarter turn: the top left corner samples the texture's left middle-bottom
+	ulx, uly = Anim.rays(math.pi / 2, 480, 288, 600)
+	t.near(ulx, 0.26, 1e-9) t.near(uly, 0.9, 1e-9)
+	-- every angle stays inside the texture (SetTexCoord needs 0..1)
+	for k = 0, 72 do
+		local c = { Anim.rays(k * math.pi / 36, 480, 288, 600) }
+		for _, v in ipairs(c) do t.ok(v >= 0 and v <= 1, "coordinate in range") end
+	end
+end)
+
+t.test("visible part of a strip inside a window", function()
+	local a, b = Anim.span(-20, 20, 0, 100)
+	t.near(a, 0.5, 1e-9, "left half cut") t.near(b, 1, 1e-9)
+	a, b = Anim.span(90, 110, 0, 100)
+	t.near(a, 0, 1e-9) t.near(b, 0.5, 1e-9, "right half cut")
+	a, b = Anim.span(10, 30, 0, 100)
+	t.near(a, 0, 1e-9) t.near(b, 1, 1e-9, "fully inside")
+	t.eq(Anim.span(120, 140, 0, 100), nil, "outside")
+end)
+
+t.test("coin rain: deterministic coins fall from the top to the bottom", function()
+	for i = 1, 30 do
+		local x0, y0, size, phase = Anim.coin(i, 0, 2)
+		local x1, y1 = Anim.coin(i, 1, 2)
+		local x2, y2 = Anim.coin(i, 2, 2)
+		t.ok(x0 >= 0 and x0 <= 1, "x within the window")
+		t.eq(x0, x1, "falls straight down")
+		t.ok(y0 < 0 and y2 > 1, "enters above, leaves below")
+		t.ok(y1 > y0 and y2 > y1, "falls")
+		t.ok(size >= 1 and size <= 3 and size % 1 == 0, "one of three sizes")
+		t.ok(phase >= 0 and phase <= 7 and phase % 1 == 0, "flipbook phase")
+	end
+	t.eq(Anim.coin(5, 0.5, 2), Anim.coin(5, 0.5, 2), "deterministic")
+end)

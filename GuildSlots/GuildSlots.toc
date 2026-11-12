@@ -25,6 +25,7 @@ Guild\Roster.lua
 UI\Theme.lua
 UI\Anim.lua
 UI\Plan.lua
+UI\Layout.lua
 UI\Reel.lua
 UI\SlotFrame.lua
 UI\OfficerFrame.lua
