@@ -10,6 +10,7 @@ Core\Settings.lua
 Core\Engine.lua
 Core\Ledger.lua
 Core\Verify.lua
+Core\Proto.lua
 
 Locale\enUS.lua
 Locale\deDE.lua

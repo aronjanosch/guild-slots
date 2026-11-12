@@ -30,7 +30,7 @@ if unsigned then
 	bit = wrapped
 end
 
-local CORE = { "Sha256", "Tables", "Settings", "Engine", "Ledger", "Verify" }
+local CORE = { "Sha256", "Tables", "Settings", "Engine", "Ledger", "Verify", "Proto" }
 local ns = {}
 for _, name in ipairs(CORE) do
 	local path = "GuildSlots/Core/" .. name .. ".lua"
