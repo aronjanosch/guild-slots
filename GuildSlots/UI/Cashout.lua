@@ -310,6 +310,10 @@ function Cashout.onPayout(data)
 		end
 		C.tracked[data.reqId] = true
 	elseif C.tracked[data.reqId] or C.starts[data.reqId] then
+		-- A late PAY after the expiry is news again, even when the expiry was closed.
+		if data.status == "paid" and C.acked == data.reqId then
+			C.acked = nil
+		end
 		-- The end of a followed request is shown even when the overlay was hidden.
 		if host.guildMode() and data.reqId ~= C.acked then
 			C.shown = true
