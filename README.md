@@ -18,8 +18,8 @@ Rules, strips and pays: [docs/table-t2-spec.md](docs/table-t2-spec.md).
 
 `/gs` opens the window. `/gs demo` makes the next solo spin a free-game round.
 
-Next to the spin button: **Auto** (autoplay: 10 to 100 rounds or until stopped, with stops on
-free games, a big win or a balance limit; wins are taken, never gambled) and **Turbo** (shorter
+Next to the spin button: **Auto** (on/off: rounds roll by themselves and pause on a win for take
+or gamble) and **Turbo** (shorter
 rounds, `/gs turbo`). The coin button in the header shows this session's numbers. In solo mode a
 free-game series can be bought for 64 × the stake (return about 94 %). In guild mode the footer
 line shows the guild's big wins and free games (`/gs ticker` turns it off). `/gs fx` switches

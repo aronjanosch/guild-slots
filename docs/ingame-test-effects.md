@@ -12,10 +12,14 @@ Restart the client (new sound files), `/console scriptErrors 1`, `/gs`.
    count-up, ticks rise in pitch, the window jolts at each step and returns exactly to its place
    (drag it elsewhere first), more coins fall. SPIN skips it.
 6. `/gs fx`: no shake, one quiet tick, no ticker motion.
-7. Auto, 10 rounds, START: the button reads "STOP AUTO (n left)", wins are taken and never gambled.
-   Try each stop: free games (`/gs demo`), 20x, balance limit, no funds, the button, Space, closing
-   the window, entering combat, switching mode.
-8. Guild mode autoplay: at most one spin per 1.5 s; it stops when a cash-out request is opened.
+7. Auto (toggle left of the spin button, `/gs auto`): rounds start by themselves and the button
+   stays selected. A win with an offer pauses it with "… won – take or gamble, then Auto rolls
+   on": TAKE goes on; GAMBLE goes on after the card (lost, taken from the card, or the last step
+   won); SPIN collects and spins and autoplay goes on. Free games play through. SPIN during an
+   auto round stops the reels / skips as usual and leaves Auto on. Auto switches off on the
+   button, no funds, combat, a mode switch and closing the window; close it mid-spin and reopen:
+   the round is booked, nothing spins further.
+8. Guild mode autoplay: at most one spin per 1.5 s; opening a cash-out request switches it off.
 9. Coin button in the header: session numbers after a few rounds and a gamble; Reset clears the
    current mode only.
 10. Solo "Buy free games" at stake 10: 640 is taken, the tome intro plays, ten free games follow,

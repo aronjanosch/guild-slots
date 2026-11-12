@@ -13,7 +13,7 @@ local addonName, ns = ...
 -- Phases: "idle" (an open take/gamble offer is S.offer), "round" (a plan plays), "pick" (the
 -- gamble card waits for red or black), "flip" (the card turns over).
 --
--- Engagement pack (v0.7): autoplay (UI/Auto.lua rules, driven by a timer here), turbo (a
+-- Engagement pack (v0.7): autoplay (an on/off toggle; UI/Auto.lua decides, a timer here drives it), turbo (a
 -- second timing set, Theme.timingTurbo, for the plan and the reels), anticipation sounds, the
 -- tiered big win with tick ladder and window shake, the session panel (UI/Session.lua), the
 -- guild ticker on the footer line (UI/Ticker.lua) and the bonus buy (solo only).
@@ -36,7 +36,7 @@ end
 local db -- GuildSlotsDB, set on ADDON_LOADED (or on first use)
 local W = {} -- widgets
 local S = { now = 0, phase = "idle", counts = {}, offer = false, mode = "solo", cards = {}, lit = {}, litN = 0,
-	landAt = {}, baseStops = {}, stats = Stats.new(), autoOpts = { rounds = 10, stopFree = true, stopWin = 0 } } -- animation state
+	landAt = {}, baseStops = {}, stats = Stats.new(), auto = false } -- animation state
 SlotFrame.widgets, SlotFrame.state = W, S
 
 -- The table the window draws (strips, lines): always T2.
@@ -378,9 +378,7 @@ local function refresh()
 
 	local label = L.SPIN
 	local auto = S.auto
-	if auto then
-		label = auto.left and string.format(L.AUTO_STOP, auto.left) or L.AUTO_STOP_ENDLESS
-	elseif phase == "round" then
+	if phase == "round" then
 		local step = currentStep()
 		if step and step.kind == "spin" and step.game == 0 and not S.quick then
 			label = L.STOP
@@ -390,16 +388,10 @@ local function refresh()
 			label = L.SKIP
 		end
 	end
-	local small = auto and true or false
-	if W.spin.small ~= small then
-		W.spin.small = small
-		Skin.font(W.spin.label, "title", small and Theme.fontSize.spinAuto or Theme.fontSize.spin)
-	end
 	W.spin.label:SetText(label)
-	W.spin:setEnabled(auto or phase == "round" or (phase == "idle" and not status))
-	W.auto:setEnabled(auto or (phase == "idle" and not status and supported()))
-	W.auto:setSelected(auto or W.autoPanel:IsShown())
-	W.autoStart:setEnabled(phase == "idle" and not auto and not status and supported() and not inCombat())
+	W.spin:setEnabled(phase == "round" or (phase == "idle" and not status))
+	W.auto:setEnabled(auto or (not status and supported()))
+	W.auto:setSelected(auto)
 	W.turbo:setSelected(db.turbo and true or false)
 
 	-- Stakes, or the take / gamble buttons that replace them.
@@ -1180,7 +1172,7 @@ local function showResting()
 	end
 end
 
-local autoAfterRound, updateSession -- defined with autoplay and the session panel below
+local updateSession -- defined with the session panel below
 
 local function endRound()
 	S.phase = "idle"
@@ -1196,7 +1188,7 @@ local function endRound()
 	S.tm = nil
 	S.offer = S.game:state() == "gamble"
 	if S.offer then
-		setWinText(string.format(L.OFFER_HINT, fmt(S.game.pending)), Theme.tones.win)
+		setWinText(string.format(S.auto and L.AUTO_OFFER_HINT or L.OFFER_HINT, fmt(S.game.pending)), Theme.tones.win)
 	elseif not (S.result and S.result.win > 0) then
 		idleText()
 	end
@@ -1206,9 +1198,6 @@ local function endRound()
 		updateSession()
 	end
 	saveGame()
-	if S.auto then
-		autoAfterRound()
-	end
 	refresh()
 end
 
@@ -1276,6 +1265,7 @@ local function startRound(r, before)
 	S.plan = Plan.build(r.round, S.tm, T2)
 	S.si, S.quick = 0, false
 	S.phase = "round"
+	S.autoNext = nil
 	Cashout.conceal()
 	if db.paytable then
 		db.paytable = false
@@ -1295,30 +1285,29 @@ end
 -- Autoplay: rounds started by the window's clock, never by a click, so nothing on this path
 -- may read the guild info (Roster.refreshInfo runs on clicks only). Rules in UI/Auto.lua.
 
-local AUTO_STOP_LINES = {
-	free = "AUTO_END_FREE", win = "AUTO_END_WIN", below = "AUTO_END_BELOW", done = "AUTO_END_DONE",
-	click = "AUTO_END_CLICK", combat = "AUTO_END_COMBAT", mode = "AUTO_END_MODE", close = "AUTO_END_CLOSE",
-	payout = "AUTO_END_PAYOUT",
+local AUTO_OFF_LINES = {
+	toggle = "AUTO_END_TOGGLE", combat = "AUTO_END_COMBAT", mode = "AUTO_END_MODE", payout = "AUTO_END_PAYOUT",
 }
 
--- Ends autoplay. why: a key of AUTO_STOP_LINES, or a refusal code from spin().
+-- Switches autoplay off. why: a key of AUTO_OFF_LINES, "close" (no line), or a refusal code
+-- from spin().
 local function stopAuto(why)
 	if not S.auto then
 		return
 	end
-	S.auto, S.autoNext = nil, nil
+	S.auto, S.autoNext = false, nil
 	if W.frame then
-		local key = AUTO_STOP_LINES[why]
-		local line = key and L[key] or string.format(L.AUTO_END_CODE, codeLine(why))
+		local key = AUTO_OFF_LINES[why]
 		if why ~= "close" and S.phase == "idle" then
-			message(line, (why == "done" or why == "click") and Theme.tones.muted or Theme.tones.lose)
+			message(key and L[key] or string.format(L.AUTO_END_CODE, codeLine(why)),
+				why == "toggle" and Theme.tones.muted or Theme.tones.lose)
 		end
 		refresh()
 	end
 end
 SlotFrame.stopAuto = stopAuto
 
--- Takes an open offer without a sound or a message (autoplay never gambles).
+-- Takes an open offer without a sound or a message (the bonus buy takes an open win first).
 local function quietTake()
 	if S.game:state() ~= "gamble" then
 		return
@@ -1329,17 +1318,6 @@ local function quietTake()
 	countTo("balance", S.balanceShown, S.game.balance, tm().countUp)
 end
 
--- After a fully shown round: stop on a condition, else take the win and plan the next round.
-function autoAfterRound()
-	local why = S.auto:after(S.result, S.game.balance)
-	if why then
-		stopAuto(why)
-		return
-	end
-	quietTake()
-	S.autoNext = S.now + tm().autoPause
-end
-
 -- One autoplay round (from onUpdate when S.autoNext is due).
 local function autoStep()
 	S.autoNext = nil
@@ -1348,45 +1326,65 @@ local function autoStep()
 		stopAuto("payout")
 		return
 	end
-	if S.auto.left and S.auto.left <= 0 then
-		stopAuto("done")
-		return
+	if Auto.after(game) == "wait" then
+		return -- an offer is open: the player decides first
 	end
-	quietTake()
 	local before = game.balance
 	local r, err = game:spin()
 	if not r then
-		if S.auto:refused(err) == "retry" then
+		if Auto.refused(err) == "retry" then
 			S.autoNext = S.now + tm().autoRetry -- guild interval: try again, never faster
 			return
 		end
 		stopAuto(err)
 		return
 	end
-	S.auto:take()
 	startRound(r, before)
 end
 
--- Starts autoplay with the panel's choices.
-function SlotFrame.startAuto()
-	if S.auto or S.phase ~= "idle" or not supported() or statusLine() or inCombat() then
+-- Plans the next autoplay round when the window is at rest: after the pause, unless a take /
+-- gamble offer waits for the player (autoplay never gambles; it goes on after the take or the
+-- gamble).
+local function autoTick(now)
+	if not S.auto or S.phase ~= "idle" or next(S.counts) ~= nil then
+		return
+	end
+	if not S.autoNext then
+		if Auto.after(S.game) == "continue" then
+			S.autoNext = now + tm().autoPause
+		end
+	elseif now >= S.autoNext then
+		if not pcall(autoStep) then
+			stopAuto("error")
+		end
+	end
+end
+
+-- The Auto toggle (and /gs auto). On while idle: the first round starts at once; on during a
+-- round: autoplay goes on after it.
+function SlotFrame.toggleAuto()
+	if S.auto then
+		stopAuto("toggle")
+		playSound("click")
 		return false
 	end
-	local o = S.autoOpts
-	S.auto = Auto.new({ rounds = o.rounds, stopFree = o.stopFree, stopWin = o.stopWin, stopBelow = o.stopBelow })
-	S.autoNext = S.now
-	W.autoPanel:Hide()
+	if not supported() or statusLine() or inCombat() then
+		return false
+	end
+	S.auto, S.autoNext = true, nil
 	playSound("click")
+	if S.phase == "idle" then
+		if S.offer then
+			setWinText(string.format(L.AUTO_OFFER_HINT, fmt(S.game.pending)), Theme.tones.win)
+		elseif not pcall(autoStep) then
+			stopAuto("error")
+		end
+	end
 	refresh()
 	return true
 end
 
 function SlotFrame.spin()
-	if S.auto then
-		-- A click (or Space) on the spin button ends autoplay; the running round plays on.
-		stopAuto("click")
-		return
-	end
 	if S.phase == "flip" or S.phase == "pick" then
 		return
 	end
@@ -1741,11 +1739,7 @@ local function onUpdate(_, elapsed)
 	end
 
 	-- Autoplay: the next round once the last one is fully shown and the pause is over.
-	if S.auto and S.autoNext and now >= S.autoNext and S.phase == "idle" and next(S.counts) == nil then
-		if not pcall(autoStep) then
-			stopAuto("error")
-		end
-	end
+	autoTick(now)
 
 	updateEffects(now)
 	Cashout.tick(elapsed)
@@ -1877,7 +1871,7 @@ local function frameAt(parent, level, r)
 end
 
 local LEVEL = { reels = 2, cells = 5, reelFrame = 7, lines = 8, status = 12, card = 12, stage = 14, banner = 16,
-	stageTop = 18, session = 26, paytable = 30, cashout = 32, autoPanel = 34, rain = 40 }
+	stageTop = 18, session = 26, paytable = 30, cashout = 32, rain = 40 }
 
 local function buildReels(f)
 	local Lay, c = Theme.layout, Theme.colors
@@ -2190,105 +2184,6 @@ local function secondary(parent, r, icon, text, onClick)
 end
 
 ---------------------------------------------------------------------------------------------
--- Autoplay panel (over the reels, above the Auto button): rounds, stop conditions, start.
-
-local function syncAutoPanel()
-	local o = S.autoOpts
-	for _, b in ipairs(W.autoRounds) do b:setSelected(b.value == o.rounds) end
-	for _, b in ipairs(W.autoWins) do b:setSelected(b.value == (o.stopWin or 0)) end
-	W.autoFree:setSelected(o.stopFree)
-	W.autoStart:setEnabled(S.phase == "idle" and not S.auto and supported() and not statusLine() and not inCombat())
-end
-
-function SlotFrame.toggleAutoPanel(show)
-	if show == nil then
-		show = not W.autoPanel:IsShown()
-	end
-	if show then
-		syncAutoPanel()
-		W.autoPanel:Show()
-	else
-		W.autoBelow:ClearFocus()
-		W.autoPanel:Hide()
-	end
-	refresh()
-end
-
-local function buildAutoPanel(f)
-	local Lay, c, fs = Theme.layout, Theme.colors, Theme.fontSize
-	local holder = frameAt(f, LEVEL.autoPanel)
-	W.autoPanel = holder
-	local panel = Skin.panel(holder, f, Lay.autoPanel, "overlay")
-	panel:EnableMouse(true)
-	local title = Skin.textIn(panel, f, Lay.autoTitle, "title", fs.heading, c.gold, "LEFT")
-	title:SetText(L.AUTO_TITLE)
-	local close = Skin.button(panel, "icon", Lay.autoClose[3], Lay.autoClose[4], function()
-		SlotFrame.toggleAutoPanel(false)
-	end, { icon = Theme.icons.close, iconOnly = true, iconSize = Lay.iconSize - 2 })
-	Skin.rect(close, f, Lay.autoClose)
-
-	local function label(r, text)
-		local l = Skin.textIn(panel, f, r, "label", fs.label, c.muted, "LEFT")
-		l:SetText(Skin.upper(text))
-	end
-	local function choice(r, text, onClick)
-		local b = Skin.button(panel, "toggle", r[3], r[4], onClick, { size = fs.smallButton })
-		Skin.rect(b, f, r)
-		b.label:SetText(text)
-		return b
-	end
-
-	label(Lay.autoRoundsLabel, L.AUTO_ROUNDS)
-	W.autoRounds = {}
-	for i, v in ipairs(Auto.ROUNDS) do
-		local r = Lay.autoRounds
-		local b = choice({ r[1] + (i - 1) * Lay.autoRoundsStep, r[2], r[3], r[4] }, v > 0 and fmt(v) or L.AUTO_ENDLESS,
-			function()
-				S.autoOpts.rounds = v
-				syncAutoPanel()
-			end)
-		b.value = v
-		W.autoRounds[i] = b
-	end
-	W.autoFree = choice(Lay.autoFree, L.AUTO_STOP_FREE, function()
-		S.autoOpts.stopFree = not S.autoOpts.stopFree
-		syncAutoPanel()
-	end)
-	label(Lay.autoWinLabel, L.AUTO_STOP_WIN)
-	W.autoWins = {}
-	for i, v in ipairs(Auto.WINS) do
-		local r = Lay.autoWin
-		local b = choice({ r[1] + (i - 1) * Lay.autoWinStep, r[2], r[3], r[4] },
-			v > 0 and string.format(L.AUTO_TIMES, v) or L.AUTO_OFF, function()
-				S.autoOpts.stopWin = v
-				syncAutoPanel()
-			end)
-		b.value = v
-		W.autoWins[i] = b
-	end
-	label(Lay.autoBelowLabel, L.AUTO_STOP_BELOW)
-	W.autoBelow = Skin.editBox(panel, Lay.autoBelow[3], Lay.autoBelow[4], "number", fs.lineField)
-	Skin.rect(W.autoBelow.holder, f, Lay.autoBelow)
-	Skin.call(W.autoBelow, "SetMaxLetters", 10)
-	W.autoBelow:SetScript("OnTextChanged", function(self, userInput)
-		local text = self:GetText() or ""
-		local clean = text:gsub("%D", ""):sub(1, 10)
-		if userInput and clean ~= text then
-			self:SetText(clean)
-		end
-		S.autoOpts.stopBelow = tonumber(clean)
-	end)
-	W.autoStart = Skin.button(panel, "primary", Lay.autoStart[3], Lay.autoStart[4], SlotFrame.startAuto,
-		{ size = fs.heading })
-	Skin.rect(W.autoStart, f, Lay.autoStart)
-	W.autoStart.label:SetText(L.AUTO_START)
-	local note = Skin.textIn(panel, f, Lay.autoNote, "label", fs.payNote, c.muted, "LEFT")
-	Skin.call(note, "SetWordWrap", true)
-	note:SetText(L.AUTO_NOTE)
-	holder:Hide()
-end
-
----------------------------------------------------------------------------------------------
 -- Session panel (over the reels, toggled by the header button): this session's numbers for
 -- the current mode (UI/Session.lua), reset on login and by its reset button.
 
@@ -2514,13 +2409,8 @@ local function build()
 	W.spin = Skin.button(f, "primary", Lay.spin[3], Lay.spin[4], SlotFrame.spin)
 	Skin.rect(W.spin, f, Lay.spin)
 	-- Autoplay and turbo between the stakes and the spin button.
-	W.auto = Skin.button(f, "secondary", Lay.auto[3], Lay.auto[4], function()
-		if S.auto then
-			stopAuto("click")
-		else
-			SlotFrame.toggleAutoPanel()
-		end
-	end, { size = fs.smallButton })
+	W.auto = Skin.button(f, "toggle", Lay.auto[3], Lay.auto[4], function() SlotFrame.toggleAuto() end,
+		{ size = fs.smallButton })
 	Skin.rect(W.auto, f, Lay.auto)
 	W.auto.label:SetText(L.AUTO)
 	W.turbo = Skin.button(f, "toggle", Lay.turbo[3], Lay.turbo[4], function()
@@ -2588,7 +2478,6 @@ local function build()
 		guildMode = function() return S.mode == "guild" end,
 	})
 	buildSessionPanel(f)
-	buildAutoPanel(f)
 
 	f:SetScript("OnUpdate", onUpdate)
 	f:SetScript("OnKeyDown", onKeyDown)
@@ -2598,9 +2487,9 @@ local function build()
 	end)
 	f:SetScript("OnHide", function()
 		-- Finish everything at once so a closed window never hides a pending result, and stop
-		-- every effect. Closing the window ends autoplay.
-		stopAuto("close")
+		-- every effect. A round in progress is finished and booked; then autoplay is off.
 		settle()
+		stopAuto("close")
 		stopFx()
 		updateKeyboard()
 	end)
@@ -2858,7 +2747,7 @@ local function slash(msg)
 		if not W.frame:IsShown() then
 			W.frame:Show()
 		end
-		SlotFrame.toggleAutoPanel(true)
+		SlotFrame.toggleAuto()
 	elseif msg == "guild" or msg == "solo" then
 		ensure()
 		SlotFrame.setMode(msg)

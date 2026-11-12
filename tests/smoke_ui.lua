@@ -694,116 +694,178 @@ local function scenario(locale, lean)
 	W.sessionBtn:Click()
 	assert(not W.sessionPanel:IsShown(), "session panel closed")
 
-	-- 11g. Autoplay.
-	local function runAuto(maxTicks)
+	-- 11g. Autoplay: an on/off toggle. Rounds start by themselves; an open take / gamble offer
+	-- pauses it until the player decides; it never gambles on its own.
+	if W.offerRow:IsShown() then W.take:Click() end
+	settle()
+	local spins, realSpin = 0, S.game.spin
+	S.game.spin = function(...)
+		spins = spins + 1
+		return realSpin(...)
+	end
+	local gambles, realGamble = 0, S.game.gamble
+	S.game.gamble = function(...)
+		gambles = gambles + 1
+		return realGamble(...)
+	end
+	local function untilPaused()
 		guard = 0
-		while S.auto do
+		repeat
 			stub.tick(1 / 60)
 			guard = guard + 1
-			assert(guard < (maxTicks or 20000), "autoplay never stops")
+			assert(guard < 20000, "autoplay never pauses")
+		until S.phase == "idle" and S.offer and next(S.counts) == nil
+	end
+	local function untilRound()
+		guard = 0
+		while S.phase ~= "round" do
+			stub.tick(1 / 60)
+			guard = guard + 1
+			assert(guard < 600, "autoplay did not go on")
 		end
-		settle()
 	end
-	local function startAuto(rounds, stopFree, stopWin, below)
-		W.auto:Click()
-		assert(W.autoPanel:IsShown(), "autoplay panel opens")
-		for _, b in ipairs(W.autoRounds) do if b.value == rounds then b:Click() end end
-		if (S.autoOpts.stopFree and true or false) ~= stopFree then W.autoFree:Click() end
-		for _, b in ipairs(W.autoWins) do if b.value == stopWin then b:Click() end end
-		stub.type(W.autoBelow, below and tostring(below) or "")
-		W.autoStart:Click()
-		assert(S.auto and not W.autoPanel:IsShown(), "autoplay runs, panel closed")
+	local function quiet(sec)
+		local n = spins
+		ticks(math.ceil(sec * 60))
+		return spins == n
 	end
-	local function rounds() return S.stats:get("solo").rounds end
-	-- 10 rounds, a line win among them taken automatically, never gambled.
-	W.sessionReset:Click()
-	for i = 1, 10 do
-		if i == 3 then queue(1, 16, 0, 0, 0) else queue(0, 0, 0, 0, 0) end
-	end
+	-- On while idle: the first round at once; losses roll on, the line win pauses it.
+	queue(0, 0, 0, 0, 0)
+	queue(0, 0, 0, 0, 0)
+	queue(1, 16, 0, 0, 0)
+	W.auto:Click()
+	assert(S.auto and W.auto.selected, "auto on, the toggle selected")
+	assert(S.phase == "round", "first round at once")
+	assert(spins == 1, "one spin")
+	assert(W.spin.label:GetText() == L.STOP, "the spin button keeps its label")
+	untilPaused()
+	assert(spins == 3, "two losses, then the win: " .. spins)
+	assert(S.auto and W.auto.selected and W.offerRow:IsShown(), "paused on the offer, auto still on")
+	assert(W.win:GetText() == string.format(L.AUTO_OFFER_HINT, fmt(30)), "paused hint")
+	assert(quiet(3), "no round while the offer waits")
+	-- TAKE: collected, autoplay goes on.
 	b0 = S.game.balance
-	local gambles, realGamble = 0, S.game.gamble
-	S.game.gamble = function(...) gambles = gambles + 1 return realGamble(...) end
-	startAuto(10, false, 0)
-	assert(W.spin.label:GetText() == string.format(L.AUTO_STOP, 10), "spin button: STOP AUTO (10 left)")
+	queue(1, 16, 0, 0, 0)
+	W.take:Click()
+	assert(S.game.balance == b0 and S.game:state() == "idle", "collected")
+	untilRound()
+	untilPaused()
+	-- GAMBLE, lost: goes on after the card.
+	W.gamble:Click()
+	queue(1)
+	W.red:Click()
+	queue(1, 16, 0, 0, 0)
+	untilRound()
+	assert(S.game.balance == b0 - 10 + 30 - 30 - 10 + 30, "lost gamble booked, next round booked: " .. S.game.balance)
+	untilPaused()
+	-- GAMBLE, won, then taken from the card: goes on.
+	W.gamble:Click()
+	queue(0)
+	W.red:Click()
 	guard = 0
-	while S.phase ~= "round" do
+	while S.phase ~= "pick" do
 		stub.tick(1 / 60)
 		guard = guard + 1
-		assert(guard < 120, "autoplay starts within the count-up")
+		assert(guard < 600, "card never back")
 	end
-	assert(W.spin.label:GetText() == string.format(L.AUTO_STOP, 9), "first round: 9 left")
-	assert(W.spin.enabled and not W.pills[1].enabled, "stop stays possible, stakes locked")
-	ticks(2)
-	runAuto()
-	assert(rounds() == 10, "ten rounds played: " .. rounds())
-	assert(S.game.balance == b0 - 100 + 30, "the line win was taken: " .. S.game.balance)
-	assert(gambles == 0 and S.game:state() == "idle", "never gambled")
-	S.game.gamble = nil -- back to the method
-	assert(W.win:GetText() == L.AUTO_END_DONE, "finished line")
-	assert(W.spin.label:GetText() == L.SPIN, "spin button back")
-	shownMatches("after autoplay")
-	-- Stop on free games: the round plays through, the offer stays for the player.
+	assert(quiet(2) and S.phase == "pick", "no round while the card waits")
+	W.take:Click()
+	queue(1, 16, 0, 0, 0)
+	untilRound()
+	untilPaused()
+	-- The spin button with the offer open collects and spins; a second click quick-stops and
+	-- leaves autoplay on; free games play through and the series win pauses it.
+	local n = spins
+	queue(0, 0, 0, 0, 0)
 	queue(0, 0, 0, 0, 0)
 	queueFreeRound(19)
-	startAuto(25, true, 0)
-	runAuto()
-	assert(S.result.round.free and S.auto == nil, "stopped after the free games")
-	assert(W.win:GetText() == L.AUTO_END_FREE, "free-games stop line")
-	assert(W.offerRow:IsShown(), "the series win is offered, not taken")
+	W.spin:Click()
+	assert(spins == n + 1 and S.phase == "round" and S.game:state() == "idle", "collected and spun")
+	W.spin:Click()
+	assert(S.auto and S.quick, "quick stop, autoplay stays on")
+	untilPaused()
+	assert(spins == n + 3 and S.result.round.free, "free games played through, then the series win pauses")
+	assert(gambles == 2, "only the player's two gambles")
+	-- Off during a round: the round goes on, nothing after it.
+	queue(0, 0, 0, 0, 0)
 	W.take:Click()
-	-- Stop on a single win of 20x the stake (the 3x line win does not stop it).
-	queue(1, 16, 0, 0, 0)
-	queueFreeRound(19)
-	startAuto(25, false, 20)
-	runAuto()
-	assert(S.result.win == 1185 and W.win:GetText() == L.AUTO_END_WIN, "stopped on the 118x win")
-	W.take:Click()
-	-- Stop below a typed balance.
-	for _ = 1, 5 do queue(0, 0, 0, 0, 0) end
-	local limit = S.game.balance - 25
-	startAuto(25, false, 0, limit)
-	runAuto()
-	assert(S.game.balance < limit and S.game.balance >= limit - 10, "stopped just below the limit")
-	assert(W.win:GetText() == L.AUTO_END_BELOW, "below line")
-	stub.type(W.autoBelow, "")
-	-- No funds.
+	untilRound()
+	W.auto:Click()
+	assert(not S.auto and not W.auto.selected and S.phase == "round", "off; the round goes on")
+	settle()
+	assert(quiet(3), "no further round")
+	shownMatches("after autoplay off")
+	-- On during a round: goes on after it.
+	queue(0, 0, 0, 0, 0)
+	queue(0, 0, 0, 0, 0)
+	W.spin:Click()
+	W.auto:Click()
+	n = spins
+	untilRound() -- still the manual one
+	guard = 0
+	while spins == n do
+		stub.tick(1 / 60)
+		guard = guard + 1
+		assert(guard < 1200, "autoplay did not take over after the running round")
+	end
+	W.auto:Click()
+	settle()
+	if W.offerRow:IsShown() then W.take:Click() end
+	-- No funds: off with the line.
+	settle()
 	S.game.balance = 25
-	for _ = 1, 3 do queue(0, 0, 0, 0, 0) end
-	startAuto(10, false, 0)
-	runAuto()
+	queue(0, 0, 0, 0, 0)
+	queue(0, 0, 0, 0, 0)
+	W.auto:Click()
+	guard = 0
+	while S.auto do
+		stub.tick(1 / 60)
+		guard = guard + 1
+		assert(guard < 20000, "autoplay never ends without funds")
+	end
+	settle()
 	assert(S.game.balance == 5, "two rounds, then no funds")
 	assert(W.win:GetText() == string.format(L.AUTO_END_CODE, L.NO_FUNDS), "no-funds line")
 	W.refill:Click()
-	-- A click on the spin button stops it; the running round plays on.
-	startAuto(0, false, 0)
-	assert(W.spin.label:GetText() == L.AUTO_STOP_ENDLESS, "until stopped")
-	ticks(3)
-	assert(S.phase == "round", "a round runs")
-	W.spin:Click()
-	assert(S.auto == nil and S.phase == "round", "stopped, the round goes on")
-	settle()
-	if W.offerRow:IsShown() then W.take:Click() end
-	-- Combat stops it.
-	startAuto(0, false, 0)
+	-- Combat: off, and it does not switch on in combat.
+	W.auto:Click()
 	ticks(3)
 	stub.fire("PLAYER_REGEN_DISABLED")
 	stub.combat = true
-	assert(S.auto == nil, "combat stops autoplay")
+	assert(not S.auto, "combat switches it off")
+	W.auto:Click()
+	assert(not S.auto, "not on in combat")
 	settle()
 	stub.combat = false
 	stub.fire("PLAYER_REGEN_ENABLED")
 	if W.offerRow:IsShown() then W.take:Click() end
-	-- Closing the window stops it.
-	startAuto(0, false, 0)
-	ticks(3)
-	stub.slash("/gs")
-	assert(not W.frame:IsShown() and S.auto == nil and S.phase == "idle", "closing stops and settles")
-	stub.slash("/gs", "auto")
-	assert(W.frame:IsShown() and W.autoPanel:IsShown(), "/gs auto opens the panel")
+	settle()
+	-- Closing the window mid-round: the round is finished and booked, then autoplay is off.
+	queue(1, 16, 0, 0, 0)
 	W.auto:Click()
-	assert(not W.autoPanel:IsShown(), "Auto closes it again")
+	assert(S.phase == "round" and step().kind == "spin", "a round runs")
+	local booked = S.game.balance
+	stub.slash("/gs")
+	assert(not W.frame:IsShown() and not S.auto and S.phase == "idle", "closed: settled, auto off")
+	assert(S.game.balance == booked and GuildSlotsDB.soloBalance == booked, "the round is booked and saved")
+	assert(S.game:state() == "gamble" and S.game.pending == 30, "its win is on offer")
+	assert(W.winAmount:GetText() == fmt(30), "the finished round is shown")
+	shownMatches("after closing mid-round")
+	n = spins
+	ticks(120)
+	stub.slash("/gs")
+	ticks(180)
+	assert(spins == n and not S.auto and not W.auto.selected, "no further spin after reopening")
+	W.take:Click()
+	-- /gs auto toggles it.
+	stub.slash("/gs", "auto")
+	assert(S.auto and W.auto.selected, "/gs auto on")
+	stub.slash("/gs", "auto")
+	assert(not S.auto, "/gs auto off")
+	settle()
 	if W.offerRow:IsShown() then W.take:Click() end
-	shownMatches("after autoplay stops")
+	S.game.spin, S.game.gamble = nil, nil -- back to the methods
+	shownMatches("after autoplay")
 
 	-- 11h. Bonus buy (solo): pays 64 x the stake, plays ten free games from the intro on.
 	assert(W.buy:IsShown() and W.buy.label:GetText():find(fmt(640), 1, true), "buy button with the price")

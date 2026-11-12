@@ -272,15 +272,6 @@ local function officerFlow(locale, unknown)
 		if text:find("^1|GAM|") then error("autoplay gambled") end
 		return sendAll(prefix, text, ...)
 	end
-	local function startAuto(rounds)
-		W.auto:Click()
-		assert(W.autoPanel:IsShown(), "autoplay panel")
-		for _, b in ipairs(W.autoRounds) do if b.value == rounds then b:Click() end end
-		if S.autoOpts.stopFree then W.autoFree:Click() end
-		W.autoWins[#W.autoWins]:Click() -- no win stop
-		W.autoStart:Click()
-		assert(S.auto, "autoplay runs in guild mode")
-	end
 	W.turbo:Click()
 	env.pump(120)
 	local autoSpins = env.count("SPIN")
@@ -290,15 +281,29 @@ local function officerFlow(locale, unknown)
 		if code == "wait" then waits = waits + 1 end
 		return r, code
 	end
-	startAuto(10)
-	local guard = 0
-	while S.auto do
+	-- No pause between rounds, so autoplay runs into the game's interval.
+	local pause = rawget(ns.Theme.timingTurbo, "autoPause")
+	ns.Theme.timingTurbo.autoPause = 0
+	W.auto:Click()
+	assert(S.auto and W.auto.selected, "autoplay on in guild mode")
+	-- Ten SPINs; an offer pauses it until the test takes the win.
+	local guard, paused = 0, 0
+	while env.count("SPIN") < autoSpins + 10 do
 		env.pump(1)
+		if S.phase == "idle" and S.offer and next(S.counts) == nil then
+			paused = paused + 1
+			assert(S.auto, "paused, still on")
+			W.take:Click()
+		end
 		guard = guard + 1
-		assert(guard < 60 * 60, "guild autoplay never ends")
+		assert(guard < 60 * 120, "guild autoplay stalls")
 	end
+	W.auto:Click()
+	assert(not S.auto, "off")
+	ns.Theme.timingTurbo.autoPause = pause
 	settle(env)
-	assert(env.count("SPIN") == autoSpins + 10, "ten SPINs: " .. (env.count("SPIN") - autoSpins))
+	env.pump(240)
+	assert(env.count("SPIN") == autoSpins + 10, "ten SPINs, none after switching off: " .. (env.count("SPIN") - autoSpins))
 	for i = 2, #spinTimes do
 		assert(spinTimes[i] - spinTimes[i - 1] >= 1.5 - 1e-9, "at most one SPIN per 1.5 s: " .. (spinTimes[i] - spinTimes[i - 1]))
 	end
@@ -306,23 +311,24 @@ local function officerFlow(locale, unknown)
 	gameObj.spin = nil
 	assert(W.balance:GetText() == fmt(ns, resting(session:game())), "balance matches after autoplay")
 	if W.offerRow:IsShown() then W.take:Click() end
-	-- An open payout request stops autoplay.
-	startAuto(0)
+	-- An open payout request switches it off.
+	env.pump(120)
+	W.auto:Click()
 	env.pump(10)
 	session.request = { reqId = "r1", officer = "Alice Smith", amount = 1, status = "wait_officer", time = 0 }
 	session.env.onEvent("payout", session:payout())
-	assert(S.auto == nil, "a payout request stops autoplay")
+	assert(not S.auto, "a payout request switches autoplay off")
 	settle(env)
 	session.request = nil
 	session:game():refresh()
 	session.env.onEvent("payout", nil)
 	if W.offerRow:IsShown() then W.take:Click() end
-	-- A mode switch stops it.
+	-- A mode switch switches it off.
 	env.pump(120)
-	startAuto(0)
+	W.auto:Click()
 	env.pump(5)
 	stub.slash("/gs", "solo")
-	assert(S.auto == nil and S.mode == "solo", "a mode switch stops autoplay")
+	assert(not S.auto and S.mode == "solo", "a mode switch switches autoplay off")
 	stub.slash("/gs", "guild")
 	C_ChatInfo.SendAddonMessage = sendAll
 	W.turbo:Click()

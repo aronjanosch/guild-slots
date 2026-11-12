@@ -216,7 +216,7 @@ Theme.fontSize = {
 	payHead = 12, payName = 15, payValue = 16, payNote = 11, payLine = 13,
 	section = 12, listHead = 10, listName = 14, listNumber = 15, formLabel = 13, field = 17,
 	lineField = 14, badge = 13, small = 12, cardsLabel = 10,
-	spinAuto = 17, smallButton = 12, ticker = 12, sessionRow = 13, sessionTitle = 18,
+	smallButton = 12, ticker = 12, sessionRow = 13, sessionTitle = 18,
 }
 
 ---------------------------------------------------------------------------------------------
@@ -278,19 +278,6 @@ Theme.layout = {
 	sessionTitle = { 76, 160, 170, 24 },
 	sessionReset = { 252, 160, 66, 26 },
 	sessionRow = { 76, 194, 238, 20 }, sessionRowStep = 23, sessionValueW = 120,
-	-- Autoplay panel over the reels, above the Auto button.
-	autoPanel = { 300, 196, 278, 286 },
-	autoTitle = { 316, 206, 200, 24 },
-	autoClose = { 536, 206, 30, 28 },
-	autoRoundsLabel = { 316, 238, 246, 14 },
-	autoRounds = { 316, 254, 46, 30 }, autoRoundsStep = 50,
-	autoFree = { 316, 294, 246, 30 },
-	autoWinLabel = { 316, 334, 246, 14 },
-	autoWin = { 316, 350, 58, 30 }, autoWinStep = 62,
-	autoBelowLabel = { 316, 390, 246, 14 },
-	autoBelow = { 316, 406, 112, 34 },
-	autoStart = { 440, 400, 124, 46 },
-	autoNote = { 316, 450, 248, 24 },
 	-- Guild ticker on the footer line (guild mode).
 	ticker = { 22, 616, 556, 16 },
 	tickerSlide = 40, -- an entry slides in from this far right
@@ -512,7 +499,7 @@ Theme.timing = {
 	shake = 0.4, -- window shake at each tier step
 	shakeFreq = 17, -- shake oscillation (Hz)
 	-- Autoplay.
-	autoPause = 0.6, -- pause after a round is fully shown before the next one starts
+	autoPause = 0.6, -- autoplay: pause after a round (or a take) before the next one starts
 	autoRetry = 0.25, -- retry after a "wait" refusal (guild mode: one spin per 1.5 s)
 	-- Guild ticker on the footer line.
 	tickerShow = 4.5, -- one entry is shown this long
