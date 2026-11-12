@@ -17,11 +17,12 @@ Restart the client (new files), `/console scriptErrors 1`, then `/gs`.
 - [ ] Summary banner, then back to the base reels and the take/gamble offer.
 - [ ] Big win (20x+): banner, gold flash, coin particles; the frame rate stays smooth.
 - [ ] Close the window during free games: reopening shows the settled balance and base reels; no sounds on close.
-- [ ] Paytable overlay: pays change with the stake, ten line diagrams, return rate about 95.0 %.
+- [ ] Paytable overlay: pays change with the stake, ten line diagrams, return rate about 92.0 % in solo (table T3).
 - [ ] Sound toggle silences everything; `/gs space` toggles the Space key.
-- [ ] Guild mode with a T2 line (`GSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T2`): purchase, spin, free games; see `ingame-test-m3.md` for the purchase steps.
+- [ ] Guild mode with a T3 line (`GSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T3`): purchase, spin, free games; see `ingame-test-m3.md` for the purchase steps. Paytable return rate about 92.0 %.
+- [ ] An account bought under a T2 line (`...;T=T2`) keeps playing T2: paytable about 95.0 %; switching between solo and guild mode changes the paytable's return rate, and the reels show no wrong symbols after the switch.
 - [ ] Guild with a T1 line: the window says the table is not supported and does not spin; solo still plays.
-- [ ] Officer form without a guild-info line proposes `T=T2`; stakes like 15 are rejected naming the stakes field.
+- [ ] Officer form without a guild-info line proposes `T=T3` and its note names T2 (95 %) and T3 (92 %); stakes like 15 are rejected naming the stakes field.
 - [ ] Listen to the placeholder sounds (line win, book land, free start, expansion, big win) and note replacements.
 
 Report back: Lua error text, screenshots of a line win, a free game and an expansion, whether the

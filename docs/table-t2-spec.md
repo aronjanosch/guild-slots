@@ -4,6 +4,11 @@ Adds a second table next to `T1`. `docs/core-spec.md` stays valid for everything
 defines what a spin means when the settings line says `T=T2`. `T1` keeps working unchanged
 (its vectors and tests stay).
 
+> Superseded for new purchases by `T3` (`docs/table-t3-spec.md`): the same rules with other
+> strips and a return of about 92 %. Solo plays T3 and the officer form proposes it. T2 stays
+> exactly as specified here, so accounts bought under `T=T2` keep replaying; the rules below
+> apply to both tables.
+
 ## 1. Layout
 
 - 5 reels, 3 visible rows. For reel `r` at stop `s` (0-based) the window is

@@ -13,22 +13,24 @@ Play money only. No payout claim. The house always wins.
 
 Five reels, three rows, ten fixed lines. The tome is wild and scatter; three tomes start ten free
 games with an expanding symbol. After a win you can take it or gamble it on a card, double or
-nothing, up to a set number of steps. Return rate 95.0 %, free games about every 175 rounds.
-Rules, strips and pays: [docs/table-t2-spec.md](docs/table-t2-spec.md).
+nothing, up to a set number of steps. Table T3: return rate 92.0 %, free games about every 175
+rounds. Rules and pays: [docs/table-t2-spec.md](docs/table-t2-spec.md); the T3 strips:
+[docs/table-t3-spec.md](docs/table-t3-spec.md). Solo plays T3; a guild account plays the table
+of its purchase line (T2, 95.0 %, stays playable for accounts bought under it).
 
 `/gs` opens the window. `/gs demo` makes the next solo spin a free-game round.
 
 Next to the spin button: **Auto** (on/off: rounds roll by themselves and pause on a win for take
 or gamble) and **Turbo** (shorter
 rounds, `/gs turbo`). The coin button in the header shows this session's numbers. In solo mode a
-free-game series can be bought for 64 × the stake (return about 94 %). In guild mode the footer
+free-game series can be bought for 64 × the stake (return about 93 %). In guild mode the footer
 line shows the guild's big wins and free games (`/gs ticker` turns it off). `/gs fx` switches
 to fewer effects.
 
 ## Guild mode
 
 1. An officer pastes one settings line into the guild info, for example
-   `GSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T2` (the officer window builds it).
+   `GSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T3` (the officer window builds it).
 2. **Purchase.** The officer grants tokens. The clients run a commit / nonce / reveal exchange; the
    result is a secret key that decides all spins of that purchase. Neither side can choose it alone.
 3. **Spins.** Each spin is one entry in the player's account, a hash chain. The spin number, stake
@@ -70,7 +72,8 @@ design/            the visual design: parts, state images, measurements
 docs/              specs and in-game checklists
 ```
 
-Specs: [core](docs/core-spec.md), [table T2](docs/table-t2-spec.md), [guild mode](docs/guild-spec.md),
+Specs: [core](docs/core-spec.md), [table T2](docs/table-t2-spec.md), [table T3](docs/table-t3-spec.md),
+[guild mode](docs/guild-spec.md),
 [payout](docs/payout-spec.md).
 
 ## Develop
