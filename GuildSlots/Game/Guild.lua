@@ -453,7 +453,7 @@ function Session:payout()
 	end
 	return {
 		reqId = r.reqId, officer = r.officer, amount = r.amount, status = r.status, sent = r.sent,
-		total = r.total, code = r.code,
+		total = r.total, code = r.code, time = r.time,
 	}
 end
 
