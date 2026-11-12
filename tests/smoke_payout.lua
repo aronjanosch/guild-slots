@@ -156,6 +156,8 @@ local function payoutFlow(locale, unknown)
 		"own name listed with the self test")
 	assert(W.coOfficerRows[1].selected, "first officer selected")
 	assert(W.coNote:GetText() == L.PO_NOTE, "pays-by-hand note")
+	assert(W.coRate:IsShown() and W.coRate:GetText() == string.format(L.PO_RATE, ns.Coins.tokensText(game.balance, 1000),
+		fmt(ns, 1000)), "gold equivalent at the guild rate")
 	-- Digits only; 0 and more than the balance are refused.
 	stub.type(W.coAmount, "12a3")
 	assert(W.coAmount:GetText() == "123", "digits only")
@@ -239,6 +241,12 @@ local function payoutFlow(locale, unknown)
 	assert(O.payBalance:GetText() == fmt(ns, before), "calculated balance")
 	assert(O.payAmount:GetText() == fmt(ns, 200), "requested amount")
 	assert(O.payAfter:GetText() == fmt(ns, before - 200), "balance after")
+	-- 200 tokens at the guild rate X = 1000: 2000 copper.
+	assert(O.payGold:GetText() == string.format(L.PAY_GOLD, fmt(ns, 200), "20s"), "gold equivalent in the review: "
+		.. tostring(O.payGold:GetText()))
+	assert(ns.Payouts.goldText(200) == "20s", "the question uses the same text")
+	-- The header button counts the open request.
+	assert(W.officerBadge:IsShown() and W.officerBadge.text:GetText() == "1", "header badge counts the request")
 	assert(O.payNoFindings:IsShown(), "no findings")
 	assert(O.payLuckRows[1].badge.text:GetText() == L.LUCK_LOW, "too little data for the luck index")
 	local luck = session:requests()[1].report.luck

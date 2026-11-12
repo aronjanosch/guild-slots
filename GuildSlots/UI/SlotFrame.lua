@@ -375,6 +375,14 @@ local function isOfficer()
 	return ns.Main and ns.Main.isOfficer() or false
 end
 
+-- Rects of the bottom row, reused.
+local rowRects = { {}, {}, {} }
+local function rowRect(i, x, w)
+	local r, area = rowRects[i], Theme.layout.row
+	r[1], r[2], r[3], r[4] = x, area[2], w, area[4]
+	return r
+end
+
 -- Buttons, displays and overlays for the current phase.
 local function refresh()
 	local game, phase = S.game, S.phase
@@ -429,13 +437,21 @@ local function refresh()
 	W.sound:setIcon(db.sound and Theme.icons.soundOn or Theme.icons.soundOff)
 	W.sessionBtn:setSelected(W.sessionPanel:IsShown())
 
-	-- Secondary row: paytable, officer, refill (solo) or cash out (guild), bonus buy (solo), or
-	-- the balance (free games). The shown buttons take the slots from the left.
+	-- Officer button in the header, officers only, with the count of open payout requests and
+	-- guild bank deposits.
 	local officer = isOfficer()
+	W.officer:SetShown(officer)
+	if officer then
+		local open = (ns.Payouts and ns.Payouts.openCount(ns.Main.session()) or 0) + ns.Bank.openCount()
+		W.officerBadge:SetShown(open > 0)
+		W.officerBadge:setStatus("statusOpen", "dark", tostring(open))
+	end
+
+	-- Secondary row: paytable, refill (solo) or cash out (guild), bonus buy (solo), sharing the
+	-- row evenly; during free games the paytable and the balance.
 	local solo = S.mode == "solo" and not S.free
 	local guild = S.mode == "guild" and not S.free
 	local buy = solo and type(game.buy) == "function" and supported() and shownTable().buyPrice ~= nil
-	W.officer:SetShown(officer)
 	W.refill:SetShown(solo)
 	W.refill:setEnabled(not busy and not auto)
 	W.cashout:SetShown(guild)
@@ -444,18 +460,24 @@ local function refresh()
 	W.buy:SetShown(buy)
 	W.footBalance:SetShown(S.free and true or false)
 	local row = W.rowList
-	row[1], row[2], row[3], row[4] = W.payToggle, nil, nil, nil
-	if officer then row[#row + 1] = W.officer end
+	row[1], row[2], row[3] = W.payToggle, nil, nil
 	if solo then row[#row + 1] = W.refill end
 	if guild then row[#row + 1] = W.cashout end
 	if buy then row[#row + 1] = W.buy end
-	local slots = #row > 3 and Lay.row4 or Lay.row3
-	for i, b in ipairs(row) do
-		Skin.rect(b, W.frame, slots[i])
+	local area, gap, n = Lay.row, Lay.rowGap, #row
+	local w = math.floor((area[3] - (n - 1) * gap) / n)
+	if n == 1 then
+		Skin.rect(W.payToggle, W.frame, Lay.paytable)
+	else
+		for i, b in ipairs(row) do
+			local x = area[1] + (i - 1) * (w + gap)
+			-- the last button takes the rounding rest so the row ends on the window's edge
+			local bw = i == n and area[1] + area[3] - x or w
+			Skin.rect(b, W.frame, rowRect(i, x, bw))
+		end
 	end
 	if buy then
 		local price = shownTable().buyPrice * game.stake
-		local w = slots[#row][3]
 		W.buy.label:SetText(string.format(w < Lay.buyWide and L.BUY_SHORT or L.BUY, fmt(price)))
 		W.buy:setEnabled(phase == "idle" and not auto and not status)
 	end
@@ -2392,6 +2414,27 @@ local function build()
 	end)
 	W.close = iconButton(f, Lay.close, Theme.icons.close, function() f:Hide() end)
 	W.sessionBtn = iconButton(f, Lay.session, Theme.icons.coin, function() SlotFrame.toggleSession() end)
+	-- Officer view: officers only (refresh), with a count badge and a tooltip.
+	W.officer = iconButton(f, Lay.officer, Theme.icons.officer, function()
+		if ns.OfficerFrame then ns.OfficerFrame.toggle() end
+	end)
+	W.officerBadge = Skin.badge(W.officer, W.officer, Lay.officerBadge, fs.small)
+	W.officerBadge:Hide()
+	W.officer:Hide()
+	W.officer:HookScript("OnEnter", function(self)
+		local tip = GameTooltip
+		if type(tip) == "table" and type(tip.SetOwner) == "function" and type(tip.SetText) == "function" then
+			pcall(tip.SetOwner, tip, self, Lay.officerTooltip)
+			pcall(tip.SetText, tip, L.OFFICER_TITLE)
+			pcall(tip.Show, tip)
+		end
+	end)
+	W.officer:HookScript("OnLeave", function()
+		local tip = GameTooltip
+		if type(tip) == "table" and type(tip.Hide) == "function" then
+			pcall(tip.Hide, tip)
+		end
+	end)
 	local divAnchor = CreateFrame("Frame", nil, f)
 	Skin.rect(divAnchor, f, Lay.divider)
 	Skin.nine(f, divAnchor, Theme.slices.divider, "ARTWORK")
@@ -2451,9 +2494,6 @@ local function build()
 			refresh()
 		end
 		SlotFrame.layout()
-	end)
-	W.officer = secondary(f, Lay.officer, Theme.icons.officer, L.OFFICER, function()
-		if ns.OfficerFrame then ns.OfficerFrame.toggle() end
 	end)
 	W.refill = secondary(f, Lay.refill, Theme.icons.coin, L.REFILL, SlotFrame.refill)
 	W.cashout = secondary(f, Lay.refill, Theme.icons.coin, L.CASHOUT, SlotFrame.cashout)
@@ -2685,6 +2725,8 @@ local function onMainEvent(name, data)
 			idleText()
 		end
 		refresh()
+	elseif name == "request" then
+		refresh() -- the count on the officer button
 	end
 end
 
@@ -2713,6 +2755,9 @@ local function ensure()
 	if not S.subscribed and ns.Main then
 		S.subscribed = true
 		ns.Main.subscribe(onMainEvent)
+		ns.Bank.onChange(function()
+			if W.frame then refresh() end
+		end)
 	end
 	if not W.frame then
 		useMode(wantedMode())
