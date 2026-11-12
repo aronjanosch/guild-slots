@@ -217,7 +217,9 @@ game:status()     -> "ok" | "no_account" | "no_funds" | "level" | "broken"
   `send` and change nothing. Then apply and store the entry. The result table has the fields of
   Solo's spin result (`kind`, `stake`, `stops`, `symbols`, `window`, `multiplier`, `win`, `balance`,
   `pending`, `canGamble`, `winReels`, `anticipation`) plus `n`, filled from the `info` that
-  `Ledger.apply` returns.
+  `Ledger.apply` returns. For a lines table (T2) the result is `kind`, `n`, `stake`, `win`,
+  `balance`, `pending`, `canGamble` and `round = info.round` (docs/table-t2-spec.md section 6),
+  without the T1 fields; Solo's T2 result has the same shape without `n`.
 - A gamble step: entry `{ type = "G", n = state.n, g = state.g + 1, A = 0, status = "ok", contribs = "" }`,
   message `GAM` with `amount = state.pending` before the step. Result as Solo's gamble result
   (`kind`, `won`, `step`, `amount`, `pending`, `balance`, `canGamble`).
