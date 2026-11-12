@@ -159,3 +159,21 @@ with at least 200 rounds, among them rounds with free games, a retrigger, an exp
 capped win, five-of-a-kind through wilds and a scatter win without free games (searched for by
 trying spin numbers), and at least two T2 accounts with purchases, spins and gamble steps.
 `tests/test_vectors_t2.lua` compares `Engine.round` field by field and replays the accounts.
+
+## Clarifications
+
+Readings fixed after the Lua implementation and the Python reference were compared; the vectors
+pin them.
+
+- `retrigger` is true whenever a free game shows three or more B, also when the 50-game limit
+  drops the award. `free.awarded` is the number of free games played.
+- The free-game index `i` counts every game of the round across retriggers. `X` is drawn once per
+  round and stays through retriggers.
+- `scatter.count` is the real number of B (not limited to 5); `scatter` and `lines` are always
+  present, `free` and `expand` only when they apply.
+- A line pays only for its full prefix count: `K K` (count 2, no pay) wins nothing. Leading B count
+  toward the prefix. The expansion win is added on top of line wins, including those of `X`.
+- The cap applies to `round.win` only; `base`, `free.win` and the game wins stay uncapped.
+- Measured statistics (no cap): rtp 0.949991 (exact; 0.6063 base game, 0.3437 free games),
+  free games in 1 of 175 rounds (exact), hit 0.3241, variance 62.91 (10^9 simulated rounds,
+  standard error 0.22). Largest simulated round win: 5517 times the stake.

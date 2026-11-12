@@ -107,8 +107,8 @@ local STATS_CACHE = {}
 -- (docs/table-t2-spec.md section 7). They come from the Python reference in tools/ref; the game
 -- cannot enumerate them. The same values serve every stake and cap.
 local LINES_STATS = {
-	-- TODO(coordinator): replace with the values from tools/ref
-	T2 = { rtp = 0.95, hit = 0.3, variance = 400, freeRate = 0.006 },
+	-- rtp and freeRate exact, hit and variance from 10^9 simulated rounds (tools/ref/t2_stats.py).
+	T2 = { rtp = 0.9499910643248847, hit = 0.324100448, variance = 62.9092862849537, freeRate = 0.005714817646609068 },
 }
 
 local function isStop(s)
