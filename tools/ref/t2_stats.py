@@ -1,15 +1,20 @@
-"""Statistics of table T2 for the multiplier `round win / stake`, no cap (docs/table-t2-spec.md, section 7).
+"""Statistics of a lines table (T2, T3) for the multiplier `round win / stake`, no cap
+(docs/table-t2-spec.md, section 7).
 
-  python3 tools/ref/t2_stats.py [rounds] [seed]      default 1000000000 rounds, seed 20260101
+  python3 tools/ref/t2_stats.py [rounds] [seed] [table]   default 1000000000 rounds, seed 20260101, T2
 
 Exact parts (Fractions, no simulation):
   - rtp: line wins (symbol distribution per line position), scatter and free-game award (per-reel book
     count distribution), free games (expected multiplier of one free game, averaged over the nine
     expanding symbols, times the expected number of free games with retriggers and the 50-game limit),
-  - freeRate: probability of three or more books in the base window.
+  - freeRate: probability of three or more books in the base window,
+  - bought: expected win of a bought free-game series (Wald's identity: expected number of games
+    times the expected free game; the expanding symbol does not change the number of games) and its
+    return at the table's buy price.
 Simulated parts (numpy, plain random stops, chunked, fixed seed):
-  - hit, variance (and rtp, freeRate as cross-checks), each with its standard error.
-The result is written to tools/ref/t2_stats.json, which gen_vectors.py reads.
+  - hit, variance (and rtp, freeRate as cross-checks), each with its standard error, the largest win.
+The result is written to tools/ref/<table>_stats.json (t2_stats.json, t3_stats.json), which
+gen_vectors.py reads. Every function takes the table (default T2): one code path for every lines table.
 """
 import json
 import math
@@ -24,8 +29,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gsref as R  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-JSON_PATH = os.path.join(HERE, "t2_stats.json")
 SYMS = "LCDMWTGSKB"  # numeric code = index; B = 9
+# Price of a bought series in multiples of the stake, as in GuildSlots/Core/Tables.lua (`buyPrice`).
+BUY_PRICE = {"T2": 64, "T3": 64}
+
+
+def json_path(tid):
+    return os.path.join(HERE, "%s_stats.json" % tid.lower())
+
+
+def _tbl(tbl):
+    """None -> T2; a table id -> that table; a table dict as it is."""
+    if tbl is None:
+        tbl = "T2"
+    return R.Tables.get(tbl) if isinstance(tbl, str) else tbl
 
 
 # ---------------------------------------------------------------- exact
@@ -100,8 +117,8 @@ def _expected_games(pf):
     return total
 
 
-def exact():
-    tbl = R.Tables.get("T2")
+def exact(tbl=None):
+    tbl = _tbl(tbl)
     base, free = tbl["reels"], tbl["freeReels"]
     bd, fd = _book_dist(base), _book_dist(free)
     p_free = sum(p for b, p in bd.items() if b >= 3)
@@ -114,14 +131,16 @@ def exact():
     rtp = base_mult + p_free * n_games * game
     return {"rtp": rtp, "freeRate": p_free, "base": base_mult, "freeGame": game, "freeGameNoExpand": game_nox,
             "expandBySymbol": dict(zip(R.T2_EXPAND, exp_x)), "pFreeRetrigger": pf, "expectedGames": n_games,
-            "rtpBase": base_mult, "rtpFree": p_free * n_games * game}
+            "rtpBase": base_mult, "rtpFree": p_free * n_games * game,
+            # a bought series starts with the same award: worth E[games] x E[free game] (Wald)
+            "boughtEV": n_games * game}
 
 
 # ---------------------------------------------------------------- simulation
 
-def _tables():
+def _tables(tbl=None):
     import numpy as np
-    tbl = R.Tables.get("T2")
+    tbl = _tbl(tbl)
     code = {c: i for i, c in enumerate(SYMS)}
     pay = np.zeros(10 ** 5, dtype=np.int32)
     for idx in range(10 ** 5):
@@ -204,12 +223,12 @@ def _chunk(T, rng, m):
     return w10.astype("float64") / 10.0, int(len(trig)), games
 
 
-def simulate(rounds=200_000_000, seed=20260101, chunk=2_000_000, mu0=None, progress=True):
+def simulate(rounds=200_000_000, seed=20260101, chunk=2_000_000, mu0=None, progress=True, tbl=None):
     import numpy as np
-    T = _tables()
+    T = _tables(tbl)
     rng = np.random.default_rng(seed)
     if mu0 is None:
-        mu0 = float(exact()["rtp"])
+        mu0 = float(exact(tbl)["rtp"])
     s = [0.0] * 5  # sums of d^k, k = 1..4 (index 1..4)
     hits = trig = games = done = 0
     maxw = 0.0
@@ -251,14 +270,19 @@ def simulate(rounds=200_000_000, seed=20260101, chunk=2_000_000, mu0=None, progr
 def main():
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 1_000_000_000
     seed = int(sys.argv[2]) if len(sys.argv) > 2 else 20260101
-    ex = exact()
+    tid = sys.argv[3] if len(sys.argv) > 3 else "T2"
+    tbl = _tbl(tid)
+    ex = exact(tbl)
     print("exact rtp      = %.15f   (a fraction with a %d-digit denominator)" % (
         float(ex["rtp"]), len(str(ex["rtp"].denominator))))
     print("  base game    = %.9f   free part = %.9f" % (float(ex["rtpBase"]), float(ex["rtpFree"])))
     print("  freeRate     = %s = %.12f" % (ex["freeRate"], float(ex["freeRate"])))
     print("  E[games]     = %.9f   E[free game] = %.9f   P(retrigger) = %.9f" % (
         float(ex["expectedGames"]), float(ex["freeGame"]), float(ex["pFreeRetrigger"])))
-    sim = simulate(rounds, seed, mu0=float(ex["rtp"]))
+    price = BUY_PRICE[tid]
+    print("  bought series = %.9f x stake   return at price %d = %.6f" % (
+        float(ex["boughtEV"]), price, float(ex["boughtEV"]) / price))
+    sim = simulate(rounds, seed, mu0=float(ex["rtp"]), tbl=tbl)
     for k, v in sim.items():
         print("sim %-18s %s" % (k, v))
     z = (sim["rtp"] - float(ex["rtp"])) / sim["rtpSE"]
@@ -270,8 +294,12 @@ def main():
            "se": {"rtp": sim["rtpSE"], "hit": sim["hitSE"], "variance": sim["varianceSE"],
                   "freeRate": sim["freeRateSE"]},
            "sim": sim, "zRtp": z, "zFreeRate": zf}
+    if tid != "T2":
+        # t2_stats.json predates these fields; it stays as it was
+        res.update(table=tid, rtpBase=float(ex["rtpBase"]), rtpFree=float(ex["rtpFree"]),
+                   boughtEV=float(ex["boughtEV"]), buyPrice=price, buyReturn=float(ex["boughtEV"]) / price)
     if rounds >= 200_000_000:
-        with open(JSON_PATH, "w") as f:
+        with open(json_path(tid), "w") as f:
             json.dump(res, f, indent=1, sort_keys=True)
             f.write("\n")
     return res

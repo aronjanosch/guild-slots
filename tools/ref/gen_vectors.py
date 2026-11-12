@@ -868,7 +868,7 @@ T2_RARE = [
 
 def t2_search(name, pred, want, min_books, tbl, books, limit=SEARCH_LIMIT):
     """Try spin numbers 1.. with a fixed key until `want` rounds satisfy pred; -> (K, [n..], tries)."""
-    K = R.sha_hex("gsvec|t2|" + name)
+    K = R.sha_hex("gsvec|%s|%s" % (tbl["id"].lower(), name))
     found = []
     tries = 0
     for n in range(1, limit):
@@ -885,8 +885,8 @@ def t2_search(name, pred, want, min_books, tbl, books, limit=SEARCH_LIMIT):
     return K, found, tries
 
 
-def build_t2_rounds():
-    tbl = R.Tables.get("T2")
+def build_t2_rounds(tid="T2"):
+    tbl = R.Tables.get(tid)
     books = _t2_books(tbl)
     rounds = []
     report = {}
@@ -912,7 +912,7 @@ def build_t2_rounds():
             for cap in (full // 2, full - 1, full, full + 1):
                 add(K, n, "", stake, cap)
     # bulk: varied keys, stakes, contributions, a few caps
-    r = Rng("t2bulk")
+    r = Rng(tid.lower() + "bulk")
     i = 0
     while len(rounds) < 240:
         K = r.hex(32)
@@ -925,23 +925,28 @@ def build_t2_rounds():
     return rounds, report
 
 
-def build_t2_account(t, which):
-    r = Rng("t2acc%d%d" % (which, t))
+# Per lines table: the guild names of its two vector accounts (T2's are pinned by vectors_t2.lua).
+ACCOUNT_GUILDS = {"T2": ("Gilde Fünf-Walzen", "Gilde Ω-T2"), "T3": ("Gilde Zweiundneunzig", "Gilde Ω-T3")}
+
+
+def build_t2_account(t, which, tid="T2"):
+    pre = tid.lower()
+    r = Rng("%sacc%d%d" % (pre, which, t))
     feats = set()
     if which == 0:
-        ac = Acct("t2a", guild="Gilde Fünf-Walzen", player="Sören Ähre")
-        ac.add(mk_buy(r, 5000, T2_LINE))
+        ac = Acct(pre + "a", guild=ACCOUNT_GUILDS[tid][0], player="Sören Ähre")
+        ac.add(mk_buy(r, 5000, T2_LINE.replace("T=T2", "T=" + tid)))
         E = [10, 50, 100]
         rounds_n = 70
     else:
-        ac = Acct("t2b", guild="Gilde Ω-T2", player="Zoë")
-        ac.add(mk_buy(r, 40000, "GSLOTS1;L=1;W=2;R=1;E=10,100,1000;G=2;C=3000;T=T2;X=500", officer=OFFICER2))
+        ac = Acct(pre + "b", guild=ACCOUNT_GUILDS[tid][1], player="Zoë")
+        ac.add(mk_buy(r, 40000, "GSLOTS1;L=1;W=2;R=1;E=10,100,1000;G=2;C=3000;T=%s;X=500" % tid, officer=OFFICER2))
         E = [10, 100, 1000]
         rounds_n = 50
     for i in range(rounds_n):
         if which == 0 and i == 30:
             ac.add(mk_pay(r, ac.st.balance // 3, ac.st.balance, time=T0 + 100))
-            ac.add(mk_buy(r, 1500, "GSLOTS1;L=0;E=10,50,100;G=3;C=800;T=T2", officer=OFFICER2, time=T0 + 200))
+            ac.add(mk_buy(r, 1500, "GSLOTS1;L=0;E=10,50,100;G=3;C=800;T=" + tid, officer=OFFICER2, time=T0 + 200))
             feats.add("second_buy")
         stake = E[r.int(3)] if which == 0 else E[[0, 1, 1, 2, 0][r.int(5)]]
         if ac.st.balance < stake:
@@ -967,46 +972,50 @@ def t2_account_record(ac):
             "head": ac.st.head}
 
 
-def build_t2_invalid():
+def build_t2_invalid(tid="T2"):
     out = []
-    r = Rng("t2inv")
+    pre = tid.lower()
+    r = Rng(pre + "inv")
     base = {"guild": GUILD, "player": PLAYER}
     for line, note in (("GSLOTS1;E=10,15;T=T2", "T2 with a stake that is not a multiple of 10"),
                        ("GSLOTS1;E=5;T=T2", "T2 with stake 5"), ("GSLOTS1;T=T2;E=10,20,35", "T before E, same rule")):
+        line, note = line.replace("T2", tid), note.replace("T2", tid)
         out.append(dict(base, entries=[R.encode(mk_buy(r, 1000, line))], index=1, code="bad_settings", note=note))
-    ac, _ = fresh(T2_LINE, tokens=1000, seed_label="t2inv")
+    ac, _ = fresh(T2_LINE.replace("T=T2", "T=" + tid), tokens=1000, seed_label=pre + "inv")
     for stake, note in ((5, "stake 5 is not in E"), (20, "stake 20 is not in E (E = 10,50,100)"),
                         (15, "stake 15 is not in E")):
         prefix_case(out, ac, S_(1, stake), "bad_stake", note)
-    ac2, _ = fresh("GSLOTS1;E=10,20;T=T2;G=0", tokens=1000, seed_label="t2inv2")
+    ac2, _ = fresh("GSLOTS1;E=10,20;T=%s;G=0" % tid, tokens=1000, seed_label=pre + "inv2")
     prefix_case(out, ac2, S_(1, 30), "bad_stake", "stake 30 is a multiple of 10 but not in E")
-    prefix_case(out, ac2, S_(1, 20, A=2), "bad_contribs", "level 0: A must be 0, also for T2")
+    prefix_case(out, ac2, S_(1, 20, A=2), "bad_contribs", "level 0: A must be 0, also for " + tid)
     return out
 
 
-def load_t2_stats():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "t2_stats.json")
+def load_t2_stats(tid="T2"):
+    import t2_stats
+    path = t2_stats.json_path(tid)
     if not os.path.exists(path):
-        raise SystemExit("tools/ref/t2_stats.json missing: run python3 tools/ref/t2_stats.py first")
+        raise SystemExit("%s missing: run python3 tools/ref/t2_stats.py 1000000000 20260101 %s first" % (path, tid))
     with open(path) as f:
         j = json.load(f)
     return {"rtp": j["rtp"], "hit": j["hit"], "variance": j["variance"], "freeRate": j["freeRate"]}, j
 
 
-def build_t2_all():
-    stats, j = load_t2_stats()
-    rounds, report = build_t2_rounds()
+def build_t2_all(tid="T2"):
+    """Vectors of a lines table (T2, T3): rounds, two accounts, invalid cases, statistics."""
+    stats, j = load_t2_stats(tid)
+    rounds, report = build_t2_rounds(tid)
     assert len(rounds) >= 200
     accounts = []
     for which in (0, 1):
         for t in range(3000):
-            ac, _ = build_t2_account(t, which)
+            ac, _ = build_t2_account(t, which, tid)
             if ac is not None:
                 accounts.append(t2_account_record(ac))
                 break
         else:
-            raise RuntimeError("no T2 account %d" % which)
-    invalid = build_t2_invalid()
+            raise RuntimeError("no %s account %d" % (tid, which))
+    invalid = build_t2_invalid(tid)
     for c in invalid:
         st, code, idx = R.replay(c["guild"], c["player"], c["entries"])
         assert st is None and (code, idx) == (c["code"], c["index"]), (c, code, idx)
@@ -1017,9 +1026,9 @@ def build_t2_all():
 
 
 T2_HEADER = """-- Generated by tools/ref/gen_vectors.py from the Python reference. Do not edit.
--- stats: rtp and freeRate exact (tools/ref/t2_stats.py); hit and variance simulated over %(rounds)d rounds,
+-- stats: rtp and freeRate exact (%(script)s); hit and variance simulated over %(rounds)d rounds,
 --   standard error hit %(hit_se).3g, variance %(var_se).3g.
--- rounds[*]: K (64 hex), n, contribs, stake, cap, round = Engine.round(K, n, contribs, T2, stake, cap).
+-- rounds[*]: K (64 hex), n, contribs, stake, cap, round = Engine.round(K, n, contribs, %(tid)s, stake, cap).
 -- accounts[*]: replay(guild, player, entries) gives `balance` and the full 64-hex `head`.
 -- invalid[*]: replay must fail at `index` with `code`.
 """
@@ -1102,14 +1111,17 @@ def main():
     print("ledger:", {k: len(v) for k, v in L.items()})
     if len(sys.argv) > 1:
         return  # an explicit output path writes only the T1 vectors
-    out2 = os.path.join(here, "..", "..", "tests", "vectors_t2.lua")
-    d2, report, j = build_t2_all()
-    hdr = T2_HEADER % {"rounds": j["sim"]["rounds"], "hit_se": j["se"]["hit"], "var_se": j["se"]["variance"]}
-    with open(out2, "wb") as f:
-        f.write((hdr + "return " + lua(d2) + "\n").encode("utf-8"))
-    print("t2:", {k: len(v) for k, v in d2.items()})
-    for k, (got, want, tries) in report.items():
-        print("  rare %-16s found %d of %d (tried %d)" % (k, got, want, tries))
+    for tid in ("T2", "T3"):
+        out2 = os.path.join(here, "..", "..", "tests", "vectors_%s.lua" % tid.lower())
+        d2, report, j = build_t2_all(tid)
+        script = "tools/ref/t2_stats.py" + ("" if tid == "T2" else ", table " + tid)
+        hdr = T2_HEADER % {"rounds": j["sim"]["rounds"], "hit_se": j["se"]["hit"], "var_se": j["se"]["variance"],
+                           "script": script, "tid": tid}
+        with open(out2, "wb") as f:
+            f.write((hdr + "return " + lua(d2) + "\n").encode("utf-8"))
+        print("%s:" % tid.lower(), {k: len(v) for k, v in d2.items()})
+        for k, (got, want, tries) in report.items():
+            print("  rare %-16s found %d of %d (tried %d)" % (k, got, want, tries))
 
 
 if __name__ == "__main__":
