@@ -87,6 +87,9 @@ local function newLinesTable()
 		-- Display order, best first.
 		order = { "L", "C", "D", "M", "W", "T", "G", "S", "K", "B" },
 		maxFree = 50,
+		-- Price of a bought free-game series in multiples of the stake (solo only; a series is
+		-- worth about 60.1 x the stake, so the return of a purchase is about 94 %).
+		buyPrice = 64,
 	}
 end
 
@@ -288,6 +291,34 @@ Tables.evaluateLines = evaluateLines
 --                     when free games are awarded
 --   draw.free(i)   -> { s1..s5 } stops of the i-th free game of the round (i counts across retriggers)
 -- No input checks: callers pass a valid table, stake and cap. Returns the round without `n`.
+-- One free-game series (spec section 5): `award` games with the expanding symbol drawn once,
+-- retriggers add `award` more, at most tbl.maxFree games. Shared by playRound and playBought so
+-- the rules cannot drift apart. Returns { symbol, awarded, win, games }.
+local function playFree(tbl, stake, draw)
+	local trigger, award, limit = tbl.scatter.trigger, tbl.scatter.games, tbl.maxFree
+	local X = tbl.expanding[draw.symbol() + 1]
+	local freeStrips, games, freeWin = tbl.freeReels, {}, 0
+	local left, played = award, 0
+	while left > 0 and played < limit do
+		played, left = played + 1, left - 1
+		local game = evaluateLines(tbl, freeStrips, draw.free(played), stake, X)
+		game.retrigger = game.scatter.count >= trigger
+		if game.retrigger then
+			left = left + award
+		end
+		games[played] = game
+		freeWin = freeWin + game.win
+	end
+	return { symbol = X, awarded = played, win = freeWin, games = games }
+end
+
+local function capped(win, cap)
+	if cap and cap > 0 and win > cap then
+		return cap
+	end
+	return win
+end
+
 function Tables.playRound(tbl, stake, cap, draw)
 	local strips = tbl.reels
 	local stops = draw.base()
@@ -298,29 +329,27 @@ function Tables.playRound(tbl, stake, cap, draw)
 		base = base.win,
 	}
 	local win = base.win
-	local trigger, award, limit = tbl.scatter.trigger, tbl.scatter.games, tbl.maxFree
-	if base.scatter.count >= trigger then
-		local X = tbl.expanding[draw.symbol() + 1]
-		local freeStrips, games, freeWin = tbl.freeReels, {}, 0
-		local left, played = award, 0
-		while left > 0 and played < limit do
-			played, left = played + 1, left - 1
-			local game = evaluateLines(tbl, freeStrips, draw.free(played), stake, X)
-			game.retrigger = game.scatter.count >= trigger
-			if game.retrigger then
-				left = left + award
-			end
-			games[played] = game
-			freeWin = freeWin + game.win
-		end
-		round.free = { symbol = X, awarded = played, win = freeWin, games = games }
-		win = win + freeWin
+	if base.scatter.count >= tbl.scatter.trigger then
+		round.free = playFree(tbl, stake, draw)
+		win = win + round.free.win
 	end
-	if cap and cap > 0 and win > cap then
-		win = cap
-	end
-	round.win = win
+	round.win = capped(win, cap)
 	return round
+end
+
+-- A bought free-game series (docs/table-t2-spec.md, "Bought free games (solo only)"): no base
+-- game, straight into tbl.scatter.games free games with the normal rules. The round has the
+-- shape of playRound's with base = 0, no lines, no scatter win, bought = true and
+-- cost = tbl.buyPrice * stake; stops and window are nil (no base window to show). Uses only
+-- draw.symbol() and draw.free(i). Pure; no input checks.
+function Tables.playBought(tbl, stake, cap, draw)
+	local free = playFree(tbl, stake, draw)
+	return {
+		kind = "lines", stake = stake, lineBet = stake / tbl.lineCount,
+		lines = {}, scatter = { count = 0, win = 0 }, base = 0,
+		bought = true, cost = tbl.buyPrice * stake,
+		free = free, win = capped(free.win, cap),
+	}
 end
 
 local function isLinesTable(tbl)

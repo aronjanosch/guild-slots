@@ -130,6 +130,51 @@ function Game:spinRound(stake)
 	}
 end
 
+-- Buys a free-game series (docs/table-t2-spec.md, "Bought free games (solo only)"): pays
+-- tbl.buyPrice x the stake and plays tbl.scatter.games free games with a random expanding
+-- symbol, rng order as in a round (symbol, then the stops of each free game). Solo only: the
+-- guild game has no buy(). At security level 0 a player's client knows its own purchase key, so
+-- it could look ahead and buy only the good series; that stays closed until witnesses exist.
+-- Codes: busy (a take / gamble offer is open), no_funds, unsupported (not a lines table).
+function Game:buy()
+	local tbl, rng = self.tbl, self.rng
+	if tbl.kind ~= "lines" or not tbl.buyPrice then
+		return nil, "unsupported"
+	end
+	if self:state() ~= "idle" then
+		return nil, "busy"
+	end
+	local stake = self.stake
+	local cost = tbl.buyPrice * stake
+	if self.balance < cost then
+		return nil, "no_funds"
+	end
+	local round = ns.Tables.playBought(tbl, stake, self.cap, {
+		symbol = function() return rng(#tbl.expanding) end,
+		free = function()
+			local stops = {}
+			for r = 1, #tbl.freeReels do
+				stops[r] = rng(#tbl.freeReels[r])
+			end
+			return stops
+		end,
+	})
+	local win = round.win
+	self.balance = self.balance - cost + win
+	self.step = 0
+	self.pending = (win > 0 and self.maxGamble > 0) and win or 0
+	return {
+		kind = "buy",
+		stake = stake,
+		cost = cost,
+		win = win,
+		balance = self.balance,
+		pending = self.pending,
+		canGamble = self.pending > 0,
+		round = round,
+	}
+end
+
 function Game:take()
 	if self:state() ~= "gamble" then
 		return nil, "no_gamble"
@@ -196,6 +241,11 @@ function Solo.info(tbl, stake, cap, maxGamble)
 	return info
 end
 
+-- Solo adds the bonus buy (price in multiples of the stake); the guild game's info has none.
 function Game:info()
-	return Solo.info(self.tbl, self.stake, self.cap, self.maxGamble)
+	local info = Solo.info(self.tbl, self.stake, self.cap, self.maxGamble)
+	if self.tbl.kind == "lines" and self.tbl.buyPrice then
+		info.buy = { price = self.tbl.buyPrice }
+	end
+	return info
 end
