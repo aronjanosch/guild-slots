@@ -186,6 +186,13 @@ function Anim.cells(x, n)
 	return out
 end
 
+-- Stop index and row of cell j (-2..2) around position x, like cells(x, n)[j + 3], without
+-- building a table (for per-frame use).
+function Anim.cell(x, n, j)
+	local i0 = floor(x)
+	return (i0 + j) % n, j - (x - i0)
+end
+
 -- Visible part of a cell centred on `row` (height 1) inside the window [-half, half].
 -- Returns top, bottom as fractions 0..1 of the cell measured from its top, or nil.
 function Anim.clip(row, half)
@@ -220,4 +227,31 @@ function Anim.formatNumber(v, sep)
 		out = out:sub(#sep + 1)
 	end
 	return (neg and "-" or "") .. out
+end
+
+-- Candidate shown at time t of a shuffle that steps through `count` candidates, slowing down,
+-- and lands on `final` (1..count) at `dur`.
+function Anim.shuffle(t, dur, count, final)
+	if t >= dur then
+		return final
+	end
+	local steps = 2 * count + 3
+	local k = floor(steps * Anim.easeOutQuad(t / dur))
+	return (final - 1 - steps + k) % count + 1
+end
+
+-- A cheap pseudo-random value 0..1 per particle and channel, the same on every call.
+local function noise(i, ch)
+	local v = sin(i * 12.9898 + ch * 78.233) * 43758.5453
+	return v - floor(v)
+end
+
+-- Particle i, t seconds after its launch, with a lifetime `life`: returns x, y (in units of the
+-- spread, y up, starting at 0, 0) and alpha. Thrown upwards and sideways, falls back, fades.
+function Anim.particle(i, t, life)
+	local u = t / life
+	if u < 0 then u = 0 elseif u > 1 then u = 1 end
+	local vx = noise(i, 1) * 2 - 1
+	local vy = 1.2 + 0.8 * noise(i, 2)
+	return vx * u, vy * u - 2.5 * u * u, 1 - u * u
 end

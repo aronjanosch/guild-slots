@@ -201,3 +201,57 @@ t.test("formatNumber groups thousands", function()
 	t.eq(Anim.formatNumber(1234567), "1,234,567", "millions")
 	t.eq(Anim.formatNumber(-1500, "."), "-1.500", "negative with separator")
 end)
+
+t.test("cell gives the same stops and rows as cells, without a table", function()
+	for _, x in ipairs({ 0, 0.25, 7.5, 33.9 }) do
+		local list = Anim.cells(x, 34)
+		for j = -2, 2 do
+			local index, row = Anim.cell(x, 34, j)
+			t.eq(index, list[j + 3].index, "index at " .. x .. " / " .. j)
+			t.near(row, list[j + 3].row, 1e-12, "row at " .. x .. " / " .. j)
+		end
+	end
+end)
+
+t.test("shuffle runs through the candidates and lands on the final one", function()
+	local seen, last, changes = {}, nil, 0
+	for i = 0, 200 do
+		local v = Anim.shuffle(i / 100, 2, 9, 6)
+		t.ok(v >= 1 and v <= 9, "in range")
+		seen[v] = true
+		if last and v ~= last then changes = changes + 1 end
+		last = v
+	end
+	for k = 1, 9 do t.ok(seen[k], "candidate " .. k .. " shown") end
+	t.eq(Anim.shuffle(2, 2, 9, 6), 6, "final at the end")
+	t.eq(Anim.shuffle(5, 2, 9, 6), 6, "stays final")
+	-- slows down: more changes in the first half than in the second
+	local first, second = 0, 0
+	local prev = Anim.shuffle(0, 2, 9, 6)
+	for i = 1, 200 do
+		local v = Anim.shuffle(i / 100, 2, 9, 6)
+		if v ~= prev then
+			if i <= 100 then first = first + 1 else second = second + 1 end
+		end
+		prev = v
+	end
+	t.ok(first > second, "slows down")
+end)
+
+t.test("particles start at the emitter, fly within bounds and fade", function()
+	for i = 1, 16 do
+		local x0, y0, a0 = Anim.particle(i, 0, 2)
+		t.near(x0, 0, 1e-9, "x at start")
+		t.near(y0, 0, 1e-9, "y at start")
+		t.ok(a0 > 0.9, "visible at start")
+		for k = 1, 19 do
+			local x, y, a = Anim.particle(i, k * 0.1 - 0.001, 2, 0)
+			t.ok(x >= -1 and x <= 1, "x bounded")
+			t.ok(y >= -2 and y <= 1.5, "y bounded")
+			t.ok(a >= 0 and a <= 1, "alpha")
+		end
+	end
+	local x1 = Anim.particle(1, 0.5, 2)
+	local x2 = Anim.particle(1, 0.5, 2)
+	t.eq(x1, x2, "deterministic")
+end)
