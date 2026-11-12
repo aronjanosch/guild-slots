@@ -14,6 +14,9 @@ local _, ns = ...
 -- read 2 s after the vault opened and again on GUILDBANKLOG_UPDATE while it is open. Every call
 -- is type-checked and wrapped: without the API the feature is simply empty.
 --
+-- The first read for a guild on a client (no record yet) counts deposits a day old or older as
+-- handled (BankBook.seed), so old donations do not flood the list.
+--
 -- Officers only: members never read or store the log. Per guild, GuildSlotsDB.bank[guild] holds
 -- the last read deposits (log, readAt) and the book of handled ones (Guild/BankBook.lua).
 
@@ -141,6 +144,19 @@ function Bank.dismiss(dep)
 	return Bank.handle(dep, nil)
 end
 
+-- Dismisses several deposits (a list from Bank.deposits()), each recorded like one dismissal.
+function Bank.dismissAll(deps)
+	local b, now = store(false), serverTime()
+	if not b or not now or type(deps) ~= "table" then
+		return 0
+	end
+	for _, d in ipairs(deps) do
+		BankBook.handle(b, d, now)
+	end
+	fire()
+	return #deps
+end
+
 -- Grants still running whose purchase is gone (after a /reload) or ended unseen.
 local function reconcile(b)
 	local pending = BankBook.pending(b)
@@ -241,12 +257,17 @@ local function read()
 	if not entries or not now then
 		return
 	end
+	local first = store(false) == nil
 	local b = store(true)
 	if not b then
 		return
 	end
 	b.log = BankBook.deposits(entries, now)
 	b.readAt = now
+	if first then
+		-- The first read for this guild on this client: old donations count as handled.
+		BankBook.seed(b, b.log, now)
+	end
 	BankBook.prune(b, now)
 	reconcile(b)
 	announce(BankBook.open(b, b.log, now))

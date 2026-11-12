@@ -183,6 +183,19 @@ function BankBook.pending(book)
 	return list
 end
 
+-- First read of a guild's log on this client: deposits FIRST_READ_HOURS old or older are
+-- recorded as handled (auto = true) so old donations do not flood the list; younger ones stay
+-- open. Later reads do not call this.
+BankBook.FIRST_READ_HOURS = 24
+function BankBook.seed(book, deps, now)
+	local nowHour = floor(now / HOUR)
+	for _, d in ipairs(deps) do
+		if nowHour - d.hour >= BankBook.FIRST_READ_HOURS then
+			BankBook.handle(book, d, now).auto = true
+		end
+	end
+end
+
 -- Drops records older than LIMIT hours and broken ones.
 function BankBook.prune(book, now)
 	local nowHour = floor(now / HOUR)

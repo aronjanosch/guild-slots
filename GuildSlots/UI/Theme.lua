@@ -372,7 +372,8 @@ Theme.officer = {
 	-- Guild bank deposits (Guild/Bank.lua), above the grant form on the Tokens tab.
 	deposits = {
 		height = 150,
-		heading = { 26, 0, 400, 16 },
+		heading = { 26, 0, 284, 16 },
+		dismissAll = { 316, -3, 110, 20 }, -- shown with two or more open deposits
 		list = { 22, 18, 404, 110 },
 		row = { 28, 22, 392, 34 }, rows = 3,
 		-- inside a row: name and amount on the first line, the details under them, two buttons

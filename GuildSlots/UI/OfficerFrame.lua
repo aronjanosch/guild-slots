@@ -283,9 +283,19 @@ local function fillDeposits(s)
 	W.depositNone:SetShown(#list == 0)
 	W.depositNone:SetText(readAt and L.BANK_NONE or L.BANK_UNREAD)
 	W.depositHead:SetText(Skin.upper(#list > 0 and string.format(L.BANK_HEAD_N, #list) or L.BANK_HEAD))
-	if readAt then
+	-- Dismiss all: two or more open; the first click asks, the second records.
+	W.depositList = list
+	if W.dismissAllArmed ~= nil and W.dismissAllArmed ~= #list then
+		W.dismissAllArmed = nil
+	end
+	W.dismissAll:SetShown(#list >= 2)
+	W.dismissAll.label:SetText(W.dismissAllArmed and L.BANK_DISMISS_ALL_CONFIRM or L.BANK_DISMISS_ALL)
+	if W.dismissAllArmed then
+		note(W.depositRead, string.format(L.BANK_DISMISS_ALL_ASK, #list), Theme.colors.lose)
+	elseif readAt then
 		local now = Roster.serverTime() or readAt
-		W.depositRead:SetText(string.format(L.BANK_READ, sinceText(now - readAt)) .. " " .. L.BANK_REFRESH)
+		note(W.depositRead, string.format(L.BANK_READ, sinceText(now - readAt)) .. " " .. L.BANK_REFRESH,
+			Theme.colors.footer)
 	else
 		W.depositRead:SetText("")
 	end
@@ -412,6 +422,24 @@ local function dismissDeposit(row)
 	OfficerFrame.refresh()
 end
 
+-- Dismiss all: the first click asks in place ("Dismiss N deposits? Click again"), the second
+-- records every listed deposit like a single dismissal.
+local function dismissAll()
+	local list = W.depositList
+	if not list or #list < 2 then
+		return
+	end
+	if W.dismissAllArmed ~= #list then
+		W.dismissAllArmed = #list
+		OfficerFrame.refresh()
+		return
+	end
+	W.dismissAllArmed = nil
+	local n = Bank.dismissAll(list)
+	note(W.grantNote, string.format(L.BANK_DISMISSED_ALL, n), Theme.colors.muted)
+	OfficerFrame.refresh()
+end
+
 ---------------------------------------------------------------------------------------------
 -- Building
 
@@ -533,6 +561,10 @@ local function buildDeposits(parent)
 	local D, c, fs = Theme.officer.deposits, Theme.colors, Theme.fontSize
 	local part = section(parent, D.height)
 	W.depositHead = heading(part, D.heading, L.BANK_HEAD)
+	W.dismissAll = Skin.button(part, "secondary", D.dismissAll[3], D.dismissAll[4], dismissAll, { size = fs.small })
+	Skin.rect(W.dismissAll, part, D.dismissAll)
+	W.dismissAll.label:SetText(L.BANK_DISMISS_ALL)
+	W.dismissAll:Hide()
 	local list = Skin.panel(part, part, D.list, "inset")
 	local r = D.row
 	for i = 1, D.rows do
@@ -691,6 +723,7 @@ local function build()
 	f:SetPoint("CENTER", UIParent, "CENTER", O.home[1], O.home[2])
 
 	Bank.onChange(function()
+		W.dismissAllArmed = nil -- the list changed: ask again
 		if f:IsShown() then
 			OfficerFrame.refresh()
 		end

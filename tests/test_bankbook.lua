@@ -130,6 +130,35 @@ t.test("bank book: records older than 30 days are pruned, the log beyond them is
 	t.eq(#Book.deposits({ dep("Old", 1, 30 * 24) }, later), 0, "30 days is too old")
 end)
 
+t.test("bank book: the first read records deposits older than a day as handled", function()
+	t.eq(Book.FIRST_READ_HOURS, 24, "one day")
+	local book = {}
+	local log = { dep("Old", 10000, 30), dep("Edge", 10000, 24), dep("Fresh", 20000, 23), dep("New", 300, 0) }
+	Book.seed(book, Book.deposits(log, T0), T0)
+	local list = open(book, log, T0)
+	t.eq(#list, 2, "only the last 24 hours are open")
+	t.eq(list[1].name, "New", "newest")
+	t.eq(list[2].name, "Fresh", "23 hours ago")
+	t.eq(#book.records, 2, "two records")
+	for _, r in ipairs(book.records) do
+		t.ok(r.auto == true, "marked as auto")
+	end
+	-- Later reads behave as before: an old deposit seen again stays handled.
+	t.eq(#open(book, { dep("Old", 10000, 31), dep("Fresh", 20000, 24) }, T0 + HOUR), 1, "fresh stays open")
+end)
+
+t.test("bank book: dismissing several deposits at once records each", function()
+	local book = {}
+	local log = { dep("A", 100, 0), dep("B", 200, 1), dep("A", 100, 0) }
+	local list = open(book, log, T0)
+	t.eq(#list, 3, "three open")
+	for _, d in ipairs(list) do
+		Book.handle(book, d, T0)
+	end
+	t.eq(#open(book, log, T0), 0, "all handled")
+	t.eq(#Book.pending(book), 0, "nothing pending")
+end)
+
 t.test("bank book: a broken store does not raise", function()
 	local book = { records = { "junk", { name = 5 } } }
 	local list = open(book, { dep("Bob Jones", 10000, 0) }, T0)

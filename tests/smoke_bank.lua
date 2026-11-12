@@ -152,6 +152,7 @@ local function officerFlow(locale, unknown)
 	assert(O.frame:GetHeight() <= 728, "officer window fits: " .. O.frame:GetHeight())
 	assert(O.depositPart:IsVisible(), "deposits section shown")
 	assert(O.tokensBadge:IsShown() and O.tokensBadge.text:GetText() == "2", "tokens tab badge")
+	assert(O.dismissAll:IsShown(), "dismiss all with two open")
 	local r1, r2 = O.depositRows[1], O.depositRows[2]
 	assert(r1:IsShown() and r2:IsShown() and not O.depositRows[3]:IsShown(), "two rows")
 	assert(r1.name:GetText() == "Alice Smith", "newest first")
@@ -185,6 +186,7 @@ local function officerFlow(locale, unknown)
 	assert(W.balance:GetText() == fmt(ns, balance0 + 5000), "slot window shows the new balance")
 	assert(ns.Bank.openCount() == 1, "stays handled after the purchase")
 	assert(O.depositRows[1].name:GetText() == "Bob Jones" and not O.depositRows[2]:IsShown(), "one row left")
+	assert(not O.dismissAll:IsShown(), "no dismiss all with one open")
 	assert(W.officerBadge.text:GetText() == "1", "header badge follows")
 
 	-- Dismiss the other one.
@@ -278,6 +280,59 @@ local function officerFlow(locale, unknown)
 end
 
 -- A member: no officer button, the vault is never read and nothing is stored.
+local FIRST_LOG = {
+	{ kind = "deposit", name = "Bob Jones", amount = 10000, days = 1, hours = 6 },
+	{ kind = "deposit", name = "Bob Jones", amount = 20000, hours = 3 },
+	{ kind = "withdraw", name = "Bob Jones", amount = 500, hours = 2 },
+	{ kind = "deposit", name = "Carol White", amount = 5000, hours = 1 },
+}
+
+-- The first read on a client counts deposits a day old or older as handled; then Dismiss all.
+local function firstReadFlow(locale, unknown)
+	local env = boot(locale, {})
+	local ns, stub, L = env.ns, env.stub, env.L
+	env.pump(20)
+	stub.bankLog = FIRST_LOG
+	env.openBank()
+	assert(ns.Bank.openCount() == 2, "only the deposits of the last day: " .. ns.Bank.openCount())
+	local book = GuildSlotsDB.bank["Test Guild"]
+	assert(#book.records == 1 and book.records[1].auto == true and book.records[1].copper == 10000,
+		"the old deposit recorded as handled automatically")
+	-- Later reads do not add automatic records.
+	stub.closeBank()
+	stub.serverTime = stub.serverTime + 22 * 3600
+	for _, e in ipairs(stub.bankLog) do e.hours = e.hours + 22 end
+	env.openBank()
+	assert(ns.Bank.openCount() == 2, "still two open after a day")
+	assert(#book.records == 1, "no new automatic records")
+
+	-- Dismiss all asks in place, then records both.
+	stub.slash("/gs", "officer")
+	local O = ns.OfficerFrame.widgets
+	assert(O.dismissAll:IsShown() and O.dismissAll.label:GetText() == L.BANK_DISMISS_ALL, "dismiss all shown")
+	O.dismissAll:Click()
+	assert(ns.Bank.openCount() == 2, "first click only asks")
+	assert(O.depositRead:GetText() == string.format(L.BANK_DISMISS_ALL_ASK, 2), "the question")
+	assert(O.dismissAll.label:GetText() == L.BANK_DISMISS_ALL_CONFIRM, "click again")
+	O.dismissAll:Click()
+	assert(ns.Bank.openCount() == 0, "both dismissed")
+	assert(O.grantNote:GetText() == string.format(L.BANK_DISMISSED_ALL, 2), "note")
+	assert(not O.dismissAll:IsShown() and O.depositNone:IsShown(), "nothing left")
+	assert(#book.records == 3, "recorded like single dismissals")
+	unknownMethods(stub, unknown)
+
+	-- A second officer client with its own empty record behaves the same.
+	for _, e in ipairs(FIRST_LOG) do e.hours = e.hours - 22 end
+	env = boot(locale, {})
+	ns, stub = env.ns, env.stub
+	env.pump(20)
+	stub.bankLog = FIRST_LOG
+	env.openBank()
+	assert(ns.Bank.openCount() == 2, "second client: only the last day")
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
+	unknownMethods(stub, unknown)
+end
+
 local function memberFlow(locale, unknown)
 	local env = boot(locale, { rank = 3 })
 	local ns, stub = env.ns, env.stub
@@ -317,6 +372,7 @@ for _, locale in ipairs({ "enUS", "deDE" }) do
 		officerFlow(locale, unknown)
 		memberFlow(locale, unknown)
 		noApiFlow(locale, unknown)
+		firstReadFlow(locale, unknown)
 	end, debug.traceback)
 	if ok then
 		local list = {}
