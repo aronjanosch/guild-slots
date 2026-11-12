@@ -58,7 +58,7 @@ account actions; that is why the addon itself never touches gold.
 | 1 Pure Lua core (hashing, engine, ledger, verification) | done |
 | 2 Solo mode | done, tested in game |
 | 3 Guild mode, security level 0 | done, tested in game with one character |
-| 4 Payout, anchors | built, not yet tested in game |
+| 4 Payout, anchors | done, tested in game with one character |
 | 5 Security levels 1 and 2 (witnesses) | open |
 | 6 Polish | open |
 
