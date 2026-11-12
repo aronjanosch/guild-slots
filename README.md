@@ -37,6 +37,13 @@ to fewer effects.
    entry and shows a traffic light, findings, a luck index and a look-ahead. The officer settles by
    hand outside the addon and confirms, or rejects. The addon blocks nothing; it informs.
 
+Officers open the officer window with the shield button in the header (or `/gs officer`). When an
+officer opens the guild vault, the addon reads the guild bank money log and lists deposits not dealt
+with yet on the Tokens tab, with the tokens the amount buys at the guild rate `X` (tokens per gold).
+**Grant** starts the purchase for that player, **Dismiss** marks a deposit as a plain donation. The
+log can only be read at the vault; the addon only reads it. Amounts in the grant form, the cash-out
+panel and the payout review show their gold equivalent at the guild rate.
+
 Exchanging gold for tokens happens by hand between players and is their own business. Blizzard
 calls player-run casinos "not supported" rather than banned, and gold as a paid entry can lead to
 account actions; that is why the addon itself never touches gold.

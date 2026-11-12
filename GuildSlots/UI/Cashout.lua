@@ -97,6 +97,20 @@ local function setError(str)
 	W.coError:SetText(str or "")
 end
 
+-- The gold equivalent of the typed amount at the guild's current rate (the settings line, not
+-- the rate of an older purchase); hidden without valid settings.
+local function updateRate()
+	local rate = ns.Coins.rate()
+	local raw = (W.coAmount:GetText() or ""):gsub("%s", "")
+	local amount = raw:match("^%d+$") and tonumber(raw) or nil
+	if not rate or not amount then
+		W.coRate:Hide()
+		return
+	end
+	W.coRate:SetText(string.format(L.PO_RATE, ns.Coins.tokensText(amount, rate), host.fmt(rate)))
+	W.coRate:Show()
+end
+
 ---------------------------------------------------------------------------------------------
 -- Refresh
 
@@ -123,6 +137,7 @@ local function fillForm(s)
 	end
 	W.coNoOfficer:SetShown(#names == 0)
 	W.coRequest:setEnabled(#names > 0)
+	updateRate()
 end
 
 local function secondsLeft(s, p)
@@ -383,6 +398,7 @@ function Cashout.build(parent, f, widgets, callbacks)
 			self:SetText(clean)
 		end
 		setError("")
+		updateRate()
 	end)
 	W.coAmount:SetScript("OnEnterPressed", function(self)
 		self:ClearFocus()
@@ -393,6 +409,7 @@ function Cashout.build(parent, f, widgets, callbacks)
 		if s then
 			W.coAmount:SetText(tostring(s:game().balance or 0))
 			setError("")
+			updateRate()
 		end
 	end, { size = fs.small })
 	Skin.rect(W.coMax, f, Lay.max)
@@ -426,6 +443,11 @@ function Cashout.build(parent, f, widgets, callbacks)
 	Skin.call(W.coNote, "SetJustifyV", "TOP")
 	Skin.call(W.coNote, "SetWordWrap", true)
 	W.coNote:SetText(L.PO_NOTE)
+	W.coRate = Skin.text(form, "label", fs.small, c.goldLight, "LEFT")
+	Skin.rect(W.coRate, f, Lay.rate)
+	Skin.call(W.coRate, "SetJustifyV", "TOP")
+	Skin.call(W.coRate, "SetWordWrap", true)
+	W.coRate:Hide()
 	W.coError = Skin.text(form, "label", fs.small, c.lose, "LEFT")
 	Skin.rect(W.coError, f, Lay.error)
 	Skin.call(W.coError, "SetJustifyV", "TOP")

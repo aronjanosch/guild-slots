@@ -226,8 +226,12 @@ Theme.layout = {
 	width = 600, height = 672,
 	home = { 0, 20 }, -- default position: offset of the window centre from the screen centre
 	title = { 30, 22, 260, 44 },
-	solo = { 318, 29, 78, 32 },
-	guild = { 398, 29, 78, 32 },
+	-- Header, right to left: close, sound, officer (officers only), guild, solo, session.
+	solo = { 304, 29, 70, 32 },
+	guild = { 376, 29, 70, 32 },
+	officer = { 452, 29, 34, 32 },
+	officerBadge = { 18, -8, 26, 18 }, -- open payouts and deposits, relative to the officer button
+	officerTooltip = "ANCHOR_BOTTOM",
 	sound = { 492, 29, 34, 32 },
 	close = { 534, 29, 34, 32 },
 	iconSize = 17,
@@ -260,20 +264,19 @@ Theme.layout = {
 	-- Autoplay and turbo, stacked between the stakes and the spin button.
 	auto = { 334, 488, 52, 31 },
 	turbo = { 334, 521, 52, 31 },
-	-- Secondary row: paytable, officer (officers only), refill or cash out, bonus buy (solo).
-	-- The shown buttons take the slots from the left: up to three in `row3`, four in `row4`.
+	-- Secondary row: paytable, refill (solo) or cash out (guild), bonus buy (solo). The shown
+	-- buttons share `row` evenly with `rowGap` between them; during free games the paytable keeps
+	-- its own slot next to the balance.
 	paytable = { 22, 562, 156, 38 },
-	officer = { 184, 562, 156, 38 },
-	refill = { 346, 562, 156, 38 },
-	row3 = { { 22, 562, 156, 38 }, { 184, 562, 156, 38 }, { 346, 562, 156, 38 } },
-	row4 = { { 22, 562, 134, 38 }, { 162, 562, 134, 38 }, { 302, 562, 134, 38 }, { 442, 562, 136, 38 } },
+	refill = { 184, 562, 156, 38 },
+	row = { 22, 562, 556, 38 }, rowGap = 6,
 	buyWide = 150, -- narrower than this, the bonus buy shows its short label
 	footBalance = { 360, 562, 218, 38 }, -- balance during free games
 	-- Win escalation.
 	shakeAmp = 4, -- window shake, pixels
 	coinsTier = { 14, 22, 30 }, -- coins in the rain per big-win level (at most `coins`)
 	-- Session panel over the reels (toggled by the header button left of Solo).
-	session = { 276, 29, 34, 32 },
+	session = { 264, 29, 34, 32 },
 	sessionPanel = { 60, 150, 270, 216 },
 	sessionTitle = { 76, 160, 170, 24 },
 	sessionReset = { 252, 160, 66, 26 },
@@ -337,7 +340,8 @@ Theme.layout = {
 		officers = { 314, 214, 196, 106 },
 		oRow = { 320, 219, 184, 24 }, oRowStep = 24, oRows = 4, rowText = 8,
 		oNone = { 324, 219, 180, 52 },
-		note = { 96, 258, 208, 62 },
+		rate = { 96, 252, 208, 30 }, -- gold equivalent at the guild rate (up to two lines)
+		note = { 96, 284, 208, 40 },
 		error = { 96, 326, 414, 34 },
 		request = { 314, 382, 196, 50 },
 		cancel = { 96, 386, 150, 42 },
@@ -358,26 +362,41 @@ Theme.officer = {
 	title = { 30, 22, 300, 42 },
 	close = { 384, 29, 34, 32 },
 	divider = { 22, 68, 404, 12 },
-	-- Tabs in the toggle style: Tokens, Payouts, Settings. The count badge sits on the Payouts tab.
+	-- Tabs in the toggle style: Tokens, Payouts, Settings. Count badges sit on the Tokens tab
+	-- (open deposits) and the Payouts tab (open requests).
 	tabs = { 22, 84, 128, 30 }, tabStep = 138,
-	tabBadge = { 100, -8, 34, 22 }, -- relative to the Payouts tab
+	tabBadge = { 100, -8, 34, 22 }, -- relative to its tab
 	top = 122, -- first section, under the tabs
 	sectionGap = 4,
 	-- Sections, stacked from `top` (rects: x in the window, y from the section's top).
+	-- Guild bank deposits (Guild/Bank.lua), above the grant form on the Tokens tab.
+	deposits = {
+		height = 150,
+		heading = { 26, 0, 400, 16 },
+		list = { 22, 18, 404, 110 },
+		row = { 28, 22, 392, 34 }, rows = 3,
+		-- inside a row: name and amount on the first line, the details under them, two buttons
+		name = { 8, 2, 140, 18 }, amount = { 150, 2, 100, 18 }, info = { 8, 19, 244, 14 },
+		grant = { 256, 4, 64, 26 }, dismiss = { 324, 4, 64, 26 },
+		none = { 36, 22, 380, 34 },
+		read = { 26, 132, 400, 16 },
+	},
 	grant = {
-		height = 378,
+		height = 394,
 		heading = { 26, 0, 300, 16 },
 		list = { 22, 18, 404, 110 },
 		listHead = { 36, 24, 380, 14 },
 		row = { 30, 42, 192, 27 }, rowStep = { 196, 27 }, cols = 2, rows = 6, rowText = 8,
 		none = { 36, 42, 380, 27 },
-		playerLabel = { 26, 136, 166, 14 }, tokensLabel = { 198, 136, 80, 14 },
-		player = { 22, 152, 170, 36 }, tokens = { 198, 152, 80, 36 }, button = { 286, 148, 140, 44 },
-		note = { 26, 194, 400, 16 },
-		selfTest = { 22, 214, 110, 28 }, selfHint = { 140, 212, 286, 32 },
-		purchasesHead = { 26, 250, 300, 16 },
-		purchases = { 22, 268, 404, 104 },
-		pRow = 275, pRowH = 30, pRows = 3,
+		playerLabel = { 26, 136, 140, 14 }, tokensLabel = { 168, 136, 76, 14 }, goldLabel = { 250, 136, 64, 14 },
+		player = { 22, 152, 140, 36 }, tokens = { 168, 152, 76, 36 }, gold = { 250, 152, 64, 36 },
+		button = { 320, 148, 106, 44 }, buttonSize = 16,
+		rate = { 26, 192, 400, 16 }, -- gold equivalent of the tokens at the guild rate
+		note = { 26, 210, 400, 16 },
+		selfTest = { 22, 230, 110, 28 }, selfHint = { 140, 228, 286, 32 },
+		purchasesHead = { 26, 266, 300, 16 },
+		purchases = { 22, 284, 404, 104 },
+		pRow = 291, pRowH = 30, pRows = 3,
 		pName = { 36, 150 }, pAmount = { 186, 60 }, pBadge = { 256, 4, 160, 22 },
 	},
 	status = {
@@ -402,7 +421,8 @@ Theme.officer = {
 		row = { 28, 24, 392, 26 }, rows = 4,
 		rName = { 8, 128 }, rAmount = { 136, 64 }, rBadge = { 208, 2, 128, 22 }, rSecs = { 340, 44 },
 		none = { 36, 24, 380, 26 },
-		reviewHead = { 26, 142, 400, 16 },
+		reviewHead = { 26, 142, 196, 16 },
+		gold = { 226, 142, 200, 16 }, -- requested tokens and their gold, right of the head
 		hint = { 26, 166, 400, 40 },
 		light = { 22, 162, 128, 52 },
 		lightGlowOut = 14,

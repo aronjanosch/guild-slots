@@ -7,7 +7,7 @@ local _, ns = ...
 -- rejects. The add-on never moves gold or items. Statuses and codes it does not know are shown
 -- raw. Layout in Theme.officer.payouts.
 
-local L, Theme, Skin, Roster = ns.L, ns.Theme, ns.Skin, ns.Roster
+local L, Theme, Skin = ns.L, ns.Theme, ns.Skin
 
 local Payouts = {}
 ns.Payouts = Payouts
@@ -44,18 +44,10 @@ local function num(v)
 	return tonumber(v) or 0
 end
 
--- "1g 20s 5c" for an amount of tokens at X tokens per gold (display only, core-spec section 3).
+-- "1g 20s 5c" for an amount of tokens at the guild's current rate X (display only, core-spec
+-- section 3; UI/Coins.lua rounds down); nil without valid settings.
 local function goldText(tokens)
-	local s = Roster.settings()
-	local rate = s and tonumber(s.X) or 1000
-	if rate < 1 then rate = 1 end
-	local copper = math.floor(num(tokens) * 10000 / rate + 0.5)
-	local parts = {}
-	local g, sv, cp = math.floor(copper / 10000), math.floor(copper / 100) % 100, copper % 100
-	if g > 0 then parts[#parts + 1] = string.format(L.COIN_G, g) end
-	if sv > 0 then parts[#parts + 1] = string.format(L.COIN_S, sv) end
-	if cp > 0 or #parts == 0 then parts[#parts + 1] = string.format(L.COIN_C, cp) end
-	return table.concat(parts, " ")
+	return ns.Coins.tokensText(num(tokens), ns.Coins.rate())
 end
 Payouts.goldText = goldText
 
@@ -280,6 +272,9 @@ function Payouts.refresh(s)
 	local r = selected(list)
 	local report = r and type(r.report) == "table" and r.report or nil
 	W.payReviewHead:SetText(r and Skin.upper(string.format(L.PAY_REVIEW, tostring(r.player))) or "")
+	-- Requested tokens and their gold at the guild rate; nothing without valid settings.
+	local gold = r and goldText(r.amount)
+	W.payGold:SetText(gold and string.format(L.PAY_GOLD, host.fmt(num(r.amount)), gold) or "")
 	if report then
 		W.payHint:Hide()
 		W.payReport:Show()
@@ -299,7 +294,7 @@ function Payouts.refresh(s)
 	W.payActions:SetShown(r ~= nil)
 	fillButtons(r, red)
 	if P.mode == "confirm" and r then
-		local ask = string.format(L.PAY_ASK, goldText(r.amount), tostring(r.player), host.fmt(num(r.amount)))
+		local ask = string.format(L.PAY_ASK, goldText(r.amount) or "–", tostring(r.player), host.fmt(num(r.amount)))
 		W.payNote:SetText((red and L.PAY_ASK_RED or "") .. ask)
 		Skin.color(W.payNote, red and c.lose or c.goldLight)
 	elseif P.mode == "reject" then
@@ -384,7 +379,7 @@ end
 -- Building
 
 -- part: the tab's section frame (window x, y from the section top). widgets: the officer
--- window's widget table (gets payoutsPart, payRows, payNone, payReviewHead, payHint, payReport,
+-- window's widget table (gets payoutsPart, payRows, payNone, payReviewHead, payGold, payHint, payReport,
 -- payLight, payLightGlow, payBalance, payAmount, payAfter, payFindingRows, payNoFindings,
 -- payLuckRows, paySpins, payLookahead, payNote, payActions, payConfirm, payReject, payBack,
 -- payDeclined, payMismatch). callbacks: session(), fmt(n), refresh().
@@ -434,6 +429,7 @@ function Payouts.build(part, widgets, callbacks)
 
 	-- Review.
 	W.payReviewHead = Skin.textIn(part, part, Pp.reviewHead, "label", fs.section, c.goldLight, "LEFT")
+	W.payGold = Skin.textIn(part, part, Pp.gold, "numberMedium", fs.small, c.number, "RIGHT")
 	W.payHint = wrapped(part, Pp.hint, c.muted, fs.small)
 
 	local rep = CreateFrame("Frame", nil, part)

@@ -340,6 +340,17 @@ end
 
 SlashCmdList = {}
 UISpecialFrames = {}
+-- The game tooltip: stub.tooltip holds the owner and the text while shown.
+GameTooltip = new("GameTooltip", "GameTooltip", nil)
+GameTooltip._shown = false
+function GameTooltip:SetOwner(owner, anchor)
+	check(type(owner) == "table" and type(anchor) == "string", "GameTooltip:SetOwner: bad arguments")
+	stub.tooltip = { owner = owner }
+end
+function GameTooltip:SetText(t)
+	check(type(t) == "string", "GameTooltip:SetText: bad text")
+	if stub.tooltip then stub.tooltip.text = t end
+end
 GameFontNormal = new("Font", nil, nil)
 SOUNDKIT = {
 	IG_MAINMENU_OPTION_CHECKBOX_ON = 856, IG_MAINMENU_OPEN = 850, U_CHAT_SCROLL_BUTTON = 1115,
@@ -458,6 +469,48 @@ C_ChatInfo = {
 		return stub.sendCode
 	end,
 }
+
+-- Guild bank money log, as measured in the client (docs/forever-api-probe.md, test 12):
+--   QueryGuildBankLog(MAX_GUILDBANK_TABS + 1) asks for the money log; afterwards
+--   GetGuildBankMoneyTransaction(i) returns kind, name, amount (copper), years, months, days,
+--   hours, oldest first. The stub hands out entries only after that query while the vault is
+--   open.
+--   stub.bankLog      { { kind, name, amount, years, months, days, hours }, ... }
+--   stub.bankQueries  tabs passed to QueryGuildBankLog
+--   stub.openBank()   fires PLAYER_INTERACTION_MANAGER_FRAME_SHOW (guild banker) and
+--                     GUILDBANKFRAME_OPENED; stub.closeBank() the matching hide events
+stub.bankLog = {}
+stub.bankQueries = {}
+stub.bankOpen, stub.bankQueried = false, false
+MAX_GUILDBANK_TABS = 8
+Enum = Enum or {}
+Enum.PlayerInteractionType = { Merchant = 5, GuildBanker = 10 }
+function QueryGuildBankLog(tab)
+	check(isNum(tab), "QueryGuildBankLog needs a tab number")
+	stub.bankQueries[#stub.bankQueries + 1] = tab
+	if stub.bankOpen and tab == MAX_GUILDBANK_TABS + 1 then
+		stub.bankQueried = true
+	end
+end
+function GetNumGuildBankMoneyTransactions()
+	return (stub.bankOpen and stub.bankQueried) and #stub.bankLog or 0
+end
+function GetGuildBankMoneyTransaction(i)
+	check(isNum(i), "GetGuildBankMoneyTransaction needs an index")
+	local e = (stub.bankOpen and stub.bankQueried) and stub.bankLog[i]
+	if not e then return nil end
+	return e.kind, e.name, e.amount, e.years or 0, e.months or 0, e.days or 0, e.hours or 0
+end
+function stub.openBank()
+	stub.bankOpen = true
+	stub.fire("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", Enum.PlayerInteractionType.GuildBanker)
+	stub.fire("GUILDBANKFRAME_OPENED")
+end
+function stub.closeBank()
+	stub.bankOpen, stub.bankQueried = false, false
+	stub.fire("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", Enum.PlayerInteractionType.GuildBanker)
+	stub.fire("GUILDBANKFRAME_CLOSED")
+end
 
 function stub.deliver(prefix, text, channel, sender)
 	stub.fire("CHAT_MSG_ADDON", prefix, text, channel or "GUILD", sender)
