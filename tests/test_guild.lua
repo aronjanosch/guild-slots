@@ -1364,3 +1364,214 @@ t.test("onMessage survives any text", function()
 	t.ok(pcall(p.session.onMessage, p.session, "Olga", nil), "nil text")
 	t.ok(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries), "account still replays")
 end)
+
+-- Guild ticker ---------------------------------------------------------------------------------
+
+local ZERO = string.rep("0", 32)
+
+local function spinText(n, stake, level)
+	return assert(Proto.encode("SPIN", { n = n, stake = stake or 10, level = level or 0, head = ZERO, A = 0 }))
+end
+
+local function tickerWorld(levels)
+	local w, o, p, tom, buyId = payWorld()
+	tom.env.tickerLevels = levels or { big = 2, huge = 5, legendary = 10 }
+	return w, o, p, tom, buyId
+end
+
+-- Pia spins `count` times, two seconds apart; returns the results by n.
+local function spinMany(w, p, count)
+	local g, results = p.session:game(), {}
+	for _ = 1, count do
+		w.now = w.now + 2
+		if g.balance < g.stake then break end
+		local r = assert(g:spin())
+		results[r.n] = r
+		flush(w)
+		if g:state() == "gamble" then g:take() end
+	end
+	return results
+end
+
+local function levelOf(win, stake, lv, free)
+	if win >= lv.legendary * stake then return "legendary" end
+	if win >= lv.huge * stake then return "huge" end
+	if win >= lv.big * stake then return "big" end
+	if free then return "free" end
+end
+
+t.test("the listener announces notable rounds as the player's own result gives them", function()
+	local lv = { big = 2, huge = 5, legendary = 10 }
+	local w, _, p, tom = tickerWorld(lv)
+	local results = spinMany(w, p, 80)
+	local got, n = {}, 0
+	for _, e in ipairs(events(tom, "ticker")) do
+		got[e.n] = e
+		n = n + 1
+	end
+	t.ok(n > 0, "at least one notable round")
+	local expected = 0
+	for num, r in pairs(results) do
+		local level = levelOf(r.round.win, r.stake, lv, r.round.free)
+		if level then
+			expected = expected + 1
+			local e = got[num]
+			t.ok(e, "announced " .. num)
+			t.eq(e.player, "Pia", "player")
+			t.eq(e.stake, r.stake, "stake")
+			t.eq(e.win, r.round.win, "win")
+			t.eq(e.mult, r.round.win / r.stake, "mult")
+			t.eq(e.level, level, "level")
+			t.eq(e.free, r.round.free and r.round.free.awarded or nil, "free")
+			t.eq(e.symbol, r.round.free and r.round.free.symbol or nil, "symbol")
+		else
+			t.eq(got[num], nil, "quiet " .. num)
+		end
+	end
+	t.eq(n, expected, "no extra announcements")
+	local list = tom.session:ticker()
+	t.ok(#list >= 1 and #list <= 20, "at most 20")
+	for i = 2, #list do
+		t.ok(list[i - 1].n > list[i].n, "newest first")
+	end
+end)
+
+t.test("the player's own client and a client without a heard purchase announce nothing", function()
+	local w, _, p, tom = tickerWorld()
+	local late = addSession(w, "Lena")
+	late.env.tickerLevels = { big = 1, huge = 2, legendary = 3 }
+	p.env.tickerLevels = { big = 1, huge = 2, legendary = 3 }
+	spinMany(w, p, 40)
+	t.eq(#events(p, "ticker"), 0, "own spins")
+	t.eq(#events(late, "ticker"), 0, "no purchase heard")
+	t.eq(#p.session:ticker(), 0, "own list empty")
+	t.ok(#events(tom, "ticker") > 0, "the listener hears")
+end)
+
+t.test("a SPIN is announced once and only with a higher number", function()
+	local w, _, p, tom = tickerWorld({ big = 0.01, huge = 1e9, legendary = 1e9 })
+	spinMany(w, p, 1)
+	local count = #events(tom, "ticker")
+	t.ok(count <= 1, "at most the one spin")
+	for _ = 1, 3 do
+		w.now = w.now + 5
+		tom.session:onMessage("Pia", spinText(1))
+	end
+	t.eq(#events(tom, "ticker"), count, "no repeats")
+end)
+
+t.test("one recalculation per sender per second and five per second in total", function()
+	local w, _, _, tom = tickerWorld({ big = 0.01, huge = 1e9, legendary = 1e9 })
+	local s = tom.session
+	for n = 1, 10 do
+		s:onMessage("Pia", spinText(n))
+	end
+	t.eq(s.tickLast.Pia, 1, "only the first spin of the second was looked at")
+	w.now = w.now + 1
+	s:onMessage("Pia", spinText(11))
+	t.eq(s.tickLast.Pia, 11, "the next second recalculates")
+	local list = tom.env.store.keys[GUILD]
+	for i = 1, 10 do
+		list["Bob" .. i] = { K = list.Pia.K, line = list.Pia.line, time = 1 }
+	end
+	w.now = w.now + 5
+	local calc = 0
+	for i = 1, 10 do
+		s:onMessage("Bob" .. i, spinText(1))
+		if s.tickLast["Bob" .. i] then calc = calc + 1 end
+	end
+	t.eq(calc, 5, "five in total per second")
+	w.now = w.now + 1
+	s:onMessage("Bob10", spinText(2))
+	t.eq(s.tickLast.Bob10, 2, "budget is back")
+end)
+
+t.test("a listener restarted from its store still announces", function()
+	local lv = { big = 2, huge = 5, legendary = 10 }
+	local w, _, p, tom = tickerWorld(lv)
+	t.ok(tom.env.store.keys[GUILD].Pia, "key stored")
+	local again = addSession(w, "Tom", { store = tom.env.store })
+	again.env.tickerLevels = lv
+	spinMany(w, p, 60)
+	t.ok(#events(again, "ticker") > 0, "announces after restart")
+	t.eq(#events(again, "ticker"), #events(tom, "ticker"), "same as the live listener")
+end)
+
+t.test("a second purchase replaces the key", function()
+	local w, o, _, tom = tickerWorld()
+	local first = tom.env.store.keys[GUILD].Pia
+	w.now = w.now + 10
+	assert(o.session:grant("Pia", 500))
+	flush(w)
+	local second = tom.env.store.keys[GUILD].Pia
+	t.ok(second.K ~= first.K, "new key")
+	t.eq(second.time, 1010, "new time")
+end)
+
+t.test("a purchase without a complete exchange drops the key of that player", function()
+	local w, o, _, tom = tickerWorld()
+	t.ok(tom.env.store.keys[GUILD].Pia, "key")
+	w.now = w.now + 10
+	w.drop = function(text)
+		local m = Proto.decode(text)
+		return m and m.type == "BUY3"
+	end
+	assert(o.session:grant("Pia", 500))
+	flush(w)
+	w.drop = nil
+	w.now = w.now + 100
+	tom.session:onMessage("Olga", assert(Proto.encode("HELLO", { version = "0.3.0", n = 0, head = ZERO })))
+	t.eq(tom.env.store.keys[GUILD].Pia, nil, "key dropped")
+end)
+
+t.test("no ticker for a T1 line or a level 1 SPIN", function()
+	local w = newWorld()
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia")
+	local tom = addSession(w, "Tom")
+	tom.env.tickerLevels = { big = 0.01, huge = 1e9, legendary = 1e9 }
+	assert(o.session:grant("Pia", 1000))
+	flush(w)
+	spinMany(w, p, 20)
+	t.eq(#events(tom, "ticker"), 0, "T1")
+	local w2, _, _, tom2 = tickerWorld({ big = 0.01, huge = 1e9, legendary = 1e9 })
+	w2.now = w2.now + 5
+	tom2.session:onMessage("Pia", spinText(1, 10, 1))
+	t.eq(#events(tom2, "ticker"), 0, "level 1")
+end)
+
+t.test("keeps at most 200 keys", function()
+	local w, _, _, tom = tickerWorld()
+	local list = tom.env.store.keys[GUILD]
+	for i = 1, 250 do
+		list["Q" .. i] = { K = "k", line = "x", time = 100 + i }
+	end
+	w.now = w.now + 10
+	assert(addSession(w, "Zed"))
+	local o = w.sessions[1]
+	assert(o:grant("Zed", 100))
+	flush(w)
+	local count = 0
+	for _ in pairs(list) do count = count + 1 end
+	t.eq(count, 200, "capped")
+	t.ok(list.Zed, "the newest stays")
+	t.eq(list.Q1, nil, "the oldest goes")
+end)
+
+t.test("ticker input never raises", function()
+	local w, _, _, tom = tickerWorld({ big = 0.01, huge = 1e9, legendary = 1e9 })
+	local s = tom.session
+	for _, text in ipairs({ "SPIN|x", "SPIN|-1|10|0|h|0", "SPIN", "|||", string.rep("9", 400) }) do
+		t.ok(pcall(s.onMessage, s, "Pia", text), "junk")
+	end
+	for _, bad in ipairs({ { 1 }, "x", 5, { K = 5 }, { K = "k", line = 7 }, { K = "k", line = "GSLOTS1;T=T1" } }) do
+		tom.env.store.keys[GUILD].Pia = bad
+		w.now = w.now + 2
+		t.ok(pcall(s.onMessage, s, "Pia", spinText(50)), "bad key")
+	end
+	for i = 1, 500 do
+		local sender = "P" .. (i % 7)
+		tom.env.store.keys[GUILD][sender] = { K = "k", line = LINE_PAY, time = 1 }
+		t.ok(pcall(s.onMessage, s, sender, spinText(i)), "flood")
+	end
+end)

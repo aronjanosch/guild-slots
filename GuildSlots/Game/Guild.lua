@@ -31,6 +31,11 @@ local STEP_BUDGET = 150 -- entries verified per tick() unless env.stepBudget say
 local OSYNC_DELAY = 20 -- seconds after the first tick as an officer
 local OSYNC_MAX = 30
 local WATCH_MAX = 100 -- purchases between others followed at once
+local KEEP_KEYS = 200 -- players whose last purchase key is kept for the ticker
+local TICKER_BIG, TICKER_HUGE, TICKER_LEGENDARY = 20, 50, 100 -- win / stake for the ticker levels
+local TICKER_KEEP = 20 -- entries session:ticker() returns
+local TICKER_PER_SENDER = 1 -- seconds between two recalculations for one sender
+local TICKER_PER_SECOND = 5 -- recalculations per second in total
 local REASONS = { declined = true, mismatch = true, expired = true, busy = true, too_large = true, bad_log = true }
 
 -- Player request states that lock the game, and officer request states still open.
@@ -113,6 +118,11 @@ function Guild.new(env)
 		seen = {}, -- name -> { name, version, seen }
 		heard = {}, -- name -> { n, head, time, live = { n, g, head } }
 		watch = {}, -- buyId -> purchase heard on the wire, followed for an anchor
+		tickLast = {}, -- player -> last spin number the ticker looked at
+		tickAt = {}, -- player -> time of the last recalculation
+		tickSecond = 0, -- the second tickCount counts in
+		tickCount = 0,
+		tickList = {}, -- ticker entries, newest first
 		request = nil, -- the own payout request (player side)
 		reqs = {}, -- payout requests addressed to this officer, still open, oldest first
 		nextHello = nil,
@@ -226,6 +236,7 @@ function Session:expire()
 	for id, w in pairs(self.watch) do
 		if now - w.started >= 2 * STEP_TIMEOUT then
 			self.watch[id] = nil
+			self:dropKey(w.player, w.time)
 		end
 	end
 	local r = self.request
@@ -369,6 +380,45 @@ function Session:storeAnchor(player, a)
 	return true
 end
 
+-- Guild ticker: the key and rules of the latest complete purchase heard for another player.
+-- store.keys[guild][player] = { K, line, time }; at most KEEP_KEYS players, the oldest dropped.
+function Session:storeKey(w, K, line)
+	if w.player == self.me or type(w.time) ~= "number" then
+		return
+	end
+	local list = subtable(subtable(self.store, "keys"), self.guild)
+	local cur = list[w.player]
+	if type(cur) == "table" and type(cur.time) == "number" and cur.time > w.time then
+		return
+	end
+	list[w.player] = { K = K, line = line, time = w.time }
+	local count = 0
+	for _ in pairs(list) do
+		count = count + 1
+	end
+	while count > KEEP_KEYS do
+		local oldest, at
+		for name, k in pairs(list) do
+			local t = type(k) == "table" and type(k.time) == "number" and k.time or -1
+			if not at or t < at then
+				oldest, at = name, t
+			end
+		end
+		list[oldest] = nil
+		count = count - 1
+	end
+end
+
+-- A newer BUY1 for the player ended without a complete exchange the listener could follow: the
+-- stored key may belong to an older purchase than the account now plays on, so it goes.
+function Session:dropKey(player, time)
+	local list = self.store.keys and self.store.keys[self.guild]
+	local k = type(list) == "table" and list[player]
+	if type(k) == "table" and (type(k.time) ~= "number" or type(time) ~= "number" or k.time <= time) then
+		list[player] = nil
+	end
+end
+
 function Session:markSeen(player, id)
 	subtable(subtable(subtable(self.store, "seen"), self.guild), player)[id] = true
 end
@@ -387,13 +437,16 @@ end
 -- The anchor needs the own line to hash like the officer's; the id counts as seen either way.
 function Session:purchaseAnchor(w, seed)
 	if Engine.commit(seed) ~= w.commit then
+		self:dropKey(w.player, w.time)
 		return
 	end
 	self:markSeen(w.player, w.buyId)
 	local line = w.line
 	if not parsedLine(line) or Proto.lineHash(line) ~= w.lineHash then
+		self:dropKey(w.player, w.time)
 		return
 	end
+	self:storeKey(w, Engine.purchaseKey(w.buyId, seed, w.nonce), line)
 	local text = Ledger.encode({
 		type = "B", buyId = w.buyId, officer = w.officer, tokens = w.tokens, commit = w.commit, seed = seed,
 		nonce = w.nonce, time = w.time, line = line,
@@ -437,6 +490,98 @@ function Session:watchBuy3(sender, msg)
 		self.watch[msg.buyId] = nil
 		self:purchaseAnchor(w, msg.seed)
 	end
+end
+
+-- Guild ticker --------------------------------------------------------------------------------
+-- A SPIN of another player is recalculated under the key of the purchase this client heard. This
+-- shows what the SPIN implies under that purchase; it is no verification. A player whose account
+-- moved on to a purchase the listener missed gives nothing or a wrong line; the payout check
+-- decides what is true.
+
+function Session:tickerLevels()
+	local lv = self.env.tickerLevels
+	lv = type(lv) == "table" and lv or {}
+	return lv.big or TICKER_BIG, lv.huge or TICKER_HUGE, lv.legendary or TICKER_LEGENDARY
+end
+
+function Session:onTickerSpin(sender, msg)
+	local env = self.env
+	if sender == self.me or msg.level ~= 0 or type(msg.n) ~= "number" or type(msg.stake) ~= "number" then
+		return
+	end
+	local list = self.store.keys and self.store.keys[self.guild]
+	local k = type(list) == "table" and list[sender]
+	if type(k) ~= "table" or type(k.K) ~= "string" then
+		return
+	end
+	local last = self.tickLast[sender]
+	if last and msg.n <= last then
+		return
+	end
+	local s = parsedLine(k.line) and Settings.parse(k.line)
+	local tbl = s and Tables.get(s.T)
+	if not tbl or tbl.kind ~= "lines" or msg.stake % tbl.lineCount ~= 0 then
+		return
+	end
+	local allowed = false
+	for _, v in ipairs(s.E) do
+		if v == msg.stake then
+			allowed = true
+		end
+	end
+	if not allowed then
+		return
+	end
+	local now = env.now()
+	local at = self.tickAt[sender]
+	if at and now - at < TICKER_PER_SENDER then
+		return
+	end
+	local second = floor(now)
+	if second ~= self.tickSecond then
+		self.tickSecond, self.tickCount = second, 0
+	end
+	if self.tickCount >= TICKER_PER_SECOND then
+		return
+	end
+	self.tickCount = self.tickCount + 1
+	self.tickAt[sender] = now
+	self.tickLast[sender] = msg.n
+	local ok, round = pcall(Engine.round, k.K, msg.n, "", tbl, msg.stake, s.C)
+	if not ok or type(round) ~= "table" or type(round.win) ~= "number" then
+		return
+	end
+	local win, stake = round.win, msg.stake
+	local big, huge, legendary = self:tickerLevels()
+	local level
+	if win >= legendary * stake then
+		level = "legendary"
+	elseif win >= huge * stake then
+		level = "huge"
+	elseif win >= big * stake then
+		level = "big"
+	elseif round.free then
+		level = "free"
+	else
+		return
+	end
+	local data = {
+		player = sender, n = msg.n, stake = stake, win = win, mult = win / stake,
+		free = round.free and round.free.awarded or nil, symbol = round.free and round.free.symbol or nil,
+		level = level,
+	}
+	table.insert(self.tickList, 1, data)
+	self.tickList[TICKER_KEEP + 1] = nil
+	event(self, "ticker", data)
+end
+
+-- The last 20 ticker entries, newest first (memory only).
+function Session:ticker()
+	local out = {}
+	for i, d in ipairs(self.tickList) do
+		out[i] = d
+	end
+	return out
 end
 
 -- Payout, player side -------------------------------------------------------------------------
@@ -1039,6 +1184,7 @@ function Session:onMessage(sender, text)
 	elseif kind == "SPIN" then
 		self:alive(sender)
 		self:hear(sender, msg.n, msg.head, { n = msg.n, g = 0, head = msg.head })
+		self:onTickerSpin(sender, msg)
 	elseif kind == "GAM" then
 		self:alive(sender)
 		self:hear(sender, msg.n, msg.head, { n = msg.n, g = msg.g, head = msg.head })

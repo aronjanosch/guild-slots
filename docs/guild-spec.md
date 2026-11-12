@@ -153,6 +153,7 @@ session:lastSpin(player) -> { n =, head =, time = } or nil      what this client
 store.accounts[guild][player] = { entries = { text, text, … } }      the own account, entry text forms
 store.purchases = { … }                                              finished and failed purchases of this client (keep the last 100)
 store.heard[guild][player] = { n =, head =, time = }                 only kept when the listener is an officer
+store.keys[guild][player] = { K =, line =, time = }                  guild ticker: key and rules of the last purchase heard (200 players)
 ```
 
 On creation the session replays the own account with `Ledger.replay`. An account that does not
@@ -242,6 +243,32 @@ game:status()     -> "ok" | "no_account" | "no_funds" | "level" | "broken"
   (SPIN/GAM: the `n` of the message; the head stored is the one in the message).
 - A `HELLO` with a higher version than the own raises the event `notice` with `update` once per
   session. Versions compare numerically per dot-separated part.
+
+### Guild ticker
+
+At level 0 the key of a purchase (`Engine.purchaseKey(buyId, seed, nonce)`) is public on the wire, so
+a listener can recalculate the spins of other players and show notable wins as they happen.
+
+- When the session follows a complete, valid purchase of another player (the condition under which
+  it stores an anchor), it also stores `store.keys[guild][player] = { K, line, time }`. The latest
+  purchase wins; at most 200 players are kept, the oldest dropped. A `BUY1` for that player that
+  ends without a complete exchange (timeout, wrong seed, a settings line that does not hash to the
+  `lineHash`) drops a key that is not newer than it.
+- A `SPIN` of another player with `level` 0 and a stored key is recalculated with
+  `Engine.round(K, n, "", tbl, stake, cap)` when the stored line parses, names a lines table (T2),
+  and the stake is in its `E` and divides by the line count; otherwise it is ignored.
+- A notable round raises `env.onEvent("ticker", data)` with `data = { player, n, stake, win,
+  mult = win / stake, free, symbol, level }`. `free` and `symbol` come from the free games and are
+  nil without them. `level` is `legendary` (win >= 100 * stake), `huge` (>= 50), `big` (>= 20), or
+  `free` when free games were awarded and no win tier applies. The factors are constants at the
+  top of `Game/Guild.lua`; `env.tickerLevels = { big, huge, legendary }` overrides them.
+- Limits (`env.now()`): one recalculation per sender per second, five per second in total; skipped
+  spins are not announced. The own spins never. A `SPIN` whose `n` is not above the last `n` looked
+  at for that player is ignored, so nothing repeats.
+- `session:ticker()` returns the last 20 entries, newest first, in memory only.
+- Honesty: the ticker shows what the sender's `SPIN` implies under the purchase this client heard.
+  It is not a verification. A player whose account moved on to a purchase the listener missed
+  produces nothing or a wrong line; the payout check is the authority.
 
 ### What is ignored
 
