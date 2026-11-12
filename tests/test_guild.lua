@@ -945,6 +945,37 @@ t.test("mismatch: the account changed between PAYREQ and LOG", function()
 	t.eq(rej.reason, "mismatch", "reason")
 end)
 
+t.test("a PAY that does not fit the account fails and leaves it as it was", function()
+	local w, o, p = payWorld()
+	play(w, p, 5)
+	local balance = p.session:game().balance
+	local count = #account(p, "Pia").entries
+	local function pay(reqId, fields)
+		local f = { reqId = reqId, payId = "00000000000000d9", player = "Pia", amount = 10,
+			balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2 }
+		for k, v in pairs(fields or {}) do f[k] = v end
+		inject(w, "Olga", "PAY", f)
+	end
+	local id1 = assert(p.session:requestPayout("Olga", 10))
+	untilReady(w, o, id1)
+	pay(id1)
+	t.eq(p.session:payout().status, "failed", "failed")
+	t.eq(p.session:payout().code, "head_mismatch", "head_mismatch")
+	assert(o.session:reject(id1)) -- clears the officer side; the player's request is already over
+	local id2 = assert(p.session:requestPayout("Olga", 10))
+	pay(id2, { balanceAfter = balance })
+	t.eq(p.session:payout().code, "bad_balance", "ledger code")
+	-- A PAY from another officer than the one asked changes nothing.
+	w.officers.Otto = true
+	assert(o.session:reject(id2))
+	local id3 = assert(p.session:requestPayout("Olga", 10))
+	inject(w, "Otto", "PAY", { reqId = id3, payId = "00000000000000d8", player = "Pia", amount = 10,
+		balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2 })
+	t.eq(p.session:payout().status, "wait_decision", "other officer ignored")
+	t.eq(p.session:game().balance, balance, "balance unchanged")
+	t.eq(#account(p, "Pia").entries, count, "no entry")
+end)
+
 t.test("a LOG that does not unpack is rejected as bad_log", function()
 	local w, o = payWorld()
 	local id = "00000000000000e4"
