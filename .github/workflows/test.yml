@@ -31,6 +31,9 @@ jobs:
       - name: Run guild mode smoke test
         run: luajit tests/smoke_guild.lua
 
+      - name: Run payout smoke test
+        run: luajit tests/smoke_payout.lua
+
       - name: Regenerate test vectors and check for drift
         run: |
           if [ -f tools/ref/gen_vectors.py ]; then
