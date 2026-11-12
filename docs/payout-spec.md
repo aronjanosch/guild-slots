@@ -191,3 +191,14 @@ Rules fixed after the first implementation; the tests in `tests/test_guild.lua` 
 | PAY | payId, player, amount, balance after, head, number | plus `reqId` and `time` | binds the payout to the request; the entry stores the officer's time |
 | OSYNC | own purchases and payouts since a time, plus anchors | newest own anchor per player | the anchor is what check 1 needs; unknown ids only turn yellow |
 | Request lifetime | 30 s per step | 300 s per request, game locked meanwhile | the officer has to look at the report and pay by hand |
+
+## Known limits of version 1
+
+Officers are trusted in version 1 (design, section 13). These follow from that and stay open:
+
+- An officer can publish a wrong anchor (`PAY` or `OSYNC` with a high `anchors` value). Only a
+  higher anchor replaces a stored one, so that player's check 1 then stays red on every client.
+- A checking officer whose newest anchor is older than a later payout does not notice when the
+  player hides that payout. `OSYNC` narrows this, it does not close it.
+- With the self-test switch an officer can grant tokens to and pay out themself. The switch is
+  for testing with one character and should be removed or clearly marked before a release.
