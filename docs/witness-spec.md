@@ -317,3 +317,22 @@ The report's `unconfirmed` is shown to the officer. Request status order on the 
 | `AUD` / `AUDR` | whisper, list per witness | GUILD, 8 items, the witness adds what `RES` left out | whisper unmeasured; one message per witness keeps the budget |
 | Log range | since the last payout | since the last payout the officer holds a checkpoint for, else all | the cut needs a state both sides agree on; `PAY` now carries it |
 | `Z` at the witness | from the request | from the witness's own guild info | the witness does not know the player's account |
+
+## Clarifications (session)
+
+- `store.secret` is created on the first answer, not at session creation; a stale one is dropped at creation.
+- Witness rows are also capped at 5000 when a row is added, not only at creation.
+- Witness count check: `count` = names in `online()` other than the sender, plus the own name if missing; `A` passes when `2A >= count` and `A <= 2 * count`.
+- The witness rate limit counts sent answers per player per whole second (`floor(env.now())`).
+- Level 2: a witness answers whatever level its own guild info shows; level 1 needs its own valid settings for `Z`.
+- The player caps `A` at 10000 and takes it from `online()` at the moment of the spin.
+- A `WIT` counts while `env.now() <= due`; later ones are ignored.
+- If the `ok` entry fails the ledger, the session writes `void` with the same contributions, then `void` with none.
+- A `RES` refused by the queue is retried on every `tick()`; one that cannot be encoded is dropped.
+- `status()` order: `broken`, `payout`, `no_account`, `no_funds`, `few_players` / `no_officer`, `ok`; `collecting` is only a refusal code and a `state()`.
+- While collecting: `setStake` gives `busy`, `take` gives `no_gamble`, `gamble`/`spin` give `collecting`.
+- While collecting, `requestPayout` gives `busy` and a `BUY1` for the player fails with `busy` (the head must not change under the witness values).
+- A level 1/2 spin takes an open gamble offer when it is sent: `game.pending` is 0 while collecting.
+- After a void step at `g == G` the ledger keeps `pending`, but `game.pending` is 0 and `state()` is `idle`: no step can follow.
+- A restart void raises no `result` event; only `RES` goes out (the UI shows the account as it is).
+- Ticker at level 1/2: WIT values are kept only for players whose key is held; the listener's own `WIT` echo counts; any `RES` for the spin ends the record.

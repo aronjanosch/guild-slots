@@ -158,6 +158,48 @@ t.test("the longest valid BUY1 fits into 255 bytes", function()
 	t.ok(#text <= Proto.MAX, "longest BUY1 fits")
 end)
 
+t.test("WIT and RES: fields, round trips and limits", function()
+	t.eq(Proto.encode("WIT", { player = "Pia", kind = "spin", n = 7, g = 0, value = H16 }),
+		"1|WIT|Pia|spin|7|0|" .. H16, "WIT text")
+	t.eq(Proto.encode("RES", { kind = "gam", n = 7, g = 2, status = "void", who = "-", head = H32 }),
+		"1|RES|gam|7|2|void|-|" .. H32, "RES text")
+	local good = {
+		{ "WIT", { player = string.rep("x", 48), kind = "gam", n = 2147483648, g = 5, value = H16 } },
+		{ "RES", { kind = "spin", n = 1, g = 0, status = "ok", who = "abcd", head = H32 } },
+		{ "RES", { kind = "gam", n = 1, g = 1, status = "ok", who = string.rep("0123", 8), head = H32 } },
+	}
+	for _, s in ipairs(good) do
+		local text = assert(Proto.encode(s[1], s[2]))
+		t.ok(#text <= Proto.MAX, "fits")
+		local msg = Proto.decode(text)
+		t.ok(msg, "decodes " .. text)
+		for k, v in pairs(s[2]) do
+			t.eq(msg[k], v, s[1] .. "." .. k)
+		end
+	end
+	local bad = {
+		{ "WIT", { player = "Pia", kind = "spun", n = 1, g = 0, value = H16 } },
+		{ "WIT", { player = "Pia", kind = "spin", n = 1, g = 1, value = H16 } }, -- a spin has g 0
+		{ "WIT", { player = "Pia", kind = "gam", n = 1, g = 0, value = H16 } }, -- a step has g >= 1
+		{ "WIT", { player = "Pia", kind = "gam", n = 1, g = 6, value = H16 } },
+		{ "WIT", { player = "Pia", kind = "spin", n = 0, g = 0, value = H16 } },
+		{ "WIT", { player = "Pia", kind = "spin", n = 1, g = 0, value = H32 } },
+		{ "WIT", { player = "P|a", kind = "spin", n = 1, g = 0, value = H16 } },
+		{ "RES", { kind = "spin", n = 1, g = 0, status = "fine", who = "-", head = H32 } },
+		{ "RES", { kind = "spin", n = 1, g = 0, status = "ok", who = "", head = H32 } },
+		{ "RES", { kind = "spin", n = 1, g = 0, status = "ok", who = "abc", head = H32 } },
+		{ "RES", { kind = "spin", n = 1, g = 0, status = "ok", who = "ABCD", head = H32 } },
+		{ "RES", { kind = "spin", n = 1, g = 0, status = "ok", who = string.rep("0123", 9), head = H32 } },
+		{ "RES", { kind = "spin", n = 1, g = 0, status = "ok", who = "-", head = H16 } },
+	}
+	for i, s in ipairs(bad) do
+		local _, code = Proto.encode(s[1], s[2])
+		t.eq(code, "bad_field", "bad " .. i)
+	end
+	t.eq(Proto.decode("1|WIT|Pia|spin|1|1|" .. H16), nil, "decode checks kind and g")
+	t.eq(Proto.decode("1|RES|spin|1|0|ok|abcde|" .. H32), nil, "decode checks who")
+end)
+
 t.test("decode rejects everything that is not exactly a known message", function()
 	local bad = {
 		"", "1", "1|", "2|BUY3|" .. H16 .. "|" .. H32, "1|NOPE|x", "1|BUY3|" .. H16,

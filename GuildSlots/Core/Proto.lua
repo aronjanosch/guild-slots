@@ -96,6 +96,27 @@ local TYPES = {
 		field("head", hex(32)),
 		field("A", int(0, 10000)),
 	},
+	-- docs/witness-spec.md section 1. A spin has g 0, a gamble step g 1..5. `who` is "-" or 1..8
+	-- groups of 4 hex.
+	WIT = {
+		field("player", validName),
+		field("kind", function(v) return v == "spin" or v == "gam" end),
+		field("n", int(1, MAX_SPIN)),
+		field("g", int(0, 5)),
+		field("value", hex(16)),
+		valid = function(m) return (m.kind == "spin") == (m.g == 0) end,
+	},
+	RES = {
+		field("kind", function(v) return v == "spin" or v == "gam" end),
+		field("n", int(1, MAX_SPIN)),
+		field("g", int(0, 5)),
+		field("status", function(v) return v == "ok" or v == "void" end),
+		field("who", function(v)
+			return v == "-" or (type(v) == "string" and #v >= 4 and #v <= 32 and #v % 4 == 0 and not find(v, "[^0-9a-f]"))
+		end),
+		field("head", hex(32)),
+		valid = function(m) return (m.kind == "spin") == (m.g == 0) end,
+	},
 	PAYREQ = {
 		field("reqId", hex(16)),
 		field("officer", validName),

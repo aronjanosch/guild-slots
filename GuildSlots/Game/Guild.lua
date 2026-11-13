@@ -2,7 +2,8 @@ local _, ns = ...
 
 -- The guild session at security level 0 (docs/guild-spec.md section 6): the own account, token
 -- purchases between an officer and a player, level-0 spins and gamble steps, and presence.
--- Payouts, anchors and OSYNC follow docs/payout-spec.md section 4.
+-- Payouts, anchors and OSYNC follow docs/payout-spec.md section 4. Witnesses at level 1 and 2
+-- (both sides) and the level-1/2 ticker follow docs/witness-spec.md sections 2 to 4.
 -- Pure Lua 5.1: clock, random text, sending and the guild data all come in through `env`.
 -- onMessage never raises on any text a sender may put on the wire.
 
@@ -36,6 +37,14 @@ local TICKER_BIG, TICKER_HUGE, TICKER_LEGENDARY = 20, 50, 100 -- win / stake for
 local TICKER_KEEP = 20 -- entries session:ticker() returns
 local TICKER_PER_SENDER = 1 -- seconds between two recalculations for one sender
 local TICKER_PER_SECOND = 5 -- recalculations per second in total
+local WITNESS_INTERVAL = 2.5 -- seconds between spins or gamble steps at level 1 and 2
+local WITNESS_WINDOW = 1.5 -- seconds the player collects WIT, unless env.witnessWindow says otherwise
+local WITNESS_AGE = 14 * 86400 -- seconds a session secret and a witness row are kept
+local WITNESS_KEEP = 5000 -- witness rows per guild
+local WITNESS_RATE = 2 -- answers per player per second
+local MAX_A = 10000
+local TICKER_WIT_MAX = 16 -- WIT values the ticker keeps per SPIN
+local TICKER_WIT_AGE = 10 -- seconds they are kept
 local REASONS = { declined = true, mismatch = true, expired = true, busy = true, too_large = true, bad_log = true }
 
 -- Player request states that lock the game, and officer request states still open.
@@ -123,6 +132,11 @@ function Guild.new(env)
 		tickSecond = 0, -- the second tickCount counts in
 		tickCount = 0,
 		tickList = {}, -- ticker entries, newest first
+		tickWit = {}, -- player -> { n, stake, time, values = { name -> value }, count } of the newest level 1/2 SPIN
+		wreq = nil, -- the own open witness request: { rec (as in store.open), level, due, got, seen }
+		resOut = {}, -- RES messages still to send, oldest first
+		witRate = {}, -- player -> { second, count } of the answers sent to that player
+		witIndex = {}, -- "player|kind|n|g" -> witness row
 		request = nil, -- the own payout request (player side)
 		reqs = {}, -- payout requests addressed to this officer, still open, oldest first
 		nextHello = nil,
@@ -148,6 +162,8 @@ function Guild.new(env)
 	else
 		self.state = Ledger.start(self.guild, self.me)
 	end
+	self:initWitness()
+	self:restoreOpen()
 
 	self.gameObj = setmetatable({ session = self, stake = nil }, Game)
 	self.gameObj:refresh()
@@ -311,7 +327,7 @@ function Session:onBuy1(sender, msg)
 				code = "busy"
 			end
 		end
-		if not code and self:payoutOpen() then
+		if not code and (self:payoutOpen() or self.wreq) then
 			code = "busy"
 		end
 		if not code and self.broken then
@@ -504,28 +520,90 @@ function Session:tickerLevels()
 	return lv.big or TICKER_BIG, lv.huge or TICKER_HUGE, lv.legendary or TICKER_LEGENDARY
 end
 
+-- The stored key of another player, or nil.
+function Session:tickerKey(player)
+	local list = self.store.keys and self.store.keys[self.guild]
+	local k = type(list) == "table" and list[player]
+	if type(k) ~= "table" or type(k.K) ~= "string" then
+		return nil
+	end
+	return k
+end
+
 function Session:onTickerSpin(sender, msg)
-	local env = self.env
-	if sender == self.me or msg.level ~= 0 or type(msg.n) ~= "number" or type(msg.stake) ~= "number" then
+	if sender == self.me or type(msg.n) ~= "number" or type(msg.stake) ~= "number" then
 		return
 	end
-	local list = self.store.keys and self.store.keys[self.guild]
-	local k = type(list) == "table" and list[sender]
-	if type(k) ~= "table" or type(k.K) ~= "string" then
+	if msg.level == 0 then
+		return self:tickerRound(sender, msg.n, msg.stake, "")
+	end
+	-- Level 1 and 2: keep the WIT values of this SPIN until the player's RES names the included ones.
+	if self:tickerKey(sender) then
+		self.tickWit[sender] = { n = msg.n, stake = msg.stake, time = self.env.now(), values = {}, count = 0 }
+	end
+end
+
+function Session:onTickerWit(sender, msg)
+	local rec = self.tickWit[msg.player]
+	if not rec or msg.kind ~= "spin" or msg.n ~= rec.n or sender == msg.player or rec.values[sender]
+		or rec.count >= TICKER_WIT_MAX or self.env.now() - rec.time > TICKER_WIT_AGE then
+		return
+	end
+	rec.values[sender] = msg.value
+	rec.count = rec.count + 1
+end
+
+-- A RES of a level 1/2 spin: every 4-hex group of `who` must match exactly one kept value.
+function Session:onTickerRes(sender, msg)
+	if msg.kind ~= "spin" then
+		return
+	end
+	local rec = self.tickWit[sender]
+	self.tickWit[sender] = nil
+	if not rec or msg.status ~= "ok" or msg.n ~= rec.n or self.env.now() - rec.time > TICKER_WIT_AGE
+		or msg.who == "-" then
+		return
+	end
+	local list, used = {}, {}
+	for i = 1, #msg.who, 4 do
+		local tag = sub(msg.who, i, i + 3)
+		local match
+		for name, value in pairs(rec.values) do
+			if sub(value, 1, 4) == tag then
+				if match then
+					return -- two values carry this tag
+				end
+				match = name
+			end
+		end
+		if not match or used[match] then
+			return
+		end
+		used[match] = true
+		list[#list + 1] = { name = match, value = rec.values[match], lot = 0 }
+	end
+	self:tickerRound(sender, rec.n, rec.stake, Engine.contribs(list))
+end
+
+-- Recalculates round n of another player under the stored key and announces it when notable.
+function Session:tickerRound(sender, n, stake, contribs)
+	local env = self.env
+	local k = self:tickerKey(sender)
+	if not k then
 		return
 	end
 	local last = self.tickLast[sender]
-	if last and msg.n <= last then
+	if last and n <= last then
 		return
 	end
 	local s = parsedLine(k.line) and Settings.parse(k.line)
 	local tbl = s and Tables.get(s.T)
-	if not tbl or tbl.kind ~= "lines" or msg.stake % tbl.lineCount ~= 0 then
+	if not tbl or tbl.kind ~= "lines" or stake % tbl.lineCount ~= 0 then
 		return
 	end
 	local allowed = false
 	for _, v in ipairs(s.E) do
-		if v == msg.stake then
+		if v == stake then
 			allowed = true
 		end
 	end
@@ -546,12 +624,12 @@ function Session:onTickerSpin(sender, msg)
 	end
 	self.tickCount = self.tickCount + 1
 	self.tickAt[sender] = now
-	self.tickLast[sender] = msg.n
-	local ok, round = pcall(Engine.round, k.K, msg.n, "", tbl, msg.stake, s.C)
+	self.tickLast[sender] = n
+	local ok, round = pcall(Engine.round, k.K, n, contribs, tbl, stake, s.C)
 	if not ok or type(round) ~= "table" or type(round.win) ~= "number" then
 		return
 	end
-	local win, stake = round.win, msg.stake
+	local win = round.win
 	local big, huge, legendary = self:tickerLevels()
 	local level
 	if win >= legendary * stake then
@@ -566,7 +644,7 @@ function Session:onTickerSpin(sender, msg)
 		return
 	end
 	local data = {
-		player = sender, n = msg.n, stake = stake, win = win, mult = win / stake,
+		player = sender, n = n, stake = stake, win = win, mult = win / stake,
 		free = round.free and round.free.awarded or nil, symbol = round.free and round.free.symbol or nil,
 		level = level,
 	}
@@ -582,6 +660,370 @@ function Session:ticker()
 		out[i] = d
 	end
 	return out
+end
+
+-- Witness side (docs/witness-spec.md section 2) ----------------------------------------------
+
+local function witKey(player, kind, n, g)
+	return player .. "|" .. kind .. "|" .. n .. "|" .. g
+end
+
+-- Drops a stale secret and old or surplus witness rows, and indexes the rest. Runs at creation.
+function Session:initWitness()
+	local now = self.env.now()
+	local sec = self.store.secret
+	if sec ~= nil and (type(sec) ~= "table" or type(sec.S) ~= "string" or #sec.S ~= 32 or type(sec.time) ~= "number"
+		or now - sec.time >= WITNESS_AGE) then
+		self.store.secret = nil
+	end
+	local all = self.store.witness
+	local list = type(all) == "table" and all[self.guild]
+	if type(list) ~= "table" then
+		return
+	end
+	local kept = {}
+	for _, row in ipairs(list) do
+		if type(row) == "table" and type(row.time) == "number" and now - row.time < WITNESS_AGE
+			and type(row.player) == "string" and type(row.value) == "string" and type(row.n) == "number"
+			and type(row.g) == "number" and (row.kind == "spin" or row.kind == "gam") then
+			kept[#kept + 1] = row
+		end
+	end
+	local out = {}
+	for i = math.max(1, #kept - WITNESS_KEEP + 1), #kept do
+		out[#out + 1] = kept[i]
+		self.witIndex[witKey(kept[i].player, kept[i].kind, kept[i].n, kept[i].g)] = kept[i]
+	end
+	all[self.guild] = out
+end
+
+-- The session secret S, created on first use and replaced after 14 days.
+function Session:secret()
+	local now = self.env.now()
+	local sec = self.store.secret
+	if type(sec) ~= "table" or type(sec.S) ~= "string" or #sec.S ~= 32 or type(sec.time) ~= "number"
+		or now - sec.time >= WITNESS_AGE then
+		sec = { S = self.env.randomHex(32), time = floor(now) }
+		self.store.secret = sec
+	end
+	return sec.S
+end
+
+function Session:addWitnessRow(row)
+	local list = subtable(subtable(self.store, "witness"), self.guild)
+	list[#list + 1] = row
+	self.witIndex[witKey(row.player, row.kind, row.n, row.g)] = row
+	if #list > WITNESS_KEEP then
+		local old = table.remove(list, 1)
+		local key = witKey(old.player, old.kind, old.n, old.g)
+		if self.witIndex[key] == old then
+			self.witIndex[key] = nil
+		end
+	end
+end
+
+-- A SPIN or GAM of another member at level 1 or 2.
+function Session:answerRequest(sender, msg, kind)
+	local env = self.env
+	if sender == self.me or (msg.level ~= 1 and msg.level ~= 2) then
+		return
+	end
+	local g = kind == "gam" and msg.g or 0
+	if msg.level == 2 then
+		if not env.isOfficer(self.me) then
+			return
+		end
+	else
+		local A = msg.A
+		if A < 1 or A > MAX_A then
+			return
+		end
+		local count, meOnline = 0, false
+		for _, s in ipairs(self:online()) do
+			if s.name ~= sender then
+				count = count + 1
+			end
+			if s.name == self.me then
+				meOnline = true
+			end
+		end
+		if not meOnline then
+			count = count + 1
+		end
+		if 2 * A < count or A > 2 * count then
+			return
+		end
+		local settings = parsedLine(env.line())
+		if not settings or not Engine.drawn(Engine.lot(self.me, sender, kind, msg.n, g), A, settings.Z) then
+			return
+		end
+	end
+	if env.budget() < SPIN_BUDGET then
+		return
+	end
+	local now = env.now()
+	local second = floor(now)
+	local rate = self.witRate[sender]
+	if not rate or rate.second ~= second then
+		rate = { second = second, count = 0 }
+		self.witRate[sender] = rate
+	end
+	if rate.count >= WITNESS_RATE then
+		return
+	end
+	local amount = kind == "gam" and msg.amount or msg.stake
+	local row = self.witIndex[witKey(sender, kind, msg.n, g)]
+	if row then
+		if row.amount ~= amount or row.head ~= msg.head then
+			return -- the same number with other terms: a retry after seeing the result
+		end
+	else
+		row = {
+			player = sender, kind = kind, n = msg.n, g = g, amount = amount, head = msg.head, time = now,
+			value = Engine.witnessValue(self:secret(), sender, kind, msg.n, g, amount, msg.head),
+		}
+		self:addWitnessRow(row)
+	end
+	if self:send("WIT", { player = sender, kind = kind, n = msg.n, g = g, value = row.value }) then
+		rate.count = rate.count + 1
+	end
+end
+
+-- A RES of another member marks the row of that request; the first RES wins.
+function Session:markWitness(sender, msg)
+	local row = self.witIndex[witKey(sender, msg.kind, msg.n, msg.g)]
+	if not row or row.res ~= nil then
+		return
+	end
+	local tag, hit = sub(row.value, 1, 4), false
+	if msg.who ~= "-" then
+		for i = 1, #msg.who, 4 do
+			if sub(msg.who, i, i + 3) == tag then
+				hit = true
+			end
+		end
+	end
+	if msg.status == "ok" then
+		row.res = hit and "in" or "out"
+	else
+		row.res = hit and "void_in" or "void_out"
+	end
+end
+
+-- Player side at level 1 and 2 (docs/witness-spec.md section 3) ----------------------------------
+
+-- The entry of a request with the given status and contributions.
+local function requestEntry(rec, status, contribs)
+	if rec.kind == "spin" then
+		return { type = "S", n = rec.n, stake = rec.stake, A = rec.A, status = status, contribs = contribs }
+	end
+	return { type = "G", n = rec.n, g = rec.g, A = rec.A, status = status, contribs = contribs }
+end
+
+-- A for a request at this level, or nil and few_players / no_officer.
+function Session:witnessesOnline(level, W)
+	local env, A = self.env, 0
+	for _, s in ipairs(self:online()) do
+		if s.name ~= self.me then
+			if level == 2 and env.isOfficer(s.name) then
+				return 0
+			end
+			A = A + 1
+		end
+	end
+	if level == 2 then
+		return nil, "no_officer"
+	end
+	if A < W then
+		return nil, "few_players"
+	end
+	return math.min(A, MAX_A)
+end
+
+-- Stores the open request, sends SPIN or GAM and starts the window. r = { kind, n, g, stake, amount, A }.
+function Session:startRequest(r)
+	local env, state = self.env, self.state
+	local level = state.settings.L
+	local head = Ledger.shortHead(state)
+	local probe, code = Ledger.apply(Ledger.copy(state), requestEntry(r, "void", ""))
+	if not probe then
+		return nil, code
+	end
+	local now = env.now()
+	local rec = { kind = r.kind, n = r.n, g = r.g, stake = r.stake, amount = r.amount, A = r.A, head = head, time = now }
+	local opens = subtable(subtable(self.store, "open"), self.guild)
+	opens[self.me] = rec
+	local ok
+	if r.kind == "spin" then
+		ok = self:send("SPIN", { n = r.n, stake = r.stake, level = level, head = head, A = r.A })
+	else
+		ok = self:send("GAM", { n = r.n, g = r.g, amount = r.amount, level = level, head = head, A = r.A })
+	end
+	if not ok then
+		opens[self.me] = nil
+		return nil, "send"
+	end
+	local due = now + (env.witnessWindow or WITNESS_WINDOW)
+	self.wreq = { rec = rec, level = level, due = due, got = {}, seen = {} }
+	if r.kind == "spin" then
+		self.declined = true -- an open gamble offer is taken; the spin's own offer comes with its entry
+	end
+	self.lastAction = now
+	self.gameObj:refresh()
+	return { kind = "wait", what = r.kind == "spin" and "spin" or "gamble", n = r.n, g = r.g, due = due }
+end
+
+-- A WIT for the own open request.
+function Session:collectWit(sender, msg)
+	local q = self.wreq
+	if not q or msg.player ~= self.me or sender == self.me or q.seen[sender] then
+		return
+	end
+	local rec = q.rec
+	if msg.kind ~= rec.kind or msg.n ~= rec.n or msg.g ~= rec.g or self.env.now() > q.due then
+		return
+	end
+	local lot = Engine.lot(sender, self.me, rec.kind, rec.n, rec.g)
+	if q.level == 1 then
+		if not Engine.drawn(lot, rec.A, self.state.settings.Z) then
+			return
+		end
+	elseif not self.env.isOfficer(sender) then
+		return
+	end
+	q.seen[sender] = true
+	q.got[#q.got + 1] = { name = sender, value = msg.value, lot = lot }
+end
+
+function Session:queueRes(rec, status, list)
+	local tags = {}
+	for i, c in ipairs(list) do
+		tags[i] = sub(c.value, 1, 4)
+	end
+	self.resOut[#self.resOut + 1] = {
+		kind = rec.kind, n = rec.n, g = rec.kind == "spin" and 0 or rec.g, status = status,
+		who = #tags > 0 and table.concat(tags) or "-", head = Ledger.shortHead(self.state),
+	}
+end
+
+function Session:pumpRes()
+	while #self.resOut > 0 do
+		local text = Proto.encode("RES", self.resOut[1])
+		if text and not self.env.send(text) then
+			return -- refused by the queue: again on the next tick
+		end
+		table.remove(self.resOut, 1)
+	end
+end
+
+-- The level-0 result tables (guild-spec section 6), shared with the level 1/2 results.
+local function spinResult(state, entry, info)
+	local tbl = state.tbl
+	if tbl.kind == "lines" then
+		return {
+			kind = "spin", n = entry.n, stake = entry.stake, win = info.win, balance = info.balance,
+			pending = info.pending, canGamble = info.pending > 0, round = info.round,
+		}
+	end
+	local stops = info.stops
+	local window = {}
+	for r = 1, 3 do
+		window[r] = { Tables.window(tbl, r, stops[r]) }
+	end
+	local a, b, c = Tables.symbols(tbl, stops[1], stops[2], stops[3])
+	local win = info.win
+	return {
+		kind = "spin",
+		n = entry.n,
+		stake = entry.stake,
+		stops = { stops[1], stops[2], stops[3] },
+		symbols = { a, b, c },
+		window = window,
+		multiplier = info.multiplier,
+		win = win,
+		balance = info.balance,
+		pending = info.pending,
+		canGamble = info.pending > 0,
+		winReels = { win > 0, win > 0, win > 0 and a == c },
+		anticipation = a == b,
+	}
+end
+
+local function gambleResult(entry, amount, info)
+	return {
+		kind = "gamble", won = info.won, step = entry.g, amount = amount, pending = info.pending,
+		balance = info.balance, canGamble = info.pending > 0,
+	}
+end
+
+-- At the first tick at or after `due`: write the entry, send RES, raise `result`.
+function Session:settleRequest()
+	local q = self.wreq
+	if not q or self.env.now() < q.due then
+		return
+	end
+	self.wreq = nil
+	local rec = q.rec
+	local settings = self.state.settings
+	local need = q.level == 1 and settings.W or 1
+	local contribs = Engine.contribs(q.got)
+	local list = Engine.parseContribs(contribs) or {}
+	local status = #list >= need and "ok" or "void"
+	local entry = requestEntry(rec, status, contribs)
+	local info = self:append(entry)
+	if not info and status == "ok" then
+		status, entry = "void", requestEntry(rec, "void", contribs)
+		info = self:append(entry)
+	end
+	if not info then
+		list = {}
+		entry = requestEntry(rec, "void", "")
+		info = self:append(entry)
+	end
+	local opens = self.store.open and self.store.open[self.guild]
+	if type(opens) == "table" then
+		opens[self.me] = nil
+	end
+	if rec.kind == "spin" then
+		self.declined = false
+	end
+	if not info then
+		self.gameObj:refresh()
+		return -- cannot happen for a request that passed the probe; nothing to report
+	end
+	self:queueRes(rec, status, list)
+	self:pumpRes()
+	self.gameObj:refresh()
+	local result
+	if status == "ok" then
+		result = rec.kind == "spin" and spinResult(self.state, entry, info) or gambleResult(entry, rec.amount, info)
+	elseif rec.kind == "spin" then
+		result = { kind = "void", what = "spin", n = rec.n, need = need, got = #list, balance = self.state.balance }
+	else
+		result = {
+			kind = "void", what = "gamble", n = rec.n, g = rec.g, need = need, got = #list,
+			balance = self.state.balance, pending = self.gameObj.pending,
+		}
+	end
+	event(self, "result", result)
+end
+
+-- An open request found at creation: void when the account is still where it was, else dropped.
+-- Asking again after a reload would let a modified client look at the result first.
+function Session:restoreOpen()
+	local opens = self.store.open and self.store.open[self.guild]
+	if type(opens) ~= "table" or opens[self.me] == nil then
+		return
+	end
+	local rec = opens[self.me]
+	opens[self.me] = nil
+	if type(rec) ~= "table" or self.broken or not self:hasAccount() or rec.head ~= Ledger.shortHead(self.state)
+		or (rec.kind ~= "spin" and rec.kind ~= "gam") then
+		return
+	end
+	if self:append(requestEntry(rec, "void", "")) then
+		self:queueRes(rec, "void", {})
+	end
 end
 
 -- Payout, player side -------------------------------------------------------------------------
@@ -647,7 +1089,7 @@ function Session:requestPayout(officer, amount)
 		return nil, "bad_officer"
 	end
 	self:expire()
-	if self:payoutOpen() then
+	if self:payoutOpen() or self.wreq then
 		return nil, "busy"
 	end
 	for _, p in ipairs(self.open) do
@@ -1123,6 +1565,8 @@ function Session:tick()
 		local jitter = (tonumber(env.randomHex(4), 16) or 0) % (HELLO_JITTER + 1)
 		self.nextHello = now + HELLO_EVERY + jitter
 	end
+	self:settleRequest()
+	self:pumpRes()
 	self:pumpLog()
 	self:verifyStep()
 	self:osync()
@@ -1185,9 +1629,21 @@ function Session:onMessage(sender, text)
 		self:alive(sender)
 		self:hear(sender, msg.n, msg.head, { n = msg.n, g = 0, head = msg.head })
 		self:onTickerSpin(sender, msg)
+		self:answerRequest(sender, msg, "spin")
 	elseif kind == "GAM" then
 		self:alive(sender)
 		self:hear(sender, msg.n, msg.head, { n = msg.n, g = msg.g, head = msg.head })
+		self:answerRequest(sender, msg, "gam")
+	elseif kind == "WIT" then
+		self:alive(sender)
+		self:collectWit(sender, msg)
+		self:onTickerWit(sender, msg)
+	elseif kind == "RES" then
+		self:alive(sender)
+		if sender ~= self.me then
+			self:markWitness(sender, msg)
+			self:onTickerRes(sender, msg)
+		end
 	elseif kind == "PAYREQ" then
 		self:alive(sender)
 		self:onPayReq(sender, msg)
@@ -1280,7 +1736,8 @@ function Session:game()
 end
 
 -- Game ---------------------------------------------------------------------------------------
--- Same shape as Solo (Game/Solo.lua), backed by the ledger.
+-- Same shape as Solo (Game/Solo.lua), backed by the ledger. At level 1 and 2 spin() and gamble()
+-- return a `wait` table and the result arrives as the `result` event (docs/witness-spec.md section 3).
 
 -- Copies the account state into the public fields the slot window reads.
 function Game:refresh()
@@ -1288,12 +1745,15 @@ function Game:refresh()
 	local state = s:hasAccount() and s.state or nil
 	local settings = state and state.settings or Settings.defaults()
 	self.settings = settings
+	self.level = state and settings.L or 0
 	self.tbl = state and state.tbl or Tables.get(settings.T)
 	self.stakes = settings.E
 	self.maxGamble = settings.G
 	self.cap = settings.C
 	self.balance = state and state.balance or 0
-	self.pending = (state and not s.declined) and state.pending or 0
+	-- After a void step at the last step the ledger still holds pending, but no step can follow.
+	local open = state and not s.declined and state.g < settings.G
+	self.pending = open and state.pending or 0
 	local keep = false
 	for _, v in ipairs(self.stakes) do
 		if v == self.stake then keep = true end
@@ -1304,6 +1764,9 @@ function Game:refresh()
 end
 
 function Game:state()
+	if self.session.wreq then
+		return "collecting"
+	end
 	return self.pending > 0 and "gamble" or "idle"
 end
 
@@ -1331,16 +1794,20 @@ function Game:status()
 	if not s:hasAccount() then
 		return "no_account"
 	end
-	if s.state.settings.L ~= 0 then
-		return "level"
-	end
 	if self.balance < self.stake and self:state() ~= "gamble" then
 		return "no_funds"
+	end
+	local level = s.state.settings.L
+	if level ~= 0 then
+		local A, code = s:witnessesOnline(level, s.state.settings.W)
+		if not A then
+			return code
+		end
 	end
 	return "ok"
 end
 
--- Shared checks before a spin or gamble step: account, level, interval and queue budget.
+-- Shared checks before a spin or gamble step: account, payout lock and an open request.
 function Game:ready()
 	local s = self.session
 	if s.broken then
@@ -1352,8 +1819,8 @@ function Game:ready()
 	if not s:hasAccount() then
 		return nil, "no_account"
 	end
-	if s.state.settings.L ~= 0 then
-		return nil, "level"
+	if s.wreq then
+		return nil, "collecting"
 	end
 	return true
 end
@@ -1361,7 +1828,8 @@ end
 function Game:waiting()
 	local s = self.session
 	local now = s.env.now()
-	return (s.lastAction and now - s.lastAction < SPIN_INTERVAL) or s.env.budget() < SPIN_BUDGET
+	local interval = s.state.settings.L == 0 and SPIN_INTERVAL or WITNESS_INTERVAL
+	return (s.lastAction and now - s.lastAction < interval) or s.env.budget() < SPIN_BUDGET
 end
 
 function Game:spin()
@@ -1373,6 +1841,18 @@ function Game:spin()
 	local stake = self.stake
 	if s.state.balance < stake then
 		return nil, "no_funds"
+	end
+	local settings = s.state.settings
+	if settings.L ~= 0 then
+		local A
+		A, code = s:witnessesOnline(settings.L, settings.W)
+		if not A then
+			return nil, code
+		end
+		if self:waiting() then
+			return nil, "wait"
+		end
+		return s:startRequest({ kind = "spin", n = s.state.n + 1, g = 0, stake = stake, amount = stake, A = A })
 	end
 	if self:waiting() then
 		return nil, "wait"
@@ -1392,42 +1872,7 @@ function Game:spin()
 	s.declined = false
 	s.lastAction = s.env.now()
 	self:refresh()
-
-	local tbl = s.state.tbl
-	if tbl.kind == "lines" then
-		return {
-			kind = "spin",
-			n = entry.n,
-			stake = stake,
-			win = info.win,
-			balance = info.balance,
-			pending = info.pending,
-			canGamble = info.pending > 0,
-			round = info.round,
-		}
-	end
-	local stops = info.stops
-	local window = {}
-	for r = 1, 3 do
-		window[r] = { Tables.window(tbl, r, stops[r]) }
-	end
-	local a, b, c = Tables.symbols(tbl, stops[1], stops[2], stops[3])
-	local win = info.win
-	return {
-		kind = "spin",
-		n = entry.n,
-		stake = stake,
-		stops = { stops[1], stops[2], stops[3] },
-		symbols = { a, b, c },
-		window = window,
-		multiplier = info.multiplier,
-		win = win,
-		balance = info.balance,
-		pending = info.pending,
-		canGamble = info.pending > 0,
-		winReels = { win > 0, win > 0, win > 0 and a == c },
-		anticipation = a == b,
-	}
+	return spinResult(s.state, entry, info)
 end
 
 function Game:take()
@@ -1444,6 +1889,9 @@ function Game:gamble()
 	if self.session:payoutOpen() then
 		return nil, "payout"
 	end
+	if self.session.wreq then
+		return nil, "collecting"
+	end
 	if self:state() ~= "gamble" then
 		return nil, "no_gamble"
 	end
@@ -1451,12 +1899,24 @@ function Game:gamble()
 	if not ok then
 		return nil, code
 	end
-	if self:waiting() then
-		return nil, "wait"
-	end
 	local s = self.session
 	local state = s.state
 	local amount = state.pending
+	local settings = state.settings
+	if settings.L ~= 0 then
+		local A
+		A, code = s:witnessesOnline(settings.L, settings.W)
+		if not A then
+			return nil, code
+		end
+		if self:waiting() then
+			return nil, "wait"
+		end
+		return s:startRequest({ kind = "gam", n = state.n, g = state.g + 1, amount = amount, A = A })
+	end
+	if self:waiting() then
+		return nil, "wait"
+	end
 	local entry = { type = "G", n = state.n, g = state.g + 1, A = 0, status = "ok", contribs = "" }
 	local head = Ledger.shortHead(state)
 	local info
@@ -1470,15 +1930,7 @@ function Game:gamble()
 	s:append(entry)
 	s.lastAction = s.env.now()
 	self:refresh()
-	return {
-		kind = "gamble",
-		won = info.won,
-		step = entry.g,
-		amount = amount,
-		pending = info.pending,
-		balance = info.balance,
-		canGamble = info.pending > 0,
-	}
+	return gambleResult(entry, amount, info)
 end
 
 function Game:info()
