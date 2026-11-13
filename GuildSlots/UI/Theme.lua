@@ -76,6 +76,7 @@ Theme.alpha = {
 	introGlow = 0.55, rays = 0.85, shine = 0.6, cellGlow = 0.9, expandGlow = 0.95,
 	breatheMin = 0.15, breatheMax = 0.6, landFlash = 0.7, tease = { 0.3, 1 },
 	linePulse = { 0.55, 1 }, restingLines = 0.55, bigTitle = { 0.75, 1 }, rowHover = 0.5,
+	unfocused = 0.5,
 }
 
 Theme.icons = {
@@ -456,6 +457,7 @@ Theme.size = {
 -- Timings, all in seconds.
 
 Theme.timing = {
+	focusFade = 0.4, -- seconds for the full fade between hovered and unfocused
 	-- Every spin of a reel has the same shape: nudge, ramp, cruise, braking, bounce.
 	-- Cruise speed: 28 rows/s is 0.47 rows per frame at 60 fps, a blur that still reads as
 	-- moving down. Above 30 rows/s (0.5 rows per frame) the evenly spaced icon gaps alias and

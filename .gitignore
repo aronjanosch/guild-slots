@@ -2,3 +2,4 @@
 luac.out
 __pycache__/
 *.pyc
+dist/

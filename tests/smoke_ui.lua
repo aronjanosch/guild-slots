@@ -473,7 +473,12 @@ local function scenario(locale, lean)
 	queue(0, 0, 0, 0, 0)
 	onKey(W.frame, "SPACE")
 	assert(S.phase == "idle", "space ignored without the mouse over the window")
+	local upd = W.frame:GetScript("OnUpdate")
+	for _ = 1, 20 do upd(W.frame, 0.1) end
+	assert(math.abs(W.frame:GetAlpha() - 0.5) < 1e-9, "window fades to half while the mouse is elsewhere")
 	stub.mouseOver = true
+	for _ = 1, 20 do upd(W.frame, 0.1) end
+	assert(W.frame:GetAlpha() == 1, "window is opaque while hovered")
 	onKey(W.frame, "W")
 	assert(W.frame._propagate == true, "other keys propagate")
 	onKey(W.frame, "SPACE")

@@ -1755,10 +1755,29 @@ local function updateEffects(now)
 	end
 end
 
-local function onUpdate(_, elapsed)
+-- The window fades to Theme.alpha.unfocused while the mouse is elsewhere, so it can stay open
+-- over the game world. A window that is hovered is fully opaque.
+local function updateFocusAlpha(f, elapsed)
+	local over = f.IsMouseOver and f:IsMouseOver()
+	local target = over and 1 or Theme.alpha.unfocused
+	local a = S.focusAlpha or 1
+	if a ~= target then
+		local step = elapsed / Theme.timing.focusFade
+		if a < target then
+			a = math.min(target, a + step)
+		else
+			a = math.max(target, a - step)
+		end
+		S.focusAlpha = a
+		f:SetAlpha(a)
+	end
+end
+
+local function onUpdate(f, elapsed)
 	-- Absolute-time animation; cap hitches so a long frame does not skip whole phases.
 	elapsed = tonumber(elapsed) or 0
 	if elapsed > 0.25 then elapsed = 0.25 end
+	updateFocusAlpha(f, elapsed)
 	S.now = S.now + elapsed
 	local now = S.now
 
@@ -2544,6 +2563,8 @@ local function build()
 	f:SetScript("OnUpdate", onUpdate)
 	f:SetScript("OnKeyDown", onKeyDown)
 	f:SetScript("OnShow", function()
+		S.focusAlpha = 1
+		f:SetAlpha(1)
 		updateKeyboard()
 		playSound("click")
 	end)
