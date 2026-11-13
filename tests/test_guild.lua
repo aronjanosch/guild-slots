@@ -690,6 +690,13 @@ t.test("a full payout: officer checks, confirms, the player and a third client h
 	t.eq(e.payId, payId, "payId")
 	t.eq(e.officer, "Olga", "officer")
 	t.eq(e.balanceAfter, balance - 100, "balanceAfter")
+	-- LOGREQ asks for the whole account; PAY carries the checkpoint after the payout entry.
+	local sent = {}
+	for _, m in ipairs(w.log) do sent[m.msg.type] = m.msg end
+	t.eq(sent.LOGREQ.from, 0, "LOGREQ.from")
+	t.eq(sent.PAY.n, state.n, "PAY.n")
+	t.ok(state.n > 0, "spins in the account")
+	t.eq(sent.PAY.ck, Ledger.checkpointKey(state.n, state.K, state.line), "PAY.ck")
 	-- The same anchor everywhere.
 	local want = Ledger.shortHead(state)
 	for _, s in ipairs({ o, p, tom }) do
@@ -952,7 +959,7 @@ t.test("a PAY that does not fit the account fails and leaves it as it was", func
 	local count = #account(p, "Pia").entries
 	local function pay(reqId, fields)
 		local f = { reqId = reqId, payId = "00000000000000d9", player = "Pia", amount = 10,
-			balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2 }
+			balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2, n = 5, ck = string.rep("0", 16) }
 		for k, v in pairs(fields or {}) do f[k] = v end
 		inject(w, "Olga", "PAY", f)
 	end
@@ -970,7 +977,7 @@ t.test("a PAY that does not fit the account fails and leaves it as it was", func
 	assert(o.session:reject(id2))
 	local id3 = assert(p.session:requestPayout("Olga", 10))
 	inject(w, "Otto", "PAY", { reqId = id3, payId = "00000000000000d8", player = "Pia", amount = 10,
-		balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2 })
+		balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2, n = 5, ck = string.rep("0", 16) })
 	t.eq(p.session:payout().status, "wait_decision", "other officer ignored")
 	t.eq(p.session:game().balance, balance, "balance unchanged")
 	t.eq(#account(p, "Pia").entries, count, "no entry")
@@ -983,7 +990,8 @@ local function payFor(p, reqId, amount, payId)
 		balanceAfter = state.balance - amount, time = 9000 }
 	assert(Ledger.apply(state, entry))
 	return { reqId = reqId, payId = entry.payId, player = "Pia", amount = amount, balanceAfter = entry.balanceAfter,
-		time = entry.time, head = Ledger.shortHead(state), anchors = state.anchors }
+		time = entry.time, head = Ledger.shortHead(state), anchors = state.anchors,
+		n = state.n, ck = Ledger.checkpointKey(state.n, state.K, state.line) }
 end
 
 t.test("an open request survives a reload: lock, LOGREQ and PAY", function()

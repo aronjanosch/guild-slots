@@ -549,6 +549,80 @@ t.test("replay reports the first failing entry and its index", function()
 	t.eq(st, nil) t.eq(code, "bad_entry") t.eq(index, 2)
 end)
 
+-- Checkpoints (docs/witness-spec.md section 6) ----------------------------------------------------
+
+t.test("checkpointKey is the first 16 hex of Sha256.hex(GS1|CK|n|K|line)", function()
+	local K = keyOf(REF_BUY)
+	-- Literals computed independently with Python's hashlib.
+	t.eq(K, "527ebd46fa51ecd5e06dfae1b8d355459ebe986607484e404a94dff357807c16", "key")
+	t.eq(Ledger.checkpointKey(5, K, REF_BUY.line), "41384f3feb49c375", "n = 5")
+	t.eq(Ledger.checkpointKey(0, K, REF_BUY.line), "f118e307b1eff7b5", "n = 0")
+end)
+
+-- REF_BUY, spins 1..5 (all lose: 950 left), a payout of 100, then the suffix.
+local function checkpointAccount()
+	local entries = { REF_BUY }
+	for n = 1, 5 do entries[#entries + 1] = spin(n, 10) end
+	local before = new(entries)
+	local p = pay(1, 100, 850)
+	entries[#entries + 1] = p
+	local cp = {
+		head = before.head, n = 5, payout = Ledger.encode(p), purchase = Ledger.encode(REF_BUY), anchors = 2,
+		count = #entries,
+	}
+	return entries, cp
+end
+
+t.test("resume gives the state right after the payout", function()
+	local entries, cp = checkpointAccount()
+	local full = new(entries)
+	local st, code = Ledger.resume(GUILD, PLAYER, cp)
+	t.ok(st, "resumed: " .. tostring(code))
+	for _, k in ipairs(SCALARS) do
+		t.eq(st[k], full[k], "field " .. k)
+	end
+	t.eq(st.guild, GUILD, "guild")
+	t.eq(st.player, PLAYER, "player")
+	t.eq(st.settings.L, 0, "settings")
+	t.eq(st.tbl, full.tbl, "table")
+	t.eq(st.keyed("x"), full.keyed("x"), "keyed key")
+	t.ok(st.payIds["00000000000f4241"], "payout id known")
+	t.ok(st.buyIds[REF_BUY.buyId], "purchase id known")
+	-- The suffix goes on exactly as on the whole account.
+	for n = 6, 8 do
+		local a, b = Ledger.apply(st, spin(n, 10)), Ledger.apply(full, spin(n, 10))
+		t.ok(a and b, "spin " .. n)
+		t.eq(st.head, full.head, "head after spin " .. n)
+		t.eq(st.balance, full.balance, "balance after spin " .. n)
+	end
+	expectFail(st, pay(1, 1, st.balance - 1), "dup_pay", "the resumed payout id is used")
+	expectFail(st, REF_BUY, "dup_buy", "the resumed purchase id is used")
+	cp.count = nil
+	t.eq(Ledger.resume(GUILD, PLAYER, cp).count, 0, "count defaults to 0")
+end)
+
+t.test("resume refuses bad checkpoints", function()
+	local _, base = checkpointAccount()
+	local function try(changes, want, msg)
+		local cp = with(base, changes)
+		local st, code = Ledger.resume(GUILD, PLAYER, cp)
+		t.eq(st, nil, msg)
+		t.eq(code, want, msg)
+	end
+	try({ payout = "P|x" }, "bad_entry", "payout text")
+	try({ payout = base.purchase }, "bad_entry", "purchase as payout")
+	try({ purchase = base.payout }, "bad_entry", "payout as purchase")
+	try({ purchase = Ledger.encode(with(REF_BUY, { commit = buy(2).commit })) }, "bad_commit", "commit")
+	try({ purchase = Ledger.encode(with(REF_BUY, { line = "GSLOTS1;L=7" })) }, "bad_settings", "settings")
+	try({ head = base.head:sub(1, 32) }, "bad_entry", "short head")
+	try({ head = base.head:upper() }, "bad_entry", "upper head")
+	try({ n = -1 }, "bad_entry", "n below 0")
+	try({ n = 1.5 }, "bad_entry", "fraction")
+	try({ anchors = 1 }, "bad_entry", "anchors below 2")
+	try({ count = "7" }, "bad_entry", "count as text")
+	t.eq(Ledger.resume(GUILD, PLAYER, nil), nil, "nil checkpoint")
+end)
+
 t.test("the head depends on guild and player", function()
 	local a = Ledger.replay(GUILD, PLAYER, { REF_BUY })
 	local b = Ledger.replay(GUILD, "Bob", { REF_BUY })
