@@ -455,18 +455,582 @@ t.test("no_funds and setStake", function()
 	t.eq(w.log[#w.log].msg.type, "BUY3", "nothing sent")
 end)
 
-t.test("a level 1 account cannot spin yet", function()
+-- Witnesses (docs/witness-spec.md) ------------------------------------------------------------------
+
+local Engine = ns.Engine
+local LINE_W1 = "GSLOTS1;L=1;W=2;R=1;E=10,50,100;G=3"
+local ZERO_HEAD = string.rep("0", 32)
+
+-- Officer Olga, player Pia with 1000 tokens bought under `line`, plus one session per name in
+-- `names`. Everyone has sent a HELLO, so every session sees every other one online.
+local function witnessWorld(line, names, opts)
+	opts = opts or {}
 	local w = newWorld()
-	w.line = "GSLOTS1;L=1"
+	w.line = line
+	for name in pairs(opts.officers or {}) do
+		w.officers[name] = true
+	end
 	local o = addSession(w, "Olga")
 	local p = addSession(w, "Pia")
-	assert(o.session:grant("Pia", 100))
+	local others = {}
+	for _, name in ipairs(names or {}) do
+		others[name] = addSession(w, name)
+	end
+	assert(o.session:grant("Pia", opts.tokens or 1000))
+	flush(w)
+	for _, session in ipairs(w.sessions) do
+		session:tick()
+	end
+	flush(w)
+	return w, o, p, others
+end
+
+-- Moves the clock to the end of the window and lets every session tick once.
+local function settle(w, seconds)
+	w.now = w.now + (seconds or 1.5)
+	for _, session in ipairs(w.sessions) do
+		session:tick()
+	end
+	flush(w)
+end
+
+local function sentOf(w, msgType, from)
+	local out = {}
+	for _, e in ipairs(w.log) do
+		if e.msg and e.msg.type == msgType and (not from or e.sender == from) then
+			out[#out + 1] = e
+		end
+	end
+	return out
+end
+
+local function lastEntry(s)
+	local entries = account(s, "Pia").entries
+	return Ledger.decode(entries[#entries])
+end
+
+local function events(s, name)
+	local out = {}
+	for _, ev in ipairs(s.events) do
+		if ev[1] == name then
+			out[#out + 1] = ev[2]
+		end
+	end
+	return out
+end
+
+local function groups(who)
+	local out = {}
+	if who ~= "-" then
+		for i = 1, #who, 4 do
+			out[#out + 1] = who:sub(i, i + 3)
+		end
+	end
+	return out
+end
+
+t.test("a level 1 spin collects three witnesses and settles once all of them answered", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local g = p.session:game()
+	t.eq(g.level, 1, "game.level")
+	t.eq(g:status(), "ok", "status")
+	local head = Ledger.shortHead(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries))
+	local r, code = g:spin()
+	t.ok(r, "spin: " .. tostring(code))
+	t.eq(r.kind, "wait", "wait")
+	t.eq(r.what, "spin", "what")
+	t.eq(r.n, 1, "n")
+	t.eq(r.g, 0, "g")
+	t.eq(r.due, w.now + 1.5, "due")
+	t.eq(g:state(), "collecting", "collecting")
+	local _, c2 = g:spin()
+	t.eq(c2, "collecting", "a second spin waits")
+	local _, c3 = g:setStake(50)
+	t.eq(c3, "busy", "no stake change while collecting")
+	local rec = p.env.store.open[GUILD].Pia
+	t.eq(rec.kind, "spin", "open kind")
+	t.eq(rec.n, 1, "open n")
+	t.eq(rec.g, 0, "open g")
+	t.eq(rec.stake, 10, "open stake")
+	t.eq(rec.amount, 10, "open amount")
+	t.eq(rec.A, 3, "A counts Olga, Tom and Uma")
+	t.eq(rec.head, head, "head before")
+	local spin = sentOf(w, "SPIN")[1].msg
+	t.eq(spin.level, 1, "SPIN level")
+	t.eq(spin.A, 3, "SPIN A")
+	t.eq(#account(p, "Pia").entries, 1, "nothing written yet")
+	flush(w)
+	local wits = sentOf(w, "WIT")
+	t.eq(#wits, 3, "three witnesses answered")
+	local values = {}
+	for _, e in ipairs(wits) do
+		t.eq(e.msg.player, "Pia", "player")
+		t.eq(e.msg.kind, "spin", "kind")
+		t.eq(e.msg.n, 1, "n")
+		t.eq(e.msg.g, 0, "g")
+		values[e.sender] = e.msg.value
+	end
+	local S = others.Tom.env.store.secret.S
+	t.eq(#S, 32, "secret")
+	t.eq(values.Tom, Engine.witnessValue(S, "Pia", "spin", 1, 0, 10, head), "Tom's value")
+	t.eq(#events(p, "result"), 0, "no result before a tick")
+	-- Every expected witness answered: the request settles early, but not before 0.3 s.
+	settle(w, 0.2)
+	t.eq(#events(p, "result"), 0, "no result at 0.2 s")
+	settle(w, 0.1)
+	local results = events(p, "result")
+	t.eq(#results, 1, "one result")
+	local res = results[1]
+	t.eq(res.kind, "spin", "result kind")
+	t.eq(res.n, 1, "result n")
+	t.eq(#res.window, 3, "T1 window")
+	t.eq(res.balance, g.balance, "balance")
+	t.eq(g:state() ~= "collecting", true, "not collecting")
+	t.eq(p.env.store.open[GUILD].Pia, nil, "open record gone")
+	local e = lastEntry(p)
+	t.eq(e.type, "S", "entry")
+	t.eq(e.status, "ok", "status ok")
+	t.eq(e.A, 3, "entry A")
+	t.eq(e.contribs, "Olga:" .. values.Olga .. ",Tom:" .. values.Tom .. ",Uma:" .. values.Uma, "contribs")
+	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+	t.ok(state, "replays")
+	t.eq(state.balance, g.balance, "replayed balance")
+	local resMsg = sentOf(w, "RES", "Pia")[1].msg
+	t.eq(resMsg.status, "ok", "RES ok")
+	t.eq(resMsg.who, values.Olga:sub(1, 4) .. values.Tom:sub(1, 4) .. values.Uma:sub(1, 4), "who")
+	t.eq(resMsg.head, Ledger.shortHead(state), "RES head after")
+	local rows = others.Tom.env.store.witness[GUILD]
+	t.eq(#rows, 1, "one witness row")
+	t.eq(rows[1].player, "Pia", "row player")
+	t.eq(rows[1].res, "in", "marked in")
+	t.eq(o.env.store.witness[GUILD][1].res, "in", "Olga marked in")
+	t.eq(p.env.store.witness, nil, "the player answers nothing itself")
+end)
+
+t.test("a void spin: fewer than W answers in time", function()
+	local w, _, p, others = witnessWorld("GSLOTS1;L=1;W=3;R=1;E=10,50,100;G=3", { "Tom", "Uma" })
+	local g = p.session:game()
+	local balance = g.balance
+	w.drop = function(text)
+		local m = Proto.decode(text)
+		return m and m.type == "WIT" and m.value == (others.Uma.env.store.witness
+			and others.Uma.env.store.witness[GUILD] and others.Uma.env.store.witness[GUILD][1]
+			and others.Uma.env.store.witness[GUILD][1].value)
+	end
+	assert(g:spin())
+	flush(w)
+	w.drop = nil
+	settle(w)
+	local res = events(p, "result")[1]
+	t.eq(res.kind, "void", "void")
+	t.eq(res.what, "spin", "what")
+	t.eq(res.n, 1, "n")
+	t.eq(res.need, 3, "need")
+	t.eq(res.got, 2, "got")
+	t.eq(res.balance, balance, "stake kept")
+	t.eq(g.balance, balance, "game balance")
+	local e = lastEntry(p)
+	t.eq(e.status, "void", "void entry")
+	t.eq(#Engine.parseContribs(e.contribs), 2, "the two that arrived")
+	local resMsg = sentOf(w, "RES", "Pia")[1].msg
+	t.eq(resMsg.status, "void", "RES void")
+	t.eq(#groups(resMsg.who), 2, "two tags")
+	t.eq(others.Tom.env.store.witness[GUILD][1].res, "void_in", "Tom void_in")
+	t.eq(others.Uma.env.store.witness[GUILD][1].res, "void_out", "Uma void_out")
+	t.eq(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries).balance, balance, "replays")
+	-- The next spin goes on with the next number.
+	w.now = w.now + 1
+	local r = assert(g:spin())
+	t.eq(r.n, 2, "next number")
+end)
+
+t.test("few_players: fewer than W other addon users online", function()
+	local w, _, p = witnessWorld(LINE_W1, {})
+	local g = p.session:game()
+	t.eq(g:status(), "few_players", "only Olga")
+	local _, code = g:spin()
+	t.eq(code, "few_players", "spin refused")
+	t.eq(#sentOf(w, "SPIN"), 0, "nothing sent")
+	local tom = addSession(w, "Tom")
+	tom.session:tick()
+	flush(w)
+	t.eq(g:status(), "ok", "Tom came online")
+end)
+
+t.test("the lottery: with more clients than Z only the drawn ones answer", function()
+	local names = {}
+	for i = 1, 11 do
+		names[i] = "W" .. i
+	end
+	-- W = 1, Z = 5; A = 12 (Olga and 11 more).
+	local w, _, p = witnessWorld("GSLOTS1;L=1;W=1;R=1;E=10,50,100;G=3", names)
+	local g = p.session:game()
+	local r = assert(g:spin())
+	flush(w)
+	local rec = p.env.store.open[GUILD].Pia
+	t.eq(rec.A, 12, "A")
+	local answered = {}
+	for _, e in ipairs(sentOf(w, "WIT")) do
+		answered[e.sender] = true
+	end
+	local expected = 0
+	for _, name in ipairs({ "Olga", unpack(names) }) do
+		local drawn = Engine.drawn(Engine.lot(name, "Pia", "spin", 1, 0), 12, 5)
+		t.eq(answered[name] == true, drawn, "answer of " .. name .. " follows the lot")
+		if drawn then expected = expected + 1 end
+	end
+	t.ok(expected < 12, "not everyone was drawn")
+	settle(w)
+	local e = lastEntry(p)
+	t.eq(#Engine.parseContribs(e.contribs), math.min(expected, 8), "contributions")
+	t.eq(e.status, expected >= 1 and "ok" or "void", "status")
+	t.ok(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries), "replays")
+	t.ok(r, "spin")
+	-- A witness ignores an A that is off by more than double or half its own count.
+	local before = #sentOf(w, "WIT")
+	w.now = w.now + 5
+	for _, A in ipairs({ 5, 25 }) do
+		inject(w, "Pia", "SPIN", { n = 50, stake = 10, level = 1, head = ZERO_HEAD, A = A })
+	end
+	t.eq(#sentOf(w, "WIT"), before, "no answers to a wrong A")
+end)
+
+t.test("at most 8 contributions count; the witness left out is marked out", function()
+	local names = {}
+	for i = 1, 8 do
+		names[i] = "W" .. i
+	end
+	-- W = 3, Z = 9; A = 9 (Olga and 8 more): everyone is drawn, nine answer.
+	local w, o, p, others = witnessWorld("GSLOTS1;L=1;W=3;R=1;E=10,50,100;G=3", names)
+	local g = p.session:game()
+	assert(g:spin())
+	flush(w)
+	t.eq(#sentOf(w, "WIT"), 9, "nine answers")
+	settle(w)
+	local e = lastEntry(p)
+	t.eq(e.status, "ok", "ok")
+	local list = Engine.parseContribs(e.contribs)
+	t.eq(#list, 8, "eight kept")
+	local inCount, out = 0, 0
+	local all = { o }
+	for _, name in ipairs(names) do
+		all[#all + 1] = others[name]
+	end
+	for _, s in ipairs(all) do
+		local res = s.env.store.witness[GUILD][1].res
+		if res == "in" then inCount = inCount + 1 elseif res == "out" then out = out + 1 end
+	end
+	t.eq(inCount, 8, "eight in")
+	t.eq(out, 1, "one out")
+end)
+
+t.test("witness messages never raise, with a request open on every side", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom" })
+	local g = p.session:game()
+	assert(g:spin())
+	flush(w)
+	settle(w)
+	w.now = w.now + 2
+	assert(g:spin())
+	local samples = {}
+	for _, e in ipairs(w.log) do
+		samples[#samples + 1] = e.text
+	end
+	flush(w)
+	local x = 12345
+	local alphabet = "1|WITRESspingamokvoid-0123456789abcdef\0"
+	local sessions = { o.session, p.session, others.Tom.session }
+	for i = 1, 1500 do
+		x = (x * 1103515245 + 12345) % 2147483648
+		local base = samples[x % #samples + 1]
+		local k = x % #base + 1
+		local c = (x % 37) + 1
+		local text = base:sub(1, k - 1) .. alphabet:sub(c, c) .. base:sub(k + 1)
+		for _, s in ipairs(sessions) do
+			local ok, err = pcall(s.onMessage, s, ({ "Olga", "Pia", "Tom", "Zed" })[i % 4 + 1], text)
+			t.ok(ok, "raised: " .. tostring(err))
+		end
+		if i % 100 == 0 then
+			w.now = w.now + 0.7
+			for _, s in ipairs(sessions) do
+				t.ok(pcall(s.tick, s), "tick")
+			end
+			w.queue = {}
+		end
+	end
+	t.ok(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries), "account still replays")
+end)
+
+local LINE_W2 = "GSLOTS1;L=2;R=1;E=10,50,100;G=3"
+
+t.test("level 2: only officers answer, one is enough", function()
+	local w, o, p, others = witnessWorld(LINE_W2, { "Tom" })
+	local g = p.session:game()
+	t.eq(g.level, 2, "level")
+	t.eq(g:status(), "ok", "Olga is online")
+	local r = assert(g:spin())
+	t.eq(r.kind, "wait", "wait")
+	t.eq(p.env.store.open[GUILD].Pia.A, 0, "A is 0 at level 2")
+	t.eq(sentOf(w, "SPIN")[1].msg.level, 2, "SPIN level 2")
+	flush(w)
+	local wits = sentOf(w, "WIT")
+	t.eq(#wits, 1, "one answer")
+	t.eq(wits[1].sender, "Olga", "from the officer")
+	t.eq(others.Tom.env.store.witness, nil, "Tom is no officer")
+	-- A forged WIT from a non-officer does not count.
+	inject(w, "Tom", "WIT", { player = "Pia", kind = "spin", n = 1, g = 0, value = string.rep("e", 16) })
+	settle(w)
+	local e = lastEntry(p)
+	t.eq(e.status, "ok", "ok")
+	t.eq(e.A, 0, "entry A")
+	t.eq(e.contribs, "Olga:" .. wits[1].msg.value, "only Olga")
+	t.eq(events(p, "result")[1].kind, "spin", "result")
+	t.eq(o.env.store.witness[GUILD][1].res, "in", "marked")
+end)
+
+t.test("level 2 without an officer online: no_officer", function()
+	local w = newWorld()
+	w.line = LINE_W2
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia")
+	local tom = addSession(w, "Tom")
+	assert(o.session:grant("Pia", 1000))
+	flush(w)
+	-- Olga logs off before anyone heard a HELLO from her.
+	for i, s in ipairs(w.sessions) do
+		if s == o.session then table.remove(w.sessions, i) break end
+	end
+	w.now = w.now + 400
+	p.session:tick()
+	tom.session:tick()
 	flush(w)
 	local g = p.session:game()
-	t.eq(g.balance, 100, "credited")
-	t.eq(g:status(), "level", "status")
+	t.eq(g:status(), "no_officer", "status")
 	local _, code = g:spin()
-	t.eq(code, "level", "spin")
+	t.eq(code, "no_officer", "spin refused")
+	-- An officer who is the player does not count either.
+	w.officers.Pia = true
+	t.eq(g:status(), "no_officer", "the own name is no witness")
+end)
+
+t.test("a repeated SPIN: same terms get the same value, other terms get no answer", function()
+	local w, _, _, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local tom = others.Tom
+	local function answers()
+		local c = 0
+		for _, e in ipairs(sentOf(w, "WIT", "Tom")) do c = c + 1 end
+		return c
+	end
+	-- Pia's client is replaced by hand-made messages.
+	inject(w, "Pia", "SPIN", { n = 9, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 1, "first answer")
+	local value = sentOf(w, "WIT", "Tom")[1].msg.value
+	w.now = w.now + 1
+	inject(w, "Pia", "SPIN", { n = 9, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 2, "same terms answered again")
+	t.eq(sentOf(w, "WIT", "Tom")[2].msg.value, value, "with the same value")
+	w.now = w.now + 1
+	inject(w, "Pia", "SPIN", { n = 9, stake = 50, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 2, "another stake: no answer")
+	inject(w, "Pia", "SPIN", { n = 9, stake = 10, level = 1, head = string.rep("1", 32), A = 3 })
+	t.eq(answers(), 2, "another head: no answer")
+	t.eq(#tom.env.store.witness[GUILD], 1, "one row")
+	-- At most two answers per player per second, and none below a budget of 3.
+	w.now = w.now + 1
+	for n = 20, 24 do
+		inject(w, "Pia", "SPIN", { n = n, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	end
+	t.eq(answers(), 4, "two per second")
+	w.now = w.now + 1
+	w.budget = 2
+	inject(w, "Pia", "SPIN", { n = 30, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 4, "budget below 3")
+	w.budget = 10
+	-- Level 0 and the own echo are never answered.
+	inject(w, "Pia", "SPIN", { n = 31, stake = 10, level = 0, head = ZERO_HEAD, A = 0 })
+	inject(w, "Tom", "SPIN", { n = 32, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 4, "level 0 and own SPIN")
+end)
+
+t.test("witness rows and the secret: cleanup at session creation", function()
+	local w, _, _, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local store = others.Tom.env.store
+	inject(w, "Pia", "SPIN", { n = 1, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	local S = store.secret.S
+	local rows = store.witness[GUILD]
+	for i = 1, 5003 do
+		rows[#rows + 1] = { player = "X", kind = "spin", n = i, g = 0, amount = 10, head = ZERO_HEAD, value = string.rep("a", 16), time = w.now }
+	end
+	table.insert(rows, 1, { player = "Old", kind = "spin", n = 1, g = 0, amount = 10, head = ZERO_HEAD, value = string.rep("a", 16), time = w.now - 15 * 86400 })
+	addSession(w, "Tom", { store = store })
+	t.eq(#store.witness[GUILD], 5000, "at most 5000")
+	t.eq(store.witness[GUILD][5000].n, 5003, "the newest stays")
+	t.eq(store.secret.S, S, "secret kept within 14 days")
+	w.now = w.now + 14 * 86400
+	local again = addSession(w, "Tom", { store = store })
+	t.eq(#store.witness[GUILD], 0, "rows older than 14 days dropped")
+	-- The fake randomHex of a new session repeats its sequence, so the time shows the new secret.
+	t.eq(store.secret.time, w.now, "a new secret at session creation")
+	again.session:onMessage("Pia", assert(Proto.encode("SPIN", { n = 2, stake = 10, level = 1, head = ZERO_HEAD, A = 1 })))
+	t.eq(store.witness[GUILD][1].value, Engine.witnessValue(store.secret.S, "Pia", "spin", 2, 0, 10, ZERO_HEAD),
+		"answers with the secret made at creation")
+end)
+
+t.test("the session secret exists from session creation and HELLO carries its commit", function()
+	local w = newWorld()
+	local o = addSession(w, "Olga")
+	local S = o.env.store.secret.S
+	t.eq(#S, 32, "secret before any answer")
+	o.session:tick()
+	flush(w)
+	local hello = w.log[1].msg
+	t.eq(hello.commit, Engine.witnessCommit(S), "commit of the secret")
+	t.eq(hello.reveal, "-", "nothing revealed yet")
+end)
+
+t.test("a restart with an open request writes a void and sends RES on the first tick", function()
+	local w, _, p = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local g = p.session:game()
+	local balance = g.balance
+	assert(g:spin())
+	flush(w)
+	-- Reload inside the window.
+	for i, s in ipairs(w.sessions) do
+		if s == p.session then table.remove(w.sessions, i) break end
+	end
+	local p2 = addSession(w, "Pia", { store = p.env.store })
+	local e = lastEntry(p2)
+	t.eq(e.type, "S", "spin entry")
+	t.eq(e.status, "void", "void")
+	t.eq(e.contribs, "", "no contributions")
+	t.eq(p2.env.store.open[GUILD].Pia, nil, "record gone")
+	t.eq(p2.session:game().balance, balance, "stake kept")
+	t.eq(#sentOf(w, "RES"), 0, "no RES before the tick")
+	p2.session:tick()
+	flush(w)
+	local res = sentOf(w, "RES", "Pia")
+	t.eq(#res, 1, "RES on the first tick")
+	t.eq(res[1].msg.status, "void", "void")
+	t.eq(res[1].msg.who, "-", "nobody")
+	t.ok(Ledger.replay(GUILD, "Pia", account(p2, "Pia").entries), "replays")
+	-- A record whose head no longer fits is dropped.
+	p2.env.store.open[GUILD].Pia = { kind = "spin", n = 9, g = 0, stake = 10, amount = 10, A = 3, head = ZERO_HEAD, time = 1 }
+	local count = #account(p2, "Pia").entries
+	local p3 = addSession(w, "Pia", { store = p2.env.store })
+	t.eq(#account(p3, "Pia").entries, count, "nothing written")
+	t.eq(p3.env.store.open[GUILD].Pia, nil, "dropped")
+end)
+
+t.test("level 1 gamble steps, a void step, the 2.5 s interval, and the account replays", function()
+	local w, _, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" }, { tokens = 5000 })
+	local g = p.session:game()
+	local spins, steps, voids = 0, 0, 0
+	for i = 1, 120 do
+		if g:state() == "gamble" then
+			local before = g.pending
+			local dropAll = voids == 0
+			if dropAll then
+				w.drop = function(text) local m = Proto.decode(text) return m and m.type == "WIT" end
+			end
+			local r, code = g:gamble()
+			t.ok(r, "gamble: " .. tostring(code))
+			t.eq(r.kind, "wait", "wait")
+			t.eq(r.what, "gamble", "what")
+			t.eq(p.env.store.open[GUILD].Pia.amount, before, "amount at risk")
+			t.eq(sentOf(w, "GAM")[#sentOf(w, "GAM")].msg.level, 1, "GAM level")
+			flush(w)
+			w.drop = nil
+			settle(w)
+			local res = events(p, "result")
+			res = res[#res]
+			if dropAll then
+				t.eq(res.kind, "void", "void step")
+				t.eq(res.what, "gamble", "what")
+				t.eq(res.got, 0, "got")
+				t.eq(res.need, 2, "need")
+				t.eq(res.pending, g.pending, "pending")
+				t.eq(res.g, r.g, "g")
+				voids = voids + 1
+				if r.g < 3 then
+					t.eq(res.pending, before, "the offer stays open")
+					t.eq(g:state(), "gamble", "can try again")
+				end
+			else
+				t.eq(res.kind, "gamble", "kind")
+				t.eq(res.amount, before, "amount")
+				t.eq(res.step, r.g, "step")
+				steps = steps + 1
+			end
+		elseif g.balance >= g.stake then
+			local r = assert(g:spin())
+			t.eq(r.kind, "wait", "wait")
+			flush(w)
+			settle(w)
+			spins = spins + 1
+		end
+		-- 1.5 s window + 1 s: the 2.5 s interval has passed.
+		local _, code = g:spin()
+		if g:state() == "idle" then
+			t.eq(code, "wait", "interval at 1.5 s")
+		end
+		w.now = w.now + 1
+		if voids > 0 and steps > 2 and spins > 15 then break end
+	end
+	t.ok(voids > 0 and steps > 0, "steps made")
+	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+	t.ok(state, "replays")
+	t.eq(state.balance, g.balance, "same balance")
+	-- Every GAM was answered with the amount bound into the value.
+	local rows = others.Tom.env.store.witness[GUILD]
+	t.ok(#rows > spins, "rows for spins and steps")
+end)
+
+t.test("the ticker at level 1 announces what the player's result gives", function()
+	local lv = { big = 2, huge = 5, legendary = 10 }
+	local w = newWorld()
+	w.line = "GSLOTS1;L=1;W=2;R=1;E=10,50,100;G=3;T=T2"
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia")
+	local tom = addSession(w, "Tom")
+	addSession(w, "Uma")
+	tom.env.tickerLevels = lv
+	assert(o.session:grant("Pia", 2000))
+	flush(w)
+	for _, s in ipairs(w.sessions) do s:tick() end
+	flush(w)
+	local g = p.session:game()
+	local results = {}
+	for _ = 1, 60 do
+		if g.balance < g.stake then break end
+		assert(g:spin())
+		flush(w)
+		settle(w)
+		local r = events(p, "result")
+		r = r[#r]
+		results[r.n] = r
+		if g:state() == "gamble" then g:take() end
+		w.now = w.now + 1
+	end
+	local got, n = {}, 0
+	for _, e in ipairs(events(tom, "ticker")) do
+		got[e.n] = e
+		n = n + 1
+	end
+	local expected = 0
+	for num, r in pairs(results) do
+		local level = r.round.win >= lv.legendary * r.stake and "legendary" or r.round.win >= lv.huge * r.stake and "huge"
+			or r.round.win >= lv.big * r.stake and "big" or r.round.free and "free" or nil
+		if level then
+			expected = expected + 1
+			t.ok(got[num], "announced " .. num)
+			t.eq(got[num] and got[num].win, r.round.win, "win")
+			t.eq(got[num] and got[num].level, level, "level")
+		else
+			t.eq(got[num], nil, "quiet " .. num)
+		end
+	end
+	t.ok(expected > 0, "something notable")
+	t.eq(n, expected, "no extra announcements")
 end)
 
 t.test("restart from the store keeps account, purchases and spins", function()
@@ -516,8 +1080,8 @@ t.test("HELLO on the first tick and then every 120..140 s", function()
 	o.session:tick()
 	p.session:tick()
 	flush(w)
-	t.eq(sentTypes(w), "HELLO,HELLO", "two HELLOs")
-	t.eq(w.log[1].text, "1|HELLO|0.3.0|0|-", "no account yet")
+	t.eq(sentTypes(w), "HELLO,HI,HELLO,HI", "two HELLOs, each followed by a HI")
+	t.eq(w.log[1].text, "1|HELLO|0.3.0|0|-|" .. Engine.witnessCommit(o.env.store.secret.S) .. "|-", "no account yet")
 	local online = o.session:online()
 	t.eq(#online, 2, "both online, own echo included")
 	t.eq(online[1].name, "Olga", "sorted by name")
@@ -525,10 +1089,10 @@ t.test("HELLO on the first tick and then every 120..140 s", function()
 	t.eq(online[2].version, "0.3.1", "version stored")
 	w.now = w.now + 119
 	o.session:tick()
-	t.eq(#w.log, 2, "no HELLO before 120 s")
+	t.eq(#w.log, 4, "no HELLO before 120 s")
 	w.now = w.now + 21
 	o.session:tick()
-	t.eq(#w.log, 3, "HELLO by 140 s")
+	t.eq(#w.log, 5, "HELLO by 140 s, no second HI")
 	flush(w)
 	w.now = w.now + 301
 	t.eq(#o.session:online(), 0, "nobody heard within 300 s")
@@ -540,7 +1104,8 @@ t.test("HELLO carries the own spin number and head; the officer records it", fun
 	flush(w)
 	p.session:tick()
 	flush(w)
-	local hello = w.log[#w.log].msg
+	local helloEntries = sentOf(w, "HELLO", "Pia")
+	local hello = helloEntries[#helloEntries].msg
 	t.eq(hello.type, "HELLO", "type")
 	t.eq(hello.n, 1, "n")
 	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
@@ -558,12 +1123,12 @@ t.test("a newer version raises one update notice per session", function()
 		end
 		return c
 	end
-	inject(w, "Pia", "HELLO", { version = "0.9.1", n = 0, head = "-" })
-	inject(w, "Pia", "HELLO", { version = "0.9", n = 0, head = "-" })
+	inject(w, "Pia", "HELLO", { version = "0.9.1", n = 0, head = "-", commit = string.rep("c", 32), reveal = "-" })
+	inject(w, "Pia", "HELLO", { version = "0.9", n = 0, head = "-", commit = string.rep("c", 32), reveal = "-" })
 	t.eq(notices(), 0, "older versions")
-	inject(w, "Pia", "HELLO", { version = "0.10.0", n = 0, head = "-" })
+	inject(w, "Pia", "HELLO", { version = "0.10.0", n = 0, head = "-", commit = string.rep("c", 32), reveal = "-" })
 	t.eq(notices(), 1, "0.10.0 is newer than 0.9.2")
-	inject(w, "Paul", "HELLO", { version = "1.0", n = 0, head = "-" })
+	inject(w, "Paul", "HELLO", { version = "1.0", n = 0, head = "-", commit = string.rep("c", 32), reveal = "-" })
 	t.eq(notices(), 1, "once per session")
 end)
 
@@ -598,7 +1163,19 @@ local function play(w, p, count)
 	end
 end
 
--- Officer Olga, player Pia, listener Tom; Pia bought 1000 tokens on a T2 table.
+local function replaceSession(w, old, new)
+	for i, s in ipairs(w.sessions) do
+		if s == old.session then
+			table.remove(w.sessions, i)
+			break
+		end
+	end
+	return new
+end
+
+-- Officer Olga, player Pia, listener Tom; Pia bought 1000 tokens on a T2 table. Unless
+-- opts.follow, Olga restarts right after the purchase without a follow record (as an officer who
+-- was away), so a payout fetches the whole account.
 local function payWorld(opts)
 	opts = opts or {}
 	local w = newWorld()
@@ -608,6 +1185,10 @@ local function payWorld(opts)
 	local tom = addSession(w, "Tom")
 	local buyId = assert(o.session:grant("Pia", opts.tokens or 1000))
 	flush(w)
+	if not opts.follow then
+		o.env.store.follow = nil
+		o = replaceSession(w, o, addSession(w, "Olga", { store = o.env.store, stepBudget = opts.stepBudget }))
+	end
 	return w, o, p, tom, buyId
 end
 
@@ -646,16 +1227,6 @@ local function events(s, name)
 	return out
 end
 
-local function replaceSession(w, old, new)
-	for i, s in ipairs(w.sessions) do
-		if s == old.session then
-			table.remove(w.sessions, i)
-			break
-		end
-	end
-	return new
-end
-
 t.test("a full payout: officer checks, confirms, the player and a third client hold the same anchor", function()
 	local w, o, p, tom = payWorld()
 	play(w, p, 30)
@@ -690,6 +1261,15 @@ t.test("a full payout: officer checks, confirms, the player and a third client h
 	t.eq(e.payId, payId, "payId")
 	t.eq(e.officer, "Olga", "officer")
 	t.eq(e.balanceAfter, balance - 100, "balanceAfter")
+	-- LOGREQ asks for the whole account; PAY carries the checkpoint after the payout entry.
+	local sent = {}
+	for _, m in ipairs(w.log) do sent[m.msg.type] = m.msg end
+	t.eq(sent.LOGREQ.from, 0, "LOGREQ.from")
+	t.eq(sent.LOGREQ.head, "-", "LOGREQ.head")
+	t.eq(sent.PAY.head, state.head, "PAY carries the full head")
+	t.eq(sent.PAY.n, state.n, "PAY.n")
+	t.ok(state.n > 0, "spins in the account")
+	t.eq(sent.PAY.ck, Ledger.checkpointKey(state.n, state.K, state.line), "PAY.ck")
 	-- The same anchor everywhere.
 	local want = Ledger.shortHead(state)
 	for _, s in ipairs({ o, p, tom }) do
@@ -887,31 +1467,55 @@ t.test("reject: the player sees the reason and plays on", function()
 	t.eq(code, "unknown", "no confirm after a reject")
 end)
 
-t.test("expiry on both sides after 300 s, and confirm after 270 s", function()
-	local w, o, p = payWorld()
-	play(w, p, 5)
+t.test("a request lives 300 + 1.2 * total seconds on both sides; confirm until 30 s before", function()
+	-- An account of 60 purchases: about one LOG chunk each.
+	local w = newWorld()
+	w.line = LINE_PAY
+	local o = addSession(w, "Olga")
+	local entries = {}
+	for i = 1, 60 do
+		entries[i] = Ledger.encode({
+			type = "B", buyId = string.format("%016x", i), officer = "Olga", tokens = 10, commit = ns.Engine.commit(SEED),
+			seed = SEED, nonce = string.rep("7", 32), time = 1234, line = LINE_PAY,
+		})
+	end
+	local p = addSession(w, "Pia", { store = { accounts = { [GUILD] = { Pia = { entries = entries } } } } })
 	local reqId = assert(p.session:requestPayout("Olga", 10))
+	local t0 = w.now
 	untilReady(w, o, reqId)
-	w.now = w.now + 299 - 5
+	local total = p.session:payout().total
+	t.ok(total >= 50, "chunks: " .. total)
+	t.eq(req(o, reqId).total, total, "the officer knows the total")
+	local life = 300 + 1.2 * total
+	t.eq(req(o, reqId).life, life, "life in the officer's record")
+	t.eq(p.session:payout().life, life, "life in the player's record")
+	w.now = t0 + life - 0.5
 	o.session:tick()
 	p.session:tick()
-	t.eq(p.session:payout().status, "wait_decision", "still waiting just before 300 s")
-	w.now = w.now + 6
+	t.eq(p.session:payout().status, "wait_decision", "still waiting just before the end")
+	t.eq(req(o, reqId).status, "ready", "officer still ready")
+	w.now = t0 + life
 	o.session:tick()
 	p.session:tick()
 	t.eq(p.session:payout().status, "expired", "player expired")
 	t.eq(req(o, reqId).status, "expired", "officer expired")
 	t.eq(p.session:game():status(), "ok", "lock ended")
-	-- Confirm at 270 s: REJECT expired.
+	-- Confirm: until 30 s before the end.
 	local id2 = assert(p.session:requestPayout("Olga", 10))
 	untilReady(w, o, id2)
-	w.now = req(o, id2).time + 270
+	local r2 = req(o, id2)
+	w.now = r2.time + r2.life - 30
 	local _, code = o.session:confirm(id2)
 	t.eq(code, "expired", "too late to confirm")
 	flush(w)
 	t.eq(req(o, id2).status, "expired", "officer expired")
 	t.eq(p.session:payout().status, "rejected", "player got the REJECT")
 	t.eq(p.session:payout().code, "expired", "reason expired")
+	local id3 = assert(p.session:requestPayout("Olga", 10))
+	untilReady(w, o, id3)
+	local r3 = req(o, id3)
+	w.now = r3.time + r3.life - 30.5
+	t.ok(o.session:confirm(id3), "confirm just before")
 end)
 
 t.test("mismatch: the account changed between PAYREQ and LOG", function()
@@ -952,7 +1556,7 @@ t.test("a PAY that does not fit the account fails and leaves it as it was", func
 	local count = #account(p, "Pia").entries
 	local function pay(reqId, fields)
 		local f = { reqId = reqId, payId = "00000000000000d9", player = "Pia", amount = 10,
-			balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2 }
+			balanceAfter = balance - 10, time = 5000, head = H32 .. H32, anchors = 2, n = 5, ck = string.rep("0", 16) }
 		for k, v in pairs(fields or {}) do f[k] = v end
 		inject(w, "Olga", "PAY", f)
 	end
@@ -969,9 +1573,11 @@ t.test("a PAY that does not fit the account fails and leaves it as it was", func
 	w.officers.Otto = true
 	assert(o.session:reject(id2))
 	local id3 = assert(p.session:requestPayout("Olga", 10))
+	flush(w)
+	local before = p.session:payout().status
 	inject(w, "Otto", "PAY", { reqId = id3, payId = "00000000000000d8", player = "Pia", amount = 10,
-		balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2 })
-	t.eq(p.session:payout().status, "wait_decision", "other officer ignored")
+		balanceAfter = balance - 10, time = 5000, head = H32 .. H32, anchors = 2, n = 5, ck = string.rep("0", 16) })
+	t.eq(p.session:payout().status, before, "other officer ignored")
 	t.eq(p.session:game().balance, balance, "balance unchanged")
 	t.eq(#account(p, "Pia").entries, count, "no entry")
 end)
@@ -983,7 +1589,8 @@ local function payFor(p, reqId, amount, payId)
 		balanceAfter = state.balance - amount, time = 9000 }
 	assert(Ledger.apply(state, entry))
 	return { reqId = reqId, payId = entry.payId, player = "Pia", amount = amount, balanceAfter = entry.balanceAfter,
-		time = entry.time, head = Ledger.shortHead(state), anchors = state.anchors }
+		time = entry.time, head = state.head, anchors = state.anchors,
+		n = state.n, ck = Ledger.checkpointKey(state.n, state.K, state.line) }
 end
 
 t.test("an open request survives a reload: lock, LOGREQ and PAY", function()
@@ -1060,10 +1667,12 @@ t.test("a late PAY fails once the player has spun, and is ignored after a newer 
 	t.eq(#account(p, "Pia").entries, count, "account unchanged")
 	-- A newer request: the PAY of the old one is no longer for this request.
 	local id2 = assert(p.session:requestPayout("Olga", 10))
+	flush(w)
+	local before = p.session:payout().status
 	local pay2 = payFor(p, id1, 20, "00000000000000d6")
 	inject(w, "Olga", "PAY", pay2)
 	t.eq(p.session:payout().reqId, id2, "newer request")
-	t.eq(p.session:payout().status, "wait_decision", "untouched")
+	t.eq(p.session:payout().status, before, "untouched")
 	t.eq(#account(p, "Pia").entries, count, "still unchanged")
 end)
 
@@ -1079,11 +1688,11 @@ t.test("a PAY with another amount fails with amount_mismatch", function()
 	t.eq(p.session:game().balance, balance, "nothing paid")
 end)
 
-t.test("too_large: more than 200 announced chunks, or more entries than Pack allows", function()
+t.test("too_large: more than 600 announced chunks, or more entries than Pack allows", function()
 	local w, o = payWorld()
 	local id = "00000000000000e5"
 	inject(w, "Pam", "PAYREQ", { reqId = id, officer = "Olga", amount = 1, head = H32, count = 1 })
-	inject(w, "Pam", "LOG", { reqId = id, seq = 1, total = 201, payload = "s10" })
+	inject(w, "Pam", "LOG", { reqId = id, seq = 1, total = 601, payload = "s10" })
 	t.eq(req(o, id).status, "failed", "failed")
 	t.eq(req(o, id).code, "too_large", "too_large")
 	t.eq(w.log[#w.log].msg.reason, "too_large", "REJECT too_large")
@@ -1110,20 +1719,20 @@ t.test("a LOG that does not unpack is rejected as bad_log", function()
 	t.eq(w.log[#w.log].msg.reason, "bad_log", "REJECT bad_log")
 end)
 
-t.test("too_large: more than 200 chunks fails before anything is sent", function()
+t.test("too_large: more than 600 chunks fails before anything is sent", function()
 	local w = newWorld()
 	w.line = LINE_PAY
 	local o = addSession(w, "Olga")
 	local entries = {}
-	for i = 1, 230 do
+	for i = 1, 680 do
 		entries[i] = Ledger.encode({
 			type = "B", buyId = string.format("%016x", i), officer = "Olga", tokens = 1, commit = ns.Engine.commit(SEED),
 			seed = SEED, nonce = string.rep("7", 32), time = 1234, line = LINE_PAY,
 		})
 	end
-	t.ok(#Pack.split(Pack.encode(entries)) > 200, "over 200 chunks")
+	t.ok(#Pack.split(Pack.encode(entries)) > 600, "over 600 chunks")
 	local p = addSession(w, "Pia", { store = { accounts = { [GUILD] = { Pia = { entries = entries } } } } })
-	t.eq(p.session:game().balance, 230, "replayed")
+	t.eq(p.session:game().balance, 680, "replayed")
 	local reqId = assert(p.session:requestPayout("Olga", 10))
 	flush(w)
 	t.eq(p.session:payout().status, "failed", "failed")
@@ -1176,6 +1785,9 @@ t.test("verification is spread over ticks", function()
 	flush(w)
 	t.eq(req(o, reqId).status, "checking", "checking before the first tick")
 	t.eq(req(o, reqId).progress, 0, "nothing done")
+	o.session:tick()
+	t.eq(req(o, reqId).progress, 0, "the check waits 4 s for alerts")
+	w.now = w.now + 4
 	o.session:tick()
 	local r = req(o, reqId)
 	t.eq(r.status, "checking", "still checking")
@@ -1270,7 +1882,7 @@ t.test("OSYNC brings the newest anchors to a client that was offline", function(
 	w2.now = w2.now + 1
 	o2.session:tick()
 	flush(w2)
-	t.eq(sentTypes(w2, "Olga"), "HELLO,OSYNC", "one OSYNC")
+	t.eq(sentTypes(w2, "Olga"), "HELLO,HI,OSYNC", "one OSYNC")
 	local a = tim.session:anchor("Pia")
 	t.eq(a.anchors, want.anchors, "anchors")
 	t.eq(a.head, want.head, "head")
@@ -1278,7 +1890,7 @@ t.test("OSYNC brings the newest anchors to a client that was offline", function(
 	w2.now = w2.now + 100
 	o2.session:tick()
 	flush(w2)
-	t.eq(sentTypes(w2, "Olga"), "HELLO,OSYNC", "only once")
+	t.eq(sentTypes(w2, "Olga"), "HELLO,HI,OSYNC", "only once")
 	-- From a non-officer, or not higher: ignored.
 	inject(w2, "Tim", "OSYNC", { player = "Pia", anchors = 9, head = H32, time = 1 })
 	t.eq(tim.session:anchor("Pia").anchors, want.anchors, "non-officer ignored")
@@ -1520,7 +2132,7 @@ t.test("a purchase without a complete exchange drops the key of that player", fu
 	flush(w)
 	w.drop = nil
 	w.now = w.now + 100
-	tom.session:onMessage("Olga", assert(Proto.encode("HELLO", { version = "0.3.0", n = 0, head = ZERO })))
+	tom.session:onMessage("Olga", assert(Proto.encode("HELLO", { version = "0.3.0", n = 0, head = ZERO, commit = string.rep("c", 32), reveal = "-" })))
 	t.eq(tom.env.store.keys[GUILD].Pia, nil, "key dropped")
 end)
 
@@ -1541,15 +2153,14 @@ t.test("no ticker for a T1 line or a level 1 SPIN", function()
 end)
 
 t.test("keeps at most 200 keys", function()
-	local w, _, _, tom = tickerWorld()
+	local w, olga, _, tom = tickerWorld()
 	local list = tom.env.store.keys[GUILD]
 	for i = 1, 250 do
 		list["Q" .. i] = { K = "k", line = "x", time = 100 + i }
 	end
 	w.now = w.now + 10
 	assert(addSession(w, "Zed"))
-	local o = w.sessions[1]
-	assert(o:grant("Zed", 100))
+	assert(olga.session:grant("Zed", 100))
 	flush(w)
 	local count = 0
 	for _ in pairs(list) do count = count + 1 end
@@ -1574,4 +2185,981 @@ t.test("ticker input never raises", function()
 		tom.env.store.keys[GUILD][sender] = { K = "k", line = LINE_PAY, time = 1 }
 		t.ok(pcall(s.onMessage, s, sender, spinText(i)), "flood")
 	end
+end)
+
+-- Witness commit (docs/follow-spec.md section 2) -----------------------------------------------
+
+local DAY = 86400
+
+t.test("the secret rotates after 24 hours at session creation and HELLO reveals the previous one", function()
+	local w = newWorld()
+	local o = addSession(w, "Olga")
+	local store = o.env.store
+	-- The fake randomHex of a new session repeats its sequence: a hand-made first secret.
+	local S1 = string.rep("7", 32)
+	store.secret.S = S1
+	w.now = w.now + DAY - 1
+	addSession(w, "Olga", { store = store })
+	t.eq(store.secret.S, S1, "kept within 24 h")
+	t.eq(store.secret.prev, nil, "nothing previous")
+	w.now = w.now + 1
+	local o2 = addSession(w, "Olga", { store = store })
+	t.ok(store.secret.S ~= S1, "a new secret after 24 h")
+	t.eq(store.secret.time, w.now, "created now")
+	t.eq(store.secret.prev.S, S1, "the old one is kept as prev")
+	o2.session:tick()
+	flush(w)
+	local hello = sentOf(w, "HELLO", "Olga")[1].msg
+	t.eq(hello.commit, Engine.witnessCommit(store.secret.S), "commit of the new secret")
+	t.eq(hello.reveal, S1, "reveal of the previous secret")
+	-- prev is kept 14 days from its own creation.
+	w.now = w.now + 14 * DAY - DAY - 1
+	store.secret.time = w.now -- keep the current secret from rotating again
+	addSession(w, "Olga", { store = store })
+	t.eq(store.secret.prev and store.secret.prev.S, S1, "kept within 14 days")
+	w.now = w.now + 1
+	store.secret.time = w.now
+	addSession(w, "Olga", { store = store })
+	t.eq(store.secret.prev, nil, "dropped after 14 days")
+end)
+
+t.test("each client keeps the commit of every other sender's latest HELLO", function()
+	local w = newWorld()
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia")
+	o.session:tick()
+	p.session:tick()
+	flush(w)
+	local commits = o.env.store.commits[GUILD]
+	t.eq(commits.Pia.commit, Engine.witnessCommit(p.env.store.secret.S), "Pia's commit")
+	t.eq(commits.Pia.time, w.now, "time")
+	t.eq(commits.Olga, nil, "not the own")
+end)
+
+t.test("a WIT from a sender without a known commit does not count", function()
+	local w, _, p = witnessWorld(LINE_W1, { "Tom" })
+	-- Zed never sent a HELLO: he is online through other messages but not a witness.
+	inject(w, "Zed", "RES", { kind = "spin", n = 1, g = 0, status = "void", who = "-", head = ZERO_HEAD })
+	local names = {}
+	for _, s in ipairs(p.session:online()) do names[s.name] = true end
+	t.ok(names.Zed, "Zed is online")
+	local r = assert(p.session:game():spin())
+	t.eq(p.env.store.open[GUILD].Pia.A, 2, "A counts Olga and Tom, not Zed")
+	-- Zed's value would be drawn (A <= Z), but he has no commit.
+	inject(w, "Zed", "WIT", { player = "Pia", kind = "spin", n = r.n, g = 0, value = string.rep("e", 16) })
+	flush(w)
+	settle(w)
+	local e = lastEntry(p)
+	t.eq(e.contribs:find("Zed", 1, true), nil, "Zed not included")
+	t.eq(#Engine.parseContribs(e.contribs), 2, "Olga and Tom")
+end)
+
+local function hello(w, sender, fields)
+	fields.version = fields.version or "0.3.0"
+	fields.n = fields.n or 0
+	fields.head = fields.head or "-"
+	fields.reveal = fields.reveal or "-"
+	inject(w, sender, "HELLO", fields)
+end
+
+local function notices(s, kind)
+	local out = {}
+	for _, d in ipairs(events(s, "notice")) do
+		if d.kind == kind then out[#out + 1] = d end
+	end
+	return out
+end
+
+t.test("a witness whose answers do not match its revealed secret is caught by a sampling client", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local X, Y, Z = string.rep("1", 32), string.rep("2", 32), string.rep("3", 32)
+	hello(w, "Mal", { commit = Engine.witnessCommit(X) })
+	local head = Ledger.shortHead(p.session.state)
+	local r = assert(p.session:game():spin())
+	flush(w)
+	-- Mal answers with a value of another secret than the one he committed to.
+	inject(w, "Mal", "WIT", { player = "Pia", kind = "spin", n = r.n, g = 0,
+		value = Engine.witnessValue(Y, "Pia", "spin", r.n, 0, 10, head) })
+	settle(w)
+	local sample = o.env.store.samples[GUILD].Mal
+	t.eq(sample.commit, Engine.witnessCommit(X), "sampled under Mal's commit")
+	t.eq(sample.seen, 1, "seen")
+	t.eq(#sample.rows, 1, "one row")
+	local row = sample.rows[1]
+	t.eq(row.player, "Pia", "row player")
+	t.eq(row.kind, "spin", "row kind")
+	t.eq(row.n, r.n, "row n")
+	t.eq(row.amount, 10, "row amount")
+	t.eq(row.head, head, "row head")
+	t.eq(o.env.store.samples[GUILD].Tom.rows[1].value, sentOf(w, "WIT", "Tom")[1].msg.value, "Tom sampled too")
+	t.eq(o.env.store.samples[GUILD].Olga, nil, "the own answers are not sampled")
+	t.eq(#notices(o, "witness_cheat"), 0, "nothing yet")
+	-- Mal reveals X with his next HELLO.
+	hello(w, "Mal", { commit = Engine.witnessCommit(Z), reveal = X })
+	local cheat = notices(o, "witness_cheat")
+	t.eq(#cheat, 1, "one notice")
+	t.eq(cheat[1].name, "Mal", "names the witness")
+	local alerts = o.session:alerts("Pia")
+	t.eq(#alerts, 1, "one alert")
+	t.eq(alerts[1].code, "bad_value", "code")
+	t.eq(alerts[1].n, r.n, "n")
+	t.eq(alerts[1].g, 0, "g")
+	t.eq(alerts[1].player, "Pia", "player")
+	t.eq(o.env.store.samples[GUILD].Mal, nil, "samples dropped")
+	t.eq(#notices(others.Tom, "witness_cheat"), 1, "Tom caught him as well")
+	-- An honest witness rotates after 24 h; its reveal matches what it answered.
+	w.now = w.now + DAY
+	local tom2 = replaceSession(w, others.Tom, addSession(w, "Tom", { store = others.Tom.env.store }))
+	tom2.session:tick()
+	flush(w)
+	t.eq(#notices(o, "witness_cheat"), 1, "no notice for Tom")
+	t.eq(o.env.store.samples[GUILD].Tom, nil, "Tom's samples checked and dropped")
+	t.eq(#o.session:alerts("Pia"), 1, "no new alert")
+end)
+
+t.test("samples: a reservoir of 20 per witness and commit, a new commit keeps the old one", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom" })
+	local X, X2 = string.rep("4", 32), string.rep("5", 32)
+	hello(w, "Mal", { commit = Engine.witnessCommit(X) })
+	for n = 1, 30 do
+		inject(w, "Pia", "SPIN", { n = n, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+		inject(w, "Mal", "WIT", { player = "Pia", kind = "spin", n = n, g = 0,
+			value = Engine.witnessValue(X, "Pia", "spin", n, 0, 10, ZERO_HEAD) })
+		w.now = w.now + 1
+	end
+	-- A WIT without a heard request is not sampled.
+	inject(w, "Mal", "WIT", { player = "Pia", kind = "spin", n = 99, g = 0, value = string.rep("a", 16) })
+	local s = o.env.store.samples[GUILD].Mal
+	t.eq(s.seen, 30, "seen counts every sampled WIT")
+	t.eq(#s.rows, 20, "at most 20 rows")
+	hello(w, "Mal", { commit = Engine.witnessCommit(X2) })
+	inject(w, "Pia", "SPIN", { n = 31, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	inject(w, "Mal", "WIT", { player = "Pia", kind = "spin", n = 31, g = 0,
+		value = Engine.witnessValue(X2, "Pia", "spin", 31, 0, 10, ZERO_HEAD) })
+	s = o.env.store.samples[GUILD].Mal
+	t.eq(s.commit, Engine.witnessCommit(X2), "new reservoir")
+	t.eq(s.seen, 1, "fresh count")
+	t.eq(s.old.commit, Engine.witnessCommit(X), "the old one kept")
+	-- The reveal of X checks the old reservoir: all honest.
+	hello(w, "Mal", { commit = Engine.witnessCommit(X2), reveal = X })
+	s = o.env.store.samples[GUILD].Mal
+	t.eq(s.old, nil, "old checked and dropped")
+	t.eq(s.commit, Engine.witnessCommit(X2), "current stays")
+	t.eq(#notices(o, "witness_cheat"), 0, "honest")
+	t.eq(#o.session:alerts("Pia"), 0, "no alert")
+	-- Old reservoirs go after 14 days, at session creation.
+	s.old = { commit = Engine.witnessCommit(X), seen = 1, rows = {}, time = w.now }
+	w.now = w.now + 14 * DAY
+	addSession(w, "Olga", { store = o.env.store })
+	t.eq(o.env.store.samples[GUILD].Mal, nil, "all of Mal's samples are older than 14 days")
+	t.ok(p, "player")
+end)
+
+-- Settle early (docs/follow-spec.md section 6) --------------------------------------------------
+
+t.test("settle early: a missing expected witness keeps the window open until due", function()
+	local w, _, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local tomValue
+	w.drop = function(text)
+		local m = Proto.decode(text)
+		return m and m.type == "WIT" and others.Tom.env.store.witness and others.Tom.env.store.witness[GUILD]
+			and m.value == others.Tom.env.store.witness[GUILD][1].value
+	end
+	assert(p.session:game():spin())
+	flush(w)
+	w.drop = nil
+	tomValue = others.Tom.env.store.witness[GUILD][1].value
+	settle(w, 1.0)
+	t.eq(#events(p, "result"), 0, "Tom has not answered: still collecting at 1.0 s")
+	settle(w, 0.5)
+	t.eq(#events(p, "result"), 1, "settled at due")
+	t.eq(lastEntry(p).contribs:find(tomValue, 1, true), nil, "without Tom")
+end)
+
+t.test("settle early with the lottery: only the drawn names are waited for", function()
+	local names = {}
+	for i = 1, 11 do
+		names[i] = "W" .. i
+	end
+	local w, _, p = witnessWorld("GSLOTS1;L=1;W=1;R=1;E=10,50,100;G=3", names)
+	assert(p.session:game():spin())
+	flush(w)
+	settle(w, 0.3)
+	t.eq(#events(p, "result"), 1, "every drawn witness answered: settled at 0.3 s")
+	t.eq(lastEntry(p).status, "ok", "ok")
+end)
+
+-- Following (docs/follow-spec.md section 3) ----------------------------------------------------
+
+-- Every session ticks `rounds` times without moving the clock, flushing in between.
+local function catchUp(w, rounds)
+	for _ = 1, rounds or 20 do
+		for _, session in ipairs(w.sessions) do
+			session:tick()
+		end
+		flush(w)
+	end
+end
+
+local function followRec(s, player)
+	return s.env.store.follow and s.env.store.follow[GUILD] and s.env.store.follow[GUILD][player]
+end
+
+local function playerState(p)
+	return Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+end
+
+local function codes(s, player)
+	local out = {}
+	for _, a in ipairs(s.session:alerts(player)) do
+		out[#out + 1] = a.code
+	end
+	return table.concat(out, ",")
+end
+
+t.test("following from account creation at level 0: a third client holds the player's state", function()
+	local w, o, p, tom = payWorld({ follow = true })
+	play(w, p, 30)
+	catchUp(w)
+	local state = playerState(p)
+	for _, s in ipairs({ tom, o }) do
+		local f = s.session:followed("Pia")
+		t.ok(f, "followed")
+		t.eq(f.n, state.n, "n")
+		t.eq(f.balance, state.balance, "balance")
+		t.eq(f.count, state.count, "count")
+		t.eq(f.lost, false, "not lost")
+		t.eq(followRec(s, "Pia").snap.head, state.head, "head")
+	end
+	t.eq(tom.session:followed("Pia").hasEntries, false, "a member keeps no entries")
+	t.eq(o.session:followed("Pia").hasEntries, true, "the officer keeps the entries")
+	local rec = followRec(o, "Pia")
+	t.eq(#rec.entries, state.count, "entries since the start of the account")
+	t.eq(rec.base.count, 0, "base is the empty account")
+	t.eq(p.session:followed("Pia"), nil, "the own account is never followed")
+	t.eq(codes(tom, "Pia"), "", "no alerts")
+	-- The record survives a restart and following goes on.
+	local tom2 = replaceSession(w, tom, addSession(w, "Tom", { store = tom.env.store }))
+	play(w, p, 5)
+	catchUp(w)
+	state = playerState(p)
+	t.eq(tom2.session:followed("Pia").n, state.n, "n after the restart")
+	t.eq(followRec(tom2, "Pia").snap.head, state.head, "head after the restart")
+end)
+
+t.test("following at level 1 by a third client", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom", "Uma", "Vic" }, { tokens = 5000 })
+	local g = p.session:game()
+	for _ = 1, 25 do
+		if g:state() == "gamble" then
+			assert(g:gamble())
+		else
+			assert(g:spin())
+		end
+		flush(w)
+		settle(w)
+		w.now = w.now + 1.1
+	end
+	catchUp(w)
+	local state = playerState(p)
+	for _, s in ipairs({ o, others.Tom, others.Vic }) do
+		local f = s.session:followed("Pia")
+		t.eq(f and f.n, state.n, "n")
+		t.eq(f and f.lost, false, "not lost")
+		t.eq(followRec(s, "Pia").snap.head, state.head, "head")
+		t.eq(codes(s, "Pia"), "", "no alerts")
+	end
+end)
+
+t.test("a missed SPIN gives lost without an alert; a PAY restarts following", function()
+	local w, o, p, tom = payWorld({ follow = true })
+	play(w, p, 5)
+	catchUp(w)
+	-- Tom misses one SPIN.
+	local skip = true
+	local real = tom.session.onMessage
+	tom.session.onMessage = function(s, sender, text)
+		local m = Proto.decode(text)
+		if skip and m and m.type == "SPIN" then
+			skip = false
+			return
+		end
+		return real(s, sender, text)
+	end
+	play(w, p, 5)
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").lost, true, "lost")
+	t.eq(codes(tom, "Pia"), "", "no alert")
+	local before = tom.session:followed("Pia").n
+	t.ok(before < playerState(p).n, "the snapshot stays at the last checked state")
+	local reqId = assert(p.session:requestPayout("Olga", 100))
+	untilReady(w, o, reqId)
+	assert(o.session:confirm(reqId))
+	flush(w)
+	catchUp(w)
+	local state = playerState(p)
+	local f = tom.session:followed("Pia")
+	t.eq(f.lost, false, "following again")
+	t.eq(f.n, state.n, "n")
+	t.eq(f.balance, state.balance, "balance")
+	t.eq(f.count, state.count, "count from the PAYREQ plus one")
+	t.eq(followRec(tom, "Pia").snap.head, state.head, "head")
+	play(w, p, 5)
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").n, playerState(p).n, "and it goes on")
+	t.eq(followRec(tom, "Pia").snap.head, playerState(p).head, "head")
+end)
+
+t.test("a followed PAY and a second purchase are steps; the officer's base moves to the PAY", function()
+	local w, o, p, tom = payWorld({ follow = true })
+	play(w, p, 6)
+	catchUp(w)
+	local reqId = assert(p.session:requestPayout("Olga", 100))
+	untilReady(w, o, reqId)
+	assert(o.session:confirm(reqId))
+	flush(w)
+	catchUp(w)
+	local state = playerState(p)
+	for _, s in ipairs({ tom, o }) do
+		local f = s.session:followed("Pia")
+		t.eq(f.lost, false, "not lost")
+		t.eq(f.balance, state.balance, "balance after the payout")
+		t.eq(f.count, state.count, "count")
+		t.eq(followRec(s, "Pia").snap.head, state.head, "head")
+	end
+	local rec = followRec(o, "Pia")
+	t.eq(#rec.entries, 0, "entries emptied")
+	t.eq(rec.base.head, state.head, "base after the payout")
+	assert(o.session:grant("Pia", 500))
+	flush(w)
+	play(w, p, 3)
+	catchUp(w)
+	state = playerState(p)
+	t.eq(tom.session:followed("Pia").balance, state.balance, "second purchase followed")
+	t.eq(followRec(tom, "Pia").snap.head, state.head, "head")
+	t.eq(#followRec(o, "Pia").entries, state.count - rec.base.count, "officer entries since the payout")
+	t.eq(codes(tom, "Pia"), "", "no alerts")
+end)
+
+t.test("a PAY starts following on a client that knew only the purchase key", function()
+	local w, o, p, tom = payWorld({ follow = true })
+	play(w, p, 5)
+	catchUp(w)
+	tom.env.store.follow = nil -- e.g. a client that followed nothing yet
+	local tom2 = replaceSession(w, tom, addSession(w, "Tom", { store = tom.env.store }))
+	local reqId = assert(p.session:requestPayout("Olga", 100))
+	untilReady(w, o, reqId)
+	assert(o.session:confirm(reqId))
+	flush(w)
+	catchUp(w)
+	local state = playerState(p)
+	local f = tom2.session:followed("Pia")
+	t.ok(f, "followed from the PAY")
+	t.eq(f.n, state.n, "n")
+	t.eq(f.balance, state.balance, "balance")
+	t.eq(f.count, state.count, "count from the PAYREQ")
+	t.eq(followRec(tom2, "Pia").snap.head, state.head, "head")
+	-- A wrong ck starts nothing.
+	tom2.env.store.follow = nil
+	local tom3 = replaceSession(w, tom2, addSession(w, "Tom", { store = tom2.env.store }))
+	local pay = sentOf(w, "PAY")[1].msg
+	pay.ck = string.rep("0", 16)
+	inject(w, "Olga", "PAY", pay)
+	catchUp(w)
+	t.eq(tom3.session:followed("Pia"), nil, "no start")
+end)
+
+t.test("a SPIN with another head raises rewritten and the stream is lost", function()
+	local w, _, p, tom = payWorld()
+	play(w, p, 3)
+	catchUp(w)
+	local state = playerState(p)
+	inject(w, "Pia", "SPIN", { n = state.n + 1, stake = 10, level = 0, head = ZERO_HEAD, A = 0 })
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").lost, true, "lost")
+	t.eq(codes(tom, "Pia"), "rewritten", "rewritten")
+	local a = tom.session:alerts("Pia")[1]
+	t.eq(a.n, state.n + 1, "alert n")
+	t.eq(a.g, 0, "alert g")
+	t.eq(followRec(tom, "Pia").snap.head, state.head, "the last checked state stays")
+end)
+
+t.test("a HELLO with the same n and another head raises rewritten; a higher n is lost only", function()
+	local w, _, p, tom = payWorld()
+	play(w, p, 3)
+	catchUp(w)
+	local state = playerState(p)
+	hello(w, "Pia", { n = state.n, head = Ledger.shortHead(state), commit = string.rep("c", 32) })
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").lost, false, "a matching HELLO")
+	hello(w, "Pia", { n = state.n + 2, head = ZERO_HEAD, commit = string.rep("c", 32) })
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").lost, true, "higher n: lost")
+	t.eq(codes(tom, "Pia"), "", "without an alert")
+	-- Another follower hears the same n with another head.
+	local w2, _, p2, tom2 = payWorld()
+	play(w2, p2, 3)
+	catchUp(w2)
+	local s2 = playerState(p2)
+	hello(w2, "Pia", { n = s2.n, head = ZERO_HEAD, commit = string.rep("c", 32) })
+	catchUp(w2)
+	t.eq(codes(tom2, "Pia"), "rewritten", "rewritten")
+	t.eq(tom2.session:followed("Pia").lost, true, "lost")
+end)
+
+t.test("after a restart a mismatch before the first match is lost without an alert", function()
+	local w, _, p, tom = payWorld()
+	play(w, p, 3)
+	catchUp(w)
+	local tom2 = replaceSession(w, tom, addSession(w, "Tom", { store = tom.env.store }))
+	local state = playerState(p)
+	-- e.g. a payout Tom missed while he was away.
+	hello(w, "Pia", { n = state.n, head = ZERO_HEAD, commit = string.rep("c", 32) })
+	catchUp(w)
+	t.eq(tom2.session:followed("Pia").lost, true, "lost")
+	t.eq(codes(tom2, "Pia"), "", "no alert")
+end)
+
+-- A level 1 world where Tom follows and the bus can be edited.
+t.test("a RES with a wrong head raises bad_res", function()
+	local w, _, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local g = p.session:game()
+	assert(g:spin())
+	flush(w)
+	settle(w)
+	catchUp(w)
+	t.eq(others.Tom.session:followed("Pia").n, 1, "followed the first spin")
+	w.now = w.now + 3
+	assert(g:spin())
+	-- Rewrite the RES head on its way to the others.
+	w.drop = function(text)
+		local m = Proto.decode(text)
+		if m and m.type == "RES" then
+			local fields = { kind = m.kind, n = m.n, g = m.g, status = m.status, who = m.who, head = ZERO_HEAD }
+			for _, s in ipairs(w.sessions) do
+				if s ~= p.session then s:onMessage("Pia", assert(Proto.encode("RES", fields))) end
+			end
+			return true
+		end
+	end
+	flush(w)
+	settle(w)
+	w.drop = nil
+	catchUp(w)
+	t.eq(codes(others.Tom, "Pia"), "bad_res", "bad_res")
+	t.eq(others.Tom.session:followed("Pia").lost, true, "lost")
+	t.eq(others.Tom.session:alerts("Pia")[1].n, 2, "spin 2")
+end)
+
+t.test("a witness left out of a RES although it answered in time raises omitted", function()
+	local w, _, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local tomValue
+	-- Pia's client leaves Tom out: his WIT never reaches her.
+	local real = p.session.onMessage
+	p.session.onMessage = function(s, sender, text)
+		local m = Proto.decode(text)
+		if m and m.type == "WIT" and sender == "Tom" then
+			tomValue = m.value
+			return
+		end
+		return real(s, sender, text)
+	end
+	assert(p.session:game():spin())
+	flush(w)
+	settle(w, 0.4)
+	t.eq(#events(p, "result"), 0, "still collecting")
+	settle(w, 1.1)
+	t.ok(tomValue, "Tom answered")
+	t.eq(codes(others.Tom, "Pia"), "omitted", "Tom raises omitted")
+	t.eq(codes(others.Uma, "Pia"), "", "Uma was included")
+	-- A WIT sent less than 0.5 s before the RES raises nothing.
+	local w2, _, p2, others2 = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local real2 = p2.session.onMessage
+	p2.session.onMessage = function(s, sender, text)
+		local m = Proto.decode(text)
+		if m and m.type == "WIT" and sender == "Tom" then return end
+		return real2(s, sender, text)
+	end
+	w2.now = w2.now + 3
+	assert(p2.session:game():spin())
+	w2.now = w2.now + 1.2
+	flush(w2)
+	settle(w2, 0.31)
+	t.eq(#events(p2, "result"), 1, "settled")
+	t.eq(codes(others2.Tom, "Pia"), "", "too late to count")
+end)
+
+t.test("an officer's entries are dropped above 3000; the state is still followed", function()
+	local w, o, p = payWorld({ follow = true })
+	play(w, p, 3)
+	catchUp(w)
+	local rec = followRec(o, "Pia")
+	while #rec.entries < 2999 do
+		rec.entries[#rec.entries + 1] = "x"
+	end
+	local g = p.session:game()
+	local function spinOnce()
+		if g:state() == "gamble" then g:take() end
+		w.now = w.now + 2
+		assert(g:spin())
+		flush(w)
+		catchUp(w)
+	end
+	spinOnce()
+	t.eq(#followRec(o, "Pia").entries, 3000, "3000 kept")
+	spinOnce()
+	t.eq(followRec(o, "Pia").entries, nil, "dropped")
+	t.eq(o.session:followed("Pia").hasEntries, false, "hasEntries")
+	t.eq(o.session:followed("Pia").n, playerState(p).n, "still followed")
+	t.eq(o.session:followed("Pia").lost, false, "not lost")
+end)
+
+t.test("load: at most 8 followed steps per tick, at most 50 waiting per player", function()
+	local w, _, p, tom = payWorld({ tokens = 100000 })
+	catchUp(w)
+	local n0 = tom.session:followed("Pia").n
+	play(w, p, 20)
+	tom.session:tick()
+	t.eq(tom.session:followed("Pia").n - n0 <= 8, true, "at most 8 in one tick")
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").n, playerState(p).n, "the rest on later ticks")
+	-- More than 50 waiting: lost.
+	local spins = 0
+	local g = p.session:game()
+	while spins < 51 do
+		w.now = w.now + 2
+		if g:state() == "gamble" then g:take() end
+		assert(g:spin())
+		spins = spins + 1
+		flush(w)
+	end
+	tom.session:tick()
+	t.eq(tom.session:followed("Pia").lost, true, "lost")
+	t.eq(codes(tom, "Pia"), "", "without an alert")
+end)
+
+t.test("followStart: a replayed state becomes the follow record", function()
+	local w, o, p = payWorld({ follow = true })
+	play(w, p, 4)
+	catchUp(w)
+	o.env.store.follow = nil
+	local state = playerState(p)
+	o.session:followStart("Pia", state, state.count)
+	local f = o.session:followed("Pia")
+	t.eq(f.n, state.n, "n")
+	t.eq(f.count, state.count, "count")
+	t.eq(f.hasEntries, true, "officer: empty entries")
+	t.eq(#followRec(o, "Pia").entries, 0, "empty")
+	t.eq(followRec(o, "Pia").base.head, state.head, "base is the state")
+	play(w, p, 2)
+	catchUp(w)
+	t.eq(o.session:followed("Pia").n, playerState(p).n, "followed on")
+	t.eq(#followRec(o, "Pia").entries, playerState(p).count - state.count, "entries since the start")
+end)
+
+-- Alerts (docs/follow-spec.md section 4) ------------------------------------------------------
+
+t.test("alerts are stored once per player, code, n and g, at most 200, for 14 days", function()
+	local w, _, _, tom = payWorld()
+	local s = tom.session
+	s:addAlert("Pia", "rewritten", 3, 0)
+	s:addAlert("Pia", "rewritten", 3, 0)
+	s:addAlert("Pia", "rewritten", 3, 1)
+	t.eq(#s:alerts("Pia"), 2, "once per key")
+	t.eq(s:alerts("Pia")[1].g, 1, "newest first")
+	for i = 1, 250 do
+		s:addAlert("Pia", "bad_entry", i, 0)
+	end
+	t.eq(#tom.env.store.alerts[GUILD], 200, "at most 200")
+	w.now = w.now + 14 * DAY
+	addSession(w, "Tom", { store = tom.env.store })
+	t.eq(#tom.env.store.alerts[GUILD], 0, "older than 14 days dropped")
+end)
+
+t.test("on a PAYREQ, clients with alerts send up to 3 ALERT messages; the officer keeps them per reqId", function()
+	local w, o, p, tom = payWorld({ follow = true })
+	local uma = addSession(w, "Uma")
+	play(w, p, 3)
+	catchUp(w)
+	for n = 1, 4 do
+		tom.session:addAlert("Pia", "rewritten", n, 0)
+	end
+	tom.session:addAlert("Paul", "bad_res", 1, 0)
+	uma.session:addAlert("Pia", "omitted", 2, 0)
+	o.session:addAlert("Pia", "bad_entry", 2, 0)
+	local reqId = assert(p.session:requestPayout("Olga", 50))
+	flush(w)
+	t.eq(#sentOf(w, "ALERT"), 0, "not at once")
+	for _ = 1, 4 do
+		w.now = w.now + 1
+		for _, s in ipairs(w.sessions) do s:tick() end
+		flush(w)
+	end
+	local fromTom = sentOf(w, "ALERT", "Tom")
+	t.eq(#fromTom, 3, "three from Tom")
+	t.eq(fromTom[1].msg.n, 4, "newest first")
+	t.eq(fromTom[1].msg.reqId, reqId, "reqId")
+	t.eq(fromTom[1].msg.player, "Pia", "player")
+	t.eq(#sentOf(w, "ALERT", "Uma"), 1, "one from Uma")
+	t.eq(#sentOf(w, "ALERT", "Olga"), 0, "the addressed officer sends none")
+	t.eq(#sentOf(w, "ALERT", "Pia"), 0, "the player sends none")
+	local heard = o.session:heardAlerts(reqId)
+	t.eq(#heard, 4, "Olga keeps four")
+	local by = {}
+	for _, a in ipairs(heard) do by[a.by] = (by[a.by] or 0) + 1 end
+	t.eq(by.Tom, 3, "by Tom")
+	t.eq(by.Uma, 1, "by Uma")
+	t.eq(heard[1].code, "rewritten", "code")
+	t.eq(type(heard[1].time), "number", "time")
+	t.eq(#o.session:heardAlerts("ffffffffffffffff"), 0, "nothing for another request")
+end)
+
+t.test("ALERT batches wait for a budget of 3", function()
+	local w, _, p, tom = payWorld()
+	tom.session:addAlert("Pia", "rewritten", 1, 0)
+	w.budget = 2
+	assert(p.session:requestPayout("Olga", 50))
+	flush(w)
+	for _ = 1, 4 do
+		w.now = w.now + 1
+		tom.session:tick()
+		flush(w)
+	end
+	t.eq(#sentOf(w, "ALERT"), 0, "no budget")
+	w.budget = 10
+	tom.session:tick()
+	flush(w)
+	t.eq(#sentOf(w, "ALERT", "Tom"), 1, "sent once the budget is back")
+end)
+
+-- Payout with a followed state (docs/follow-spec.md section 5) -----------------------------------
+
+local function findingCodes(report)
+	local out = {}
+	for _, f in ipairs(report.findings) do
+		out[#out + 1] = f.code
+	end
+	return table.concat(out, ",")
+end
+
+t.test("payout with nothing missing: no LOGREQ, green, and the follow record moves to the payout", function()
+	local w, o, p = payWorld({ follow = true })
+	play(w, p, 12)
+	catchUp(w)
+	local state = playerState(p)
+	local reqId = assert(p.session:requestPayout("Olga", 100))
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "ready")
+	t.eq(r.followed, true, "followed")
+	t.eq(r.partial, nil, "not partial")
+	t.eq(r.life, 300, "nothing transferred: 300 s")
+	t.eq(#sentOf(w, "LOGREQ"), 0, "no LOGREQ")
+	t.eq(#sentOf(w, "LOG"), 0, "no LOG")
+	t.eq(r.report.light, "green", "green: " .. findingCodes(r.report))
+	t.eq(r.report.balance, state.balance, "balance")
+	t.ok(r.report.luck and r.report.luck.spins > 0, "luck over the officer's entries")
+	t.eq(#r.report.alerts, 0, "no alerts")
+	t.eq(p.session:payout().status, "wait_officer", "the player sent nothing")
+	assert(o.session:confirm(reqId))
+	flush(w)
+	catchUp(w)
+	t.eq(p.session:payout().status, "paid", "paid")
+	local after = playerState(p)
+	local rec = followRec(o, "Pia")
+	t.eq(rec.snap.head, after.head, "record at the state after the payout")
+	t.eq(rec.base.head, after.head, "base there")
+	t.eq(#rec.entries, 0, "entries emptied")
+	t.eq(rec.count, after.count, "count")
+	t.eq(rec.lost, nil, "not lost")
+end)
+
+t.test("alerts reach the officer on a PAYREQ and appear in the report after at least 4 s", function()
+	local w, o, p, tom = payWorld({ follow = true })
+	play(w, p, 6)
+	catchUp(w)
+	tom.session:addAlert("Pia", "rewritten", 3, 0)
+	tom.session:addAlert("Pia", "bad_res", 4, 1)
+	o.session:addAlert("Pia", "omitted", 2, 0)
+	local reqId = assert(p.session:requestPayout("Olga", 50))
+	flush(w)
+	local t0 = w.now
+	for _ = 1, 3 do
+		w.now = w.now + 1
+		for _, s in ipairs(w.sessions) do s:tick() end
+		flush(w)
+	end
+	t.eq(req(o, reqId).status, "checking", "no report before 4 s")
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "ready")
+	t.ok(w.now - t0 >= 4, "at least 4 s")
+	t.eq(r.followed, true, "followed")
+	t.eq(r.report.light, "yellow", "alerts are yellow")
+	t.eq(findingCodes(r.report), "alert_bad_res,alert_rewritten,alert_omitted", "one finding per code, newest of Tom first")
+	t.eq(#r.report.alerts, 3, "three alerts")
+	local by = {}
+	for _, a in ipairs(r.report.alerts) do by[a.code] = a end
+	t.eq(by.rewritten.by, "Tom", "Tom's alert")
+	t.eq(by.rewritten.n, 3, "spin number")
+	t.eq(by.bad_res.g, 1, "step")
+	t.eq(by.omitted.by, "Olga", "the officer's own alert")
+	-- Kept in the stored request too.
+	assert(o.session:confirm(reqId))
+	t.eq(#req(o, reqId).report.alerts, 3, "stored with the request")
+end)
+
+-- Olga misses one SPIN of Pia, so her record is lost after `before` spins and `after` more.
+local function missOne(w, o, p, before, after)
+	play(w, p, before)
+	catchUp(w)
+	local skip = true
+	local real = o.session.onMessage
+	o.session.onMessage = function(s, sender, text)
+		local m = Proto.decode(text)
+		if skip and m and m.type == "SPIN" then
+			skip = false
+			return
+		end
+		return real(s, sender, text)
+	end
+	play(w, p, after)
+	catchUp(w)
+end
+
+t.test("payout with a partial log: the officer asks only for the entries after its record", function()
+	for _, keepEntries in ipairs({ true, false }) do
+		local w, o, p = payWorld({ follow = true })
+		missOne(w, o, p, 8, 6)
+		local rec = followRec(o, "Pia")
+		t.eq(rec.lost, true, "lost")
+		if not keepEntries then
+			rec.entries, rec.base = nil, nil
+		end
+		local count, head = rec.count, rec.snap.head
+		local state = playerState(p)
+		t.ok(count < state.count, "behind")
+		local reqId = assert(p.session:requestPayout("Olga", 100))
+		local r = untilReady(w, o, reqId)
+		local logreq = sentOf(w, "LOGREQ")[1].msg
+		t.eq(logreq.from, count, "from = the record's count")
+		t.eq(logreq.head, head:sub(1, 32), "head = the record's short head")
+		t.eq(r.status, "ready", "ready")
+		t.eq(r.partial, true, "partial")
+		t.eq(r.followed, nil, "something was transferred")
+		t.eq(r.report.light, "green", "green: " .. findingCodes(r.report))
+		t.eq(r.report.balance, state.balance, "balance")
+		if keepEntries then
+			t.ok(r.report.luck.spins >= 8, "luck over stored and received entries")
+		else
+			t.ok(r.report.luck.spins < 8, "luck over the received entries only")
+		end
+		-- The partial log is smaller than the whole account.
+		local whole = #Pack.split(Pack.encode(account(p, "Pia").entries))
+		t.ok(r.total <= whole, "chunks")
+		t.eq(sentOf(w, "LOG", "Pia")[1].msg.payload:sub(1, 1), ">", "the from marker")
+		-- The record follows on from the replayed state.
+		rec = followRec(o, "Pia")
+		t.eq(rec.lost, nil, "not lost any more")
+		t.eq(rec.snap.head, state.head, "head")
+		t.eq(rec.count, state.count, "count")
+		if keepEntries then
+			t.eq(#rec.entries, state.count, "entries since the start of the account")
+		end
+		assert(o.session:confirm(reqId))
+		flush(w)
+		t.eq(p.session:payout().status, "paid", "paid")
+	end
+end)
+
+t.test("a record that does not fit the player's account: the player sends the whole account", function()
+	local w, o, p = payWorld({ follow = true })
+	missOne(w, o, p, 5, 4)
+	local rec = followRec(o, "Pia")
+	rec.snap.head = string.rep("1", 64) -- not a state of Pia's account
+	local reqId = assert(p.session:requestPayout("Olga", 100))
+	local r = untilReady(w, o, reqId)
+	t.ok(sentOf(w, "LOGREQ")[1].msg.from > 0, "asked for a partial log")
+	t.ok(sentOf(w, "LOG", "Pia")[1].msg.payload:sub(1, 1) ~= ">", "got the whole account")
+	t.eq(r.status, "ready", "ready")
+	t.eq(r.partial, nil, "not partial")
+	t.eq(r.report.light, "green", "green: " .. findingCodes(r.report))
+	t.eq(followRec(o, "Pia").snap.head, playerState(p).head, "record from the whole account")
+end)
+
+-- An account of one purchase and `spins` level-0 spins at stake 10, built without sessions.
+local function longAccount(spins)
+	local state = Ledger.start(GUILD, "Pia")
+	local entries = {}
+	local function add(e)
+		assert(Ledger.apply(state, e))
+		entries[#entries + 1] = Ledger.encode(e)
+	end
+	add({ type = "B", buyId = string.rep("b", 16), officer = "Olga", tokens = 100000, commit = ns.Engine.commit(SEED),
+		seed = SEED, nonce = string.rep("7", 32), time = 1234, line = LINE_PAY })
+	for n = 1, spins do
+		add({ type = "S", n = n, stake = 10, A = 0, status = "ok", contribs = "" })
+	end
+	return entries
+end
+
+local function prefix(entries, count)
+	local out = {}
+	for i = 1, count do out[i] = entries[i] end
+	return out
+end
+
+t.test("the player replays at most 500 entries per tick for a partial log", function()
+	local entries = longAccount(1199)
+	local w = newWorld()
+	w.line = LINE_PAY
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia", { store = { accounts = { [GUILD] = { Pia = { entries = entries } } } } })
+	assert(o.session:followStart("Pia", Ledger.replay(GUILD, "Pia", prefix(entries, 1100)), 1100))
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	flush(w)
+	t.eq(sentOf(w, "LOGREQ")[1].msg.from, 1100, "partial asked")
+	t.eq(p.session:payout().status, "sending", "preparing")
+	t.eq(#sentOf(w, "LOG"), 0, "500 replayed, no LOG yet")
+	p.session:tick()
+	flush(w)
+	t.eq(#sentOf(w, "LOG"), 0, "1000 replayed, no LOG yet")
+	p.session:tick()
+	flush(w)
+	t.ok(#sentOf(w, "LOG") > 0, "1100 replayed, LOG sent")
+	t.eq(p.session:payout().status, "wait_decision", "sent")
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "ready")
+	t.eq(r.partial, true, "partial")
+	t.eq(r.report.balance, Ledger.replay(GUILD, "Pia", entries).balance, "balance")
+end)
+
+t.test("a reload while preparing a partial log starts it again", function()
+	local entries = longAccount(1199)
+	local w = newWorld()
+	w.line = LINE_PAY
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia", { store = { accounts = { [GUILD] = { Pia = { entries = entries } } } } })
+	assert(o.session:followStart("Pia", Ledger.replay(GUILD, "Pia", prefix(entries, 700)), 700))
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	flush(w)
+	t.eq(#sentOf(w, "LOG"), 0, "preparing")
+	local p2 = replaceSession(w, p, addSession(w, "Pia", { store = p.env.store }))
+	t.eq(p2.session:payout().status, "sending", "restored")
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "ready")
+	t.eq(r.partial, true, "partial")
+	t.eq(p2.env.store.payout[GUILD].Pia.part, true, "kept in the store")
+end)
+
+t.test("after a reload a WIT counts only once the sender's commit was heard in this session", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	t.ok(p.env.store.commits[GUILD].Olga, "Olga's commit is stored")
+	w.now = w.now + 5
+	local p2 = replaceSession(w, p, addSession(w, "Pia", { store = p.env.store }))
+	-- Everyone shows up through a message, but no HELLO was heard since the reload.
+	for _, name in ipairs({ "Olga", "Tom", "Uma" }) do
+		inject(w, name, "RES", { kind = "spin", n = 9, g = 0, status = "void", who = "-", head = ZERO_HEAD })
+	end
+	t.eq(#p2.session:online(), 3, "three online")
+	t.eq(p2.session:game():status(), "few_players", "stored commits do not count")
+	-- Tom and Uma send their HELLO; Olga's comes later.
+	for _, s in ipairs({ others.Tom, others.Uma }) do
+		hello(w, s.env.me, { commit = Engine.witnessCommit(s.env.store.secret.S) })
+	end
+	t.eq(p2.session:game():status(), "ok", "two heard commits")
+	local r = assert(p2.session:game():spin())
+	t.eq(p2.env.store.open[GUILD].Pia.A, 2, "A counts Tom and Uma, not Olga")
+	flush(w)
+	-- Olga answers too (her client counts her as drawn); her value does not count for Pia yet.
+	inject(w, "Olga", "WIT", { player = "Pia", kind = "spin", n = r.n, g = 0, value = string.rep("e", 16) })
+	settle(w)
+	local e = lastEntry(p2)
+	t.eq(e.contribs:find("Olga", 1, true), nil, "Olga not included")
+	t.eq(#Engine.parseContribs(e.contribs), 2, "Tom and Uma")
+	t.ok(o, "Olga's session")
+end)
+
+t.test("followed without the officer's entries: no luck index, the report says so with luck = nil", function()
+	local w, o, p = payWorld({ follow = true })
+	play(w, p, 6)
+	catchUp(w)
+	local rec = followRec(o, "Pia")
+	rec.entries, rec.base = nil, nil -- as after the 3000-entry cap
+	local reqId = assert(p.session:requestPayout("Olga", 10))
+	local r = untilReady(w, o, reqId)
+	t.eq(r.status, "ready", "ready")
+	t.eq(r.followed, true, "followed")
+	t.eq(r.report.luck, nil, "no luck index")
+	t.eq(r.report.balance, playerState(p).balance, "balance")
+	t.eq(r.report.light, "green", "green: " .. findingCodes(r.report))
+end)
+
+-- HI ----------------------------------------------------------------------------------------------
+
+local function helloCount(w, from)
+	return #sentOf(w, "HELLO", from)
+end
+
+-- Ticks every session once a second for `seconds`, delivering as it goes.
+local function runFor(w, seconds)
+	for _ = 1, seconds do
+		settle(w, 1)
+	end
+end
+
+t.test("HI after a restart: the others' HELLOs arrive within 8 s and a witnessed spin works", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	w.now = w.now + 30
+	local p2 = replaceSession(w, p, addSession(w, "Pia", { store = p.env.store }))
+	p2.session:tick()
+	flush(w)
+	t.eq(sentTypes(w, "Pia"):sub(-8), "HELLO,HI", "HELLO then HI")
+	t.eq(p2.session:game():status(), "few_players", "nobody has answered yet")
+	local before = helloCount(w)
+	runFor(w, 8)
+	t.eq(helloCount(w) - before, 3, "Olga, Tom and Uma answered once each")
+	t.eq(p2.session:game():status(), "ok", "witnesses heard")
+	t.ok(p2.session:game():spin(), "spin possible")
+end)
+
+t.test("HI: no answer when the own HELLO is younger than 20 s", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom" })
+	w.now = w.now + 10
+	local before = helloCount(w, "Tom")
+	inject(w, "Pia", "HI", {})
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before, "Tom stays quiet")
+	w.now = w.now + 30
+	inject(w, "Pia", "HI", {})
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before + 1, "Tom answers after 20 s")
+end)
+
+t.test("HI: several HIs give one HELLO, and that HELLO restarts the schedule", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom" })
+	w.now = w.now + 30
+	local before = helloCount(w, "Tom")
+	for _ = 1, 3 do
+		inject(w, "Pia", "HI", {})
+		w.now = w.now + 1
+	end
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before + 1, "one answer")
+	w.now = w.now + 100
+	for _, s in ipairs(w.sessions) do s:tick() end
+	flush(w)
+	t.eq(helloCount(w, "Tom"), before + 1, "no regular HELLO yet, the schedule restarted at the answer")
+end)
+
+t.test("HI: no answer with a low budget, and the own echo is ignored", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom" })
+	w.now = w.now + 30
+	local before = helloCount(w, "Tom")
+	w.budget = 2
+	inject(w, "Pia", "HI", {})
+	w.budget = 10
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before, "skipped")
+	inject(w, "Tom", "HI", {})
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before, "own HI does not count")
 end)

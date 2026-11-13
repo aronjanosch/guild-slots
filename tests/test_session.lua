@@ -57,6 +57,8 @@ t.test("autoplay goes on unless an offer waits; only wait is retried", function(
 	t.eq(Auto.after(game("gamble")), "wait", "offer open: the player decides")
 	t.eq(Auto.after(nil), "continue", "no game")
 	t.eq(Auto.refused("wait"), "retry", "guild interval: retry")
+	t.eq(Auto.refused("collecting"), "retry", "a witnessed request still open: retry")
+	t.eq(Auto.refused("few_players"), "off", "too few players: off")
 	t.eq(Auto.refused("no_funds"), "off", "no funds: off")
 	t.eq(Auto.refused("payout"), "off", "payout open: off")
 	t.eq(Auto.refused("send"), "off", "any other refusal: off")
