@@ -87,7 +87,7 @@ Specs: [core](docs/core-spec.md), [table T2](docs/table-t2-spec.md), [table T3](
 
 ```
 make test                      # unit tests, with LuaJIT's signed and the client's unsigned bit results
-luajit tests/smoke_ui.lua      # the windows against a WoW API stub (also smoke_net, smoke_guild, smoke_payout)
+luajit tests/smoke_ui.lua      # the windows against a WoW API stub (also smoke_net, smoke_guild, smoke_witness, smoke_payout)
 make vectors                   # regenerate test vectors from the Python reference
 make media                     # rebuild textures and fonts from design/
 tools/install.sh "<WoW Forever>/Interface/AddOns"   # symlink the addon into the client

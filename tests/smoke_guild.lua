@@ -156,10 +156,35 @@ local function officerFlow(locale, unknown)
 	stub.type(O.fields.E, "10,200")
 	assert(O.line:GetText():find("E=10,200", 1, true), "line rebuilt")
 	assert(O.formNote:GetText() == L.WARN_SPREAD, "spread warning at level 0")
-	stub.type(O.fields.L, "2")
-	assert(O.formNote:GetText():find(L.NOTE_LEVEL, 1, true), "level note")
-	stub.type(O.fields.L, "0")
 	stub.type(O.fields.E, "10,50,100")
+	-- Two modes: Open (L=0) and Witnessed (L=1 with W).
+	assert(O.mode.label:GetText() == L.MODE_OPEN and not O.mode.selected, "open mode from the guild info")
+	O.mode:Click()
+	assert(O.mode.label:GetText() == L.MODE_WITNESSED and O.mode.selected, "witnessed mode")
+	assert(O.line:GetText() == "GSLOTS1;L=1;W=2;R=1;E=10,50,100;G=3;C=0;T=T2;X=1000", "witnessed line")
+	stub.type(O.fields.W, "3")
+	assert(O.line:GetText():find("L=1;W=3;", 1, true), "W editable")
+	stub.type(O.fields.W, "6")
+	assert(O.line:GetText() == "" and O.formNote:GetText():find(L.F_W, 1, true), "W is 1..5")
+	stub.type(O.fields.W, "2")
+	O.mode:Click()
+	assert(O.mode.label:GetText() == L.MODE_OPEN, "back to open")
+	assert(O.line:GetText():find(";L=0;", 1, true), "open line")
+	assert(O.selfTest.label:GetText() == L.SELF_TEST and L.SELF_TEST == (locale == "deDE" and "Nur Test" or "Test only"),
+		"self-test switch label")
+	-- A guild info with L=2 is shown as it is.
+	local info = stub.infoText
+	stub.infoText = "GSLOTS1;L=2;W=2;R=1;E=10,50,100;G=3;T=T2"
+	stub.slash("/gs", "help")
+	O.frame:Hide()
+	O.frame:Show()
+	assert(O.mode.label:GetText() == L.MODE_LEVEL2, "level 2 shown as it is")
+	assert(O.line:GetText():find(";L=2;", 1, true), "level 2 line kept")
+	stub.infoText = info
+	stub.slash("/gs", "help")
+	O.frame:Hide()
+	O.frame:Show()
+	assert(O.line:GetText():find(";L=0;", 1, true), "open again")
 	assert(O.formNote:GetText() == "", "no note for a plain level 0 line")
 	-- Read-only line: typing restores it, focus selects all.
 	local line = O.line:GetText()
