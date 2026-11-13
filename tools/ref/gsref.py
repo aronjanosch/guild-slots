@@ -1,4 +1,5 @@
-"""Independent reference implementation of docs/core-spec.md, sections 4-6, and of docs/table-t2-spec.md.
+"""Independent reference implementation of docs/core-spec.md, sections 4-6, and of docs/table-t2-spec.md
+(tables T2 and T3: the same rules, T3 has other strips, docs/table-t3-spec.md).
 
 Python 3 standard library only. Written strictly from the spec text.
 Names are `str`; every hash input is the UTF-8 encoding of the text.
@@ -92,6 +93,17 @@ T2_PAYS = {
     "C": {2: 5, 3: 40, 4: 400, 5: 2000}, "L": {2: 10, 3: 100, 4: 1000, 5: 5000},
 }
 T2_SCATTER = {3: 2, 4: 20, 5: 200}
+# ---- table T3 (docs/table-t3-spec.md): every rule of T2, retuned strips (tools/ref/t3_tune.py)
+T3_BASE = ("KTMKDSGTCDTGWTGWSKMSKDGSWKDWLMSCTKDGSTWCB "
+           "KTGWSKWGKTWGKSWGMKSTWGSMGKTDSLCWKMTBCKWG "
+           "WGDSMTWDSMWSKTSDTGKWCSTGMWSGTKGCDKMDLGWCSWMLKTGKWTLSBDM "
+           "TGSWMGTMWTKWSGWKTGSTKSMWKGSMKGWKGWSMKTWGTWGBMLSTCD "
+           "WKSBKGSWTGMWKTMGWTGKDSBLTCGKM").split()
+T3_FREE = ("SKGTWGKSTWKGWKSMTKGWDSMKDTGMSWKTKBTWLSGKC "
+           "SWKSDKSTWGTKGMKTCSKWSMWCTKGWTDMGSTWGLSDMGSKWLTGKMLKSCWTB "
+           "GTDGSKWTSWKSGTKSGTLWSGWKTWDGTMKDTKSDGLSGKTDCTWKGWMBTDKBMWSC "
+           "SDGSKMWGTKGSWDKTGDCMSWTGWKTWKCGSTDWMGWCKSBGDMSLDWCTKL "
+           "WGSTWSTGKSTGWTGKWGSKTSKGTBKWSMTGSTWDKTSKWGCMDSCKBDWLGST").split()
 T2_EXPAND = "KSGTWMDCL"
 T2_MAX_FREE = 50
 T2_AWARD = 10
@@ -102,8 +114,9 @@ class Tables:
 
     @staticmethod
     def get(tid):
-        if tid == "T2":
-            return {"id": "T2", "kind": "lines", "reels": T2_BASE, "freeReels": T2_FREE, "rows": 3,
+        strips = {"T2": (T2_BASE, T2_FREE), "T3": (T3_BASE, T3_FREE)}.get(tid)
+        if strips:
+            return {"id": tid, "kind": "lines", "reels": strips[0], "freeReels": strips[1], "rows": 3,
                     "lines": T2_LINES, "pays": T2_PAYS, "scatter": T2_SCATTER, "lineCount": 10}
         if tid != "T1":
             return None
@@ -226,7 +239,8 @@ def settings_parse(line):
             s["T"] = v
         elif k == "X":
             s["X"] = number(v, 1, 1000000000)
-    if s["T"] == "T2" and any(x % 10 for x in s["E"]):
+    tbl = Tables.get(s["T"])
+    if tbl["kind"] == "lines" and any(x % tbl["lineCount"] for x in s["E"]):
         raise Err("bad_settings")
     s["Z"] = 2 * s["W"] + 3
     return s

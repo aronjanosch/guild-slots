@@ -26,7 +26,7 @@ Rain.__index = Rain
 -- parent: a frame covering the window (w x h).
 function Fx.rain(parent, w, h)
 	local L = Theme.layout
-	local o = setmetatable({ parent = parent, w = w, h = h, coins = {}, active = false }, Rain)
+	local o = setmetatable({ parent = parent, w = w, h = h, coins = {}, active = false, count = L.coins }, Rain)
 	for i = 1, L.coins do
 		local t = parent:CreateTexture(nil, "OVERLAY")
 		t:SetTexture(Theme.tex.coinSheet)
@@ -36,8 +36,20 @@ function Fx.rain(parent, w, h)
 	return o
 end
 
-function Rain:start(now)
+-- count: coins in the rain (at most the pool), default all.
+function Rain:start(now, count)
 	self.t0, self.active = now, true
+	self:setCount(count)
+end
+
+-- More (or fewer) coins while it rains; the coins already falling keep their paths.
+function Rain:setCount(count)
+	local n = #self.coins
+	count = math.min(count or n, n)
+	self.count = count
+	for i = count + 1, n do
+		self.coins[i]:Hide()
+	end
 end
 
 function Rain:stop()
@@ -50,7 +62,7 @@ function Rain:update(now)
 		return
 	end
 	local tm, sheet, sizes = Theme.timing, Theme.sheets.coin, Theme.layout.coinSizes
-	local life, n = tm.coinLife, #self.coins
+	local life, n = tm.coinLife, self.count
 	local t = now - self.t0
 	for i = 1, n do
 		local c = self.coins[i]

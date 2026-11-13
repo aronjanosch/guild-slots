@@ -245,7 +245,7 @@ class T2Tests(unittest.TestCase):
 
     def test_t1_kind(self):
         self.assertEqual(R.Tables.get("T1")["kind"], "classic")
-        self.assertIsNone(R.Tables.get("T3"))
+        self.assertIsNone(R.Tables.get("T9"))
 
 
 class T2StatsTests(unittest.TestCase):
@@ -264,6 +264,79 @@ class T2StatsTests(unittest.TestCase):
         for _ in range(300):
             stops = [int(rng.integers(0, n)) for n in T["nb"]]
             ref = R.t2_evaluate(T2, stops, 10)  # stake 10: line bet 1, scatter pays 10 * multiple
+            arr = [np.array([s], dtype=np.int32) for s in stops]
+            got = int(TS._lines10(T, T["base"], arr)[0]) + int(T["scat10"][sum(T["bbooks"][r][stops[r]]
+                                                                                for r in range(5))])
+            self.assertEqual(got, ref["win"])
+
+
+# ---------------------------------------------------------------- table T3
+
+T3 = R.Tables.get("T3")
+
+
+class T3Tests(unittest.TestCase):
+    def test_same_rules_as_t2(self):
+        for k in ("lines", "pays", "scatter"):
+            self.assertIs(T3[k], T2[k], k)  # one definition of the rules
+        for k in ("kind", "rows", "lineCount"):
+            self.assertEqual(T3[k], T2[k], k)
+        self.assertEqual(T3["id"], "T3")
+
+    def test_strips_match_spec(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "..", "..", "docs", "table-t3-spec.md")) as f:
+            txt = f.read()
+        blocks = [b for b in txt.split("```") if b.strip()[:2] == "1:"]
+        self.assertEqual(len(blocks), 2)  # base strips, free strips
+        self.assertEqual(T3["reels"], [ln.split(": ")[1] for ln in blocks[0].strip().split("\n")])
+        self.assertEqual(T3["freeReels"], [ln.split(": ")[1] for ln in blocks[1].strip().split("\n")])
+
+    def test_tuner_reproduces_the_strips(self):
+        import t3_tune
+        base, free, steps = t3_tune.tune()
+        self.assertEqual((base, free), (T3["reels"], T3["freeReels"]))
+        self.assertEqual(len(steps), 2)
+
+    def test_strip_constraints(self):
+        for a, b in ((T2["reels"], T3["reels"]), (T2["freeReels"], T3["freeReels"])):
+            for x, y in zip(a, b):
+                self.assertEqual(len(x), len(y))
+                self.assertEqual([i for i, c in enumerate(x) if c == "B"], [i for i, c in enumerate(y) if c == "B"])
+                self.assertEqual(set(y), set("LCDMWTGSKB"))
+                n = len(y)
+                self.assertFalse([i for i in range(n) if y[i] == y[(i + 1) % n] == y[(i + 2) % n]])
+
+    def test_exact_statistics(self):
+        ex, e2 = TS.exact("T3"), TS.exact("T2")
+        self.assertLess(abs(float(ex["rtp"]) - 0.92), 0.002)
+        self.assertEqual(ex["freeRate"], e2["freeRate"])
+        share = ex["rtpFree"] / ex["rtp"]
+        self.assertTrue(0.30 <= share <= 0.40, float(share))
+        self.assertTrue(0.90 <= float(ex["boughtEV"]) / TS.BUY_PRICE["T3"] <= 0.95)
+        import json
+        with open(TS.json_path("T3")) as f:
+            j = json.load(f)
+        self.assertEqual(j["rtp"], float(ex["rtp"]))
+        self.assertLessEqual(abs(j["hit"] - 0.3241), 0.02)
+
+    def test_settings_rule(self):
+        self.assertEqual(R.settings_parse("GSLOTS1;E=10,20;T=T3")["T"], "T3")
+        with self.assertRaises(R.Err):
+            R.settings_parse("GSLOTS1;E=10,15;T=T3")
+
+    def test_rounds_differ_from_t2_somewhere(self):
+        K = R.sha_hex("k3")
+        diff = sum(1 for n in range(1, 2000) if R.t2_round(K, n, "", T3, 10, 0) != R.t2_round(K, n, "", T2, 10, 0))
+        self.assertGreater(diff, 0)
+
+    def test_numpy_tables_match_reference(self):
+        import numpy as np
+        T = TS._tables("T3")
+        rng = np.random.default_rng(4)
+        for _ in range(300):
+            stops = [int(rng.integers(0, n)) for n in T["nb"]]
+            ref = R.t2_evaluate(T3, stops, 10)
             arr = [np.array([s], dtype=np.int32) for s in stops]
             got = int(TS._lines10(T, T["base"], arr)[0]) + int(T["scat10"][sum(T["bbooks"][r][stops[r]]
                                                                                 for r in range(5))])

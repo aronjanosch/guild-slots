@@ -1,6 +1,6 @@
 LUAJIT ?= luajit
 
-.PHONY: test vectors sounds media
+.PHONY: test vectors sounds media zip
 
 test:
 	$(LUAJIT) tests/run.lua
@@ -18,3 +18,10 @@ sounds:
 
 media:
 	python3 tools/build_media.py
+
+# Build the distributable archive: dist/GuildSlots-<version>.zip, unpacked into Interface/AddOns.
+VERSION := $(shell sed -n 's/^## Version: //p' GuildSlots/GuildSlots.toc)
+zip:
+	mkdir -p dist
+	rm -f dist/GuildSlots-$(VERSION).zip
+	git archive --format=zip -o dist/GuildSlots-$(VERSION).zip HEAD GuildSlots

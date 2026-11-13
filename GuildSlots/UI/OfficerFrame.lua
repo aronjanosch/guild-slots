@@ -1,12 +1,14 @@
 local _, ns = ...
 
--- The officer window (docs/guild-spec.md section 1), in three tabs: "Tokens" (granting tokens to
--- addon users heard online, recent purchases, the self test switch), "Payouts" (payout requests
+-- The officer window (docs/guild-spec.md section 1), in three tabs: "Tokens" (guild bank deposits
+-- not dealt with yet (Guild/Bank.lua), granting tokens to addon users heard online with the gold
+-- equivalent at the guild rate, recent purchases, the self test switch), "Payouts" (payout requests
 -- and their review, UI/Payouts.lua) and "Settings" (the settings status and a form that builds
 -- the settings line for the guild info). Officers see every tab; other members only Settings.
 -- Look: state 11 of the tavern design (UI/Theme.lua, Theme.officer); tabs in the toggle style.
 
 local L, Theme, Settings, Roster, Skin, Payouts = ns.L, ns.Theme, ns.Settings, ns.Roster, ns.Skin, ns.Payouts
+local Coins, Bank = ns.Coins, ns.Bank
 local ui = ns.SlotFrame.ui
 local fmt = ui.fmt
 
@@ -29,7 +31,7 @@ local BADGE = {
 	failed = { "statusBad", "white" }, timeout = { "statusBad", "white" },
 }
 
-local W = { fields = {}, onlineRows = {}, purchaseRows = {}, tab = "tokens" }
+local W = { fields = {}, onlineRows = {}, purchaseRows = {}, depositRows = {}, tab = "tokens" }
 OfficerFrame.widgets = W
 local TABS = { "tokens", "payouts", "settings" }
 
@@ -48,6 +50,21 @@ end
 -- A localized line for a code, or the code itself.
 local function lookup(prefix, code)
 	return rawget(L, prefix .. tostring(code)) or tostring(code)
+end
+
+-- The tables the slot window plays (docs/table-t3-spec.md) and the one the form proposes when
+-- the guild info has no valid line. The settings default (T1) stays: the vectors pin it.
+local PLAYABLE_TABLES = { "T2", "T3" }
+local PROPOSED_TABLE = "T3"
+
+-- "T2 (95 %), T3 (92 %)" with each table's return rate.
+local function tablesNote()
+	local list = {}
+	for i, id in ipairs(PLAYABLE_TABLES) do
+		local tbl = ns.Tables.get(id)
+		list[i] = string.format(L.TABLE_RTP, id, ns.Tables.stats(tbl, tbl.lineCount, 0).rtp * 100)
+	end
+	return string.format(L.NOTE_TABLES, table.concat(list, ", "), PROPOSED_TABLE)
 end
 
 ---------------------------------------------------------------------------------------------
@@ -117,18 +134,21 @@ local function updateForm()
 		note(W.formNote, L.NOTE_LEVEL)
 	elseif s.E[#s.E] > 10 * s.E[1] then
 		note(W.formNote, L.WARN_SPREAD, c.lose)
+	elseif W.proposed then
+		note(W.formNote, tablesNote())
 	else
 		note(W.formNote, "")
 	end
 end
 
--- Fills the form from the guild info, or the defaults with table T2 (the table this version
--- plays).
+-- Fills the form from the guild info, or (no valid line) proposes the defaults with
+-- PROPOSED_TABLE; the note then names the tables this version plays.
 local function prefill()
 	local s = Roster.settings()
+	W.proposed = not s
 	if not s then
 		s = Settings.defaults()
-		s.T = "T2"
+		s.T = PROPOSED_TABLE
 	end
 	W.filling = true
 	for _, k in ipairs(FIELDS) do
@@ -186,6 +206,9 @@ local function layout()
 		y = y + h + O.sectionGap
 	end
 	if W.tab == "tokens" then
+		if W.depositPart:IsShown() then
+			place(W.depositPart, O.deposits.height)
+		end
 		if W.grantPart:IsShown() then
 			place(W.grantPart, O.grant.height)
 		end
@@ -205,6 +228,98 @@ local function layout()
 	W.bgTiles:setHeight(h)
 end
 
+-- The gold equivalent of the tokens in the grant form at the guild rate; the gold field and the
+-- line are hidden without valid settings.
+local function updateRate()
+	local rate = Coins.rate()
+	local on = rate ~= nil
+	W.gold.holder:SetShown(on)
+	W.goldLabel:SetShown(on)
+	W.grantRate:SetShown(on)
+	if not on then
+		return
+	end
+	local raw = trim(W.tokens:GetText())
+	local tokens = raw:match("^%d+$") and tonumber(raw) or nil
+	if tokens then
+		W.grantRate:SetText(string.format(L.GRANT_RATE, Coins.tokensText(tokens, rate), fmt(rate)))
+	else
+		W.grantRate:SetText(string.format(L.RATE_ONLY, fmt(rate)))
+	end
+end
+
+local function sinceText(seconds)
+	if seconds < 3600 then
+		return string.format(L.BANK_MIN, math.max(0, math.floor(seconds / 60)))
+	end
+	return string.format(L.BANK_HOURS, math.floor(seconds / 3600))
+end
+
+local function agoText(hours)
+	if hours <= 0 then
+		return L.BANK_AGO_NOW
+	end
+	return string.format(L.BANK_AGO, hours)
+end
+
+local function setBadge(badge, n)
+	badge:SetShown(n > 0)
+	badge:setStatus("statusOpen", "dark", tostring(n))
+end
+
+-- Open deposits: amount, tokens at the guild rate, age, whether the depositor is online with
+-- the add-on. Grant only for an amount that buys tokens and a player online with the add-on.
+local function fillDeposits(s)
+	local list = Bank.deposits()
+	local rate = Coins.rate()
+	local online = {}
+	for _, o in ipairs(s:online()) do
+		online[o.name] = true
+	end
+	for i, row in ipairs(W.depositRows) do
+		local d = list[i]
+		if d then
+			row.dep = d
+			row.name:SetText(d.name)
+			row.amount:SetText(Coins.text(d.copper))
+			local tokens = rate and Coins.copperToTokens(d.copper, rate) or nil
+			row.tokens = tokens
+			local info = agoText(d.hoursAgo) .. " · " .. (online[d.name] and L.BANK_ONLINE or L.BANK_OFFLINE)
+			if tokens then
+				info = (tokens > 0 and string.format(L.BANK_TOKENS, fmt(tokens)) or L.BANK_NO_TOKENS) .. " · " .. info
+			end
+			row.info:SetText(info)
+			row.grant:SetShown(tokens ~= nil and tokens > 0)
+			row.grant:setEnabled(online[d.name] == true)
+			row:Show()
+		else
+			row.dep, row.tokens = nil, nil
+			row:Hide()
+		end
+	end
+	local readAt = Bank.readAt()
+	W.depositNone:SetShown(#list == 0)
+	W.depositNone:SetText(readAt and L.BANK_NONE or L.BANK_UNREAD)
+	W.depositHead:SetText(Skin.upper(#list > 0 and string.format(L.BANK_HEAD_N, #list) or L.BANK_HEAD))
+	-- Dismiss all: two or more open; the first click asks, the second records.
+	W.depositList = list
+	if W.dismissAllArmed ~= nil and W.dismissAllArmed ~= #list then
+		W.dismissAllArmed = nil
+	end
+	W.dismissAll:SetShown(#list >= 2)
+	W.dismissAll.label:SetText(W.dismissAllArmed and L.BANK_DISMISS_ALL_CONFIRM or L.BANK_DISMISS_ALL)
+	if W.dismissAllArmed then
+		note(W.depositRead, string.format(L.BANK_DISMISS_ALL_ASK, #list), Theme.colors.lose)
+	elseif readAt then
+		local now = Roster.serverTime() or readAt
+		note(W.depositRead, string.format(L.BANK_READ, sinceText(now - readAt)) .. " " .. L.BANK_REFRESH,
+			Theme.colors.footer)
+	else
+		W.depositRead:SetText("")
+	end
+	setBadge(W.tokensBadge, #list)
+end
+
 function OfficerFrame.refresh()
 	if not W.frame then
 		return
@@ -218,6 +333,7 @@ function OfficerFrame.refresh()
 	-- Without a valid line nobody is an officer yet, so the form is how the first line is made.
 	W.formPart:SetShown(s ~= nil and (officer or not valid))
 	W.grantPart:SetShown(officer)
+	W.depositPart:SetShown(officer)
 
 	-- Tabs: members see only Settings.
 	if not officer then
@@ -229,9 +345,7 @@ function OfficerFrame.refresh()
 		W.tabButtons[key]:setSelected(W.tab == key)
 		W.tabFrames[key]:SetShown(W.tab == key)
 	end
-	local open = officer and Payouts.openCount(s) or 0
-	W.tabBadge:SetShown(open > 0)
-	W.tabBadge:setStatus("statusOpen", "dark", tostring(open))
+	setBadge(W.tabBadge, officer and Payouts.openCount(s) or 0)
 	if officer and W.tab == "payouts" then
 		Payouts.refresh(s)
 	end
@@ -268,6 +382,10 @@ function OfficerFrame.refresh()
 		end
 		W.noPurchases:SetShown(#list == 0)
 		W.selfTest:setSelected(GuildSlotsDB and GuildSlotsDB.selfTest == true)
+		fillDeposits(s)
+		updateRate()
+	else
+		W.tokensBadge:Hide()
 	end
 	layout()
 end
@@ -292,6 +410,51 @@ local function grant()
 	else
 		note(W.grantNote, lookup("ERR_", code), c.lose)
 	end
+	OfficerFrame.refresh()
+	return id
+end
+
+-- Grant on a deposit row: fills the grant form and grants through it; the deposit counts as
+-- handled with the purchase (Guild/Bank.lua opens it again if the purchase fails).
+local function grantDeposit(row)
+	local d, tokens = row.dep, row.tokens
+	if not d or not tokens or tokens < 1 then
+		return
+	end
+	W.player:SetText(d.name)
+	W.tokens:SetText(tostring(tokens))
+	W.gold:SetText("")
+	local id = grant()
+	if id then
+		Bank.handle(d, id)
+	end
+end
+
+local function dismissDeposit(row)
+	local d = row.dep
+	if not d then
+		return
+	end
+	Bank.dismiss(d)
+	note(W.grantNote, string.format(L.BANK_DISMISSED, Coins.text(d.copper), d.name), Theme.colors.muted)
+	OfficerFrame.refresh()
+end
+
+-- Dismiss all: the first click asks in place ("Dismiss N deposits? Click again"), the second
+-- records every listed deposit like a single dismissal.
+local function dismissAll()
+	local list = W.depositList
+	if not list or #list < 2 then
+		return
+	end
+	if W.dismissAllArmed ~= #list then
+		W.dismissAllArmed = #list
+		OfficerFrame.refresh()
+		return
+	end
+	W.dismissAllArmed = nil
+	local n = Bank.dismissAll(list)
+	note(W.grantNote, string.format(L.BANK_DISMISSED_ALL, n), Theme.colors.muted)
 	OfficerFrame.refresh()
 end
 
@@ -333,6 +496,8 @@ local function buildGrant(parent)
 	pl:SetText(Skin.upper(L.PLAYER))
 	local tl = Skin.textIn(part, part, G.tokensLabel, "label", fs.label, c.muted, "LEFT")
 	tl:SetText(Skin.upper(L.TOKENS))
+	W.goldLabel = Skin.textIn(part, part, G.goldLabel, "label", fs.label, c.muted, "LEFT")
+	W.goldLabel:SetText(Skin.upper(L.GOLD))
 	W.player = Skin.editBox(part, G.player[3], G.player[4], "label", fs.listName)
 	Skin.rect(W.player.holder, part, G.player)
 	W.player:SetScript("OnTextChanged", function(_, userInput)
@@ -344,9 +509,33 @@ local function buildGrant(parent)
 		self:ClearFocus()
 		grant()
 	end)
-	W.grant = Skin.button(part, "primary", G.button[3], G.button[4], grant, { size = fs.gambleNumber })
+	-- Typed tokens show their gold; typed gold (a decimal number) converts to tokens.
+	W.tokens:SetScript("OnTextChanged", function(_, userInput)
+		if userInput then
+			W.gold:SetText("")
+		end
+		updateRate()
+	end)
+	W.gold = Skin.editBox(part, G.gold[3], G.gold[4], "number", fs.field)
+	Skin.rect(W.gold.holder, part, G.gold)
+	Skin.call(W.gold, "SetMaxLetters", 12)
+	W.gold:SetScript("OnTextChanged", function(self, userInput)
+		if not userInput then
+			return
+		end
+		local tokens = Coins.goldToTokens(self:GetText() or "", Coins.rate())
+		if tokens then
+			W.tokens:SetText(tostring(tokens))
+		end
+	end)
+	W.gold:SetScript("OnEnterPressed", function(self)
+		self:ClearFocus()
+		grant()
+	end)
+	W.grant = Skin.button(part, "primary", G.button[3], G.button[4], function() grant() end, { size = G.buttonSize })
 	Skin.rect(W.grant, part, G.button)
 	W.grant.label:SetText(L.GRANT)
+	W.grantRate = Skin.textIn(part, part, G.rate, "label", fs.small, c.muted, "LEFT")
 	W.grantNote = wrapped(part, G.note, c.footer)
 
 	-- Self test.
@@ -383,6 +572,39 @@ local function buildGrant(parent)
 		row:Hide()
 		W.purchaseRows[i] = row
 	end
+	return part
+end
+
+local function buildDeposits(parent)
+	local D, c, fs = Theme.officer.deposits, Theme.colors, Theme.fontSize
+	local part = section(parent, D.height)
+	W.depositHead = heading(part, D.heading, L.BANK_HEAD)
+	W.dismissAll = Skin.button(part, "secondary", D.dismissAll[3], D.dismissAll[4], dismissAll, { size = fs.small })
+	Skin.rect(W.dismissAll, part, D.dismissAll)
+	W.dismissAll.label:SetText(L.BANK_DISMISS_ALL)
+	W.dismissAll:Hide()
+	local list = Skin.panel(part, part, D.list, "inset")
+	local r = D.row
+	for i = 1, D.rows do
+		local row = CreateFrame("Frame", nil, list)
+		Skin.rect(row, part, { r[1], r[2] + (i - 1) * r[4], r[3], r[4] })
+		row.name = Skin.textIn(row, row, D.name, "label", fs.listName, c.text, "LEFT")
+		row.amount = Skin.textIn(row, row, D.amount, "number", fs.listNumber, c.number, "LEFT")
+		row.info = Skin.textIn(row, row, D.info, "label", fs.label, c.muted, "LEFT")
+		row.grant = Skin.button(row, "secondary", D.grant[3], D.grant[4], function() grantDeposit(row) end,
+			{ size = fs.small })
+		Skin.rect(row.grant, row, D.grant)
+		row.grant.label:SetText(L.BANK_GRANT)
+		row.dismiss = Skin.button(row, "secondary", D.dismiss[3], D.dismiss[4], function() dismissDeposit(row) end,
+			{ size = fs.small })
+		Skin.rect(row.dismiss, row, D.dismiss)
+		row.dismiss.label:SetText(L.BANK_DISMISS)
+		row:Hide()
+		W.depositRows[i] = row
+	end
+	W.depositNone = wrapped(list, D.none, c.muted)
+	Skin.rect(W.depositNone, part, D.none)
+	W.depositRead = wrapped(part, D.read, c.footer, Theme.fontSize.label)
 	return part
 end
 
@@ -479,7 +701,10 @@ local function build()
 	W.tabTokens, W.tabPayouts, W.tabSettings = W.tabButtons.tokens, W.tabButtons.payouts, W.tabButtons.settings
 	W.tabBadge = Skin.badge(W.tabPayouts, W.tabPayouts, O.tabBadge, fs.small)
 	W.tabBadge:Hide()
+	W.tokensBadge = Skin.badge(W.tabTokens, W.tabTokens, O.tabBadge, fs.small)
+	W.tokensBadge:Hide()
 
+	W.depositPart = buildDeposits(W.tabFrames.tokens)
 	W.grantPart = buildGrant(W.tabFrames.tokens)
 	W.statusPart = buildStatus(W.tabFrames.settings)
 	W.nonOfficer = Skin.text(W.tabFrames.settings, "label", fs.small, c.muted, "LEFT")
@@ -501,9 +726,7 @@ local function build()
 			OfficerFrame.refresh()
 		elseif W.tab == "payouts" and Payouts.tick(elapsed, session()) then
 			-- countdowns and progress, once per second; the count on the tab with them
-			local open = Payouts.openCount(session())
-			W.tabBadge:SetShown(open > 0)
-			W.tabBadge:setStatus("statusOpen", "dark", tostring(open))
+			setBadge(W.tabBadge, Payouts.openCount(session()))
 		end
 	end)
 	f:SetScript("OnShow", function()
@@ -517,6 +740,12 @@ local function build()
 	f:Hide()
 	f:SetPoint("CENTER", UIParent, "CENTER", O.home[1], O.home[2])
 
+	Bank.onChange(function()
+		W.dismissAllArmed = nil -- the list changed: ask again
+		if f:IsShown() then
+			OfficerFrame.refresh()
+		end
+	end)
 	if main() then
 		main().subscribe(function(name, data)
 			-- The note under the grant button follows the purchase it started.

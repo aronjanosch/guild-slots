@@ -96,9 +96,11 @@ function Reel:setStrip(strip, stop)
 end
 
 -- Starts a spin to `target` at window time `t0` (may lie a little in the future); stopAt is
--- the landing time relative to t0.
-function Reel:spin(t0, target, stopAt)
-	local t = Theme.timing
+-- the landing time relative to t0. timing: the timing set of the round (Theme.timing or
+-- Theme.timingTurbo, the one Plan.build got); decel: braking time of this reel (the plan's,
+-- longer under anticipation), default timing.decel.
+function Reel:spin(t0, target, stopAt, timing, decel)
+	local t = timing or Theme.timing
 	self.t0 = t0
 	self.landedFired = false
 	self.plan = Anim.plan({
@@ -109,7 +111,7 @@ function Reel:spin(t0, target, stopAt)
 		nudgeTime = t.nudgeTime,
 		nudge = t.nudge,
 		accel = t.accel,
-		decel = t.decel,
+		decel = decel or t.decel,
 		quickDecel = t.quickDecel,
 		speed = t.speed,
 		minReseatSpeed = t.minReseatSpeed,

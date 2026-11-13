@@ -112,7 +112,10 @@ local function officerFlow(locale, unknown)
 	stub.slash("/gs")
 	assert(W.frame:IsShown(), "window open")
 	assert(W.officer:IsShown(), "officer button visible to an officer")
-	assert(W.soloBtn.selected and not W.guildBtn.selected, "solo selected")
+	-- Guild mode is the default when a session exists; solo stays one click away.
+	assert(S.mode == "guild" and W.guildBtn.selected and not W.soloBtn.selected, "guild mode by default")
+	W.soloBtn:Click()
+	assert(S.mode == "solo" and GuildSlotsDB.mode == "solo", "solo chosen and saved")
 	W.guildBtn:Click()
 	assert(S.mode == "guild", "guild mode after the switch")
 	assert(W.guildBtn.selected and not W.soloBtn.selected, "guild selected")
@@ -257,6 +260,129 @@ local function officerFlow(locale, unknown)
 	end
 	assert(env.count("SPIN") >= spins + 2, "more spins sent")
 	assert(env.count("GAM") >= 1, "a gamble step was sent")
+	if W.offerRow:IsShown() then W.take:Click() end
+
+	-- No bonus buy in guild mode.
+	assert(not W.buy:IsShown() and session:game().buy == nil, "no bonus buy in guild mode")
+	assert(session:game():info().buy == nil, "no buy price in the guild info")
+
+	-- Autoplay in guild mode: turbo rounds are shorter than the spin interval, so autoplay has
+	-- to wait; it never sends more than one SPIN per 1.5 s and never gambles.
+	local spinTimes = {}
+	local sendAll = C_ChatInfo.SendAddonMessage
+	C_ChatInfo.SendAddonMessage = function(prefix, text, ...)
+		if text:find("^1|SPIN|") then spinTimes[#spinTimes + 1] = GetTime() end
+		if text:find("^1|GAM|") then error("autoplay gambled") end
+		return sendAll(prefix, text, ...)
+	end
+	W.turbo:Click()
+	env.pump(120)
+	local autoSpins = env.count("SPIN")
+	local gameObj, waits = session:game(), 0
+	gameObj.spin = function(self)
+		local r, code = getmetatable(self).__index.spin(self)
+		if code == "wait" then waits = waits + 1 end
+		return r, code
+	end
+	-- No pause between rounds, so autoplay runs into the game's interval.
+	local pause = rawget(ns.Theme.timingTurbo, "autoPause")
+	ns.Theme.timingTurbo.autoPause = 0
+	W.auto:Click()
+	assert(S.auto and W.auto.selected, "autoplay on in guild mode")
+	-- Ten SPINs; an offer pauses it until the test takes the win.
+	local guard, paused = 0, 0
+	while env.count("SPIN") < autoSpins + 10 do
+		env.pump(1)
+		if S.phase == "idle" and S.offer and next(S.counts) == nil then
+			paused = paused + 1
+			assert(S.auto, "paused, still on")
+			W.take:Click()
+		end
+		guard = guard + 1
+		assert(guard < 60 * 120, "guild autoplay stalls")
+	end
+	W.auto:Click()
+	assert(not S.auto, "off")
+	ns.Theme.timingTurbo.autoPause = pause
+	settle(env)
+	env.pump(240)
+	assert(env.count("SPIN") == autoSpins + 10, "ten SPINs, none after switching off: " .. (env.count("SPIN") - autoSpins))
+	for i = 2, #spinTimes do
+		assert(spinTimes[i] - spinTimes[i - 1] >= 1.5 - 1e-9, "at most one SPIN per 1.5 s: " .. (spinTimes[i] - spinTimes[i - 1]))
+	end
+	assert(waits > 0, "autoplay met the interval and waited")
+	gameObj.spin = nil
+	assert(W.balance:GetText() == fmt(ns, resting(session:game())), "balance matches after autoplay")
+	if W.offerRow:IsShown() then W.take:Click() end
+	-- An open payout request switches it off.
+	env.pump(120)
+	W.auto:Click()
+	env.pump(10)
+	session.request = { reqId = "r1", officer = "Alice Smith", amount = 1, status = "wait_officer", time = 0 }
+	session.env.onEvent("payout", session:payout())
+	assert(not S.auto, "a payout request switches autoplay off")
+	settle(env)
+	session.request = nil
+	session:game():refresh()
+	session.env.onEvent("payout", nil)
+	if W.offerRow:IsShown() then W.take:Click() end
+	-- A mode switch switches it off.
+	env.pump(120)
+	W.auto:Click()
+	env.pump(5)
+	stub.slash("/gs", "solo")
+	assert(not S.auto and S.mode == "solo", "a mode switch switches autoplay off")
+	stub.slash("/gs", "guild")
+	C_ChatInfo.SendAddonMessage = sendAll
+	W.turbo:Click()
+	if W.offerRow:IsShown() then W.take:Click() end
+
+	-- Guild ticker on the footer line, fed by the session's "ticker" event.
+	local fire = session.env.onEvent
+	fire("ticker", { player = "Bob Jones", n = 7, stake = 50, win = 5000, mult = 100, level = "legendary" })
+	fire("ticker", { player = "Bob Jones", n = 8, stake = 50, win = 0, mult = 0, free = 10, symbol = "M", level = "free" })
+	env.pump(1)
+	assert(W.ticker:IsShown() and not W.footer:IsShown(), "ticker replaces the footer")
+	assert(W.ticker:GetText() == string.format(L.TICKER_WIN, "Bob Jones", fmt(ns, 5000), "100"), "win entry: "
+		.. tostring(W.ticker:GetText()))
+	local tc = ns.Theme.tickerColors
+	assert(W.ticker:GetAlpha() < 1, "fades in")
+	env.pump(math.ceil(ns.Theme.timing.tickerShow * 60) + 1)
+	assert(W.ticker:GetText() == string.format(L.TICKER_FREE, "Bob Jones", 10), "then the free-games entry")
+	assert(tc.free and tc.legendary, "level colours")
+	env.pump(math.ceil(ns.Theme.timing.tickerShow * 60) + 1)
+	assert(not W.ticker:IsShown() and W.footer:IsShown(), "footer back when the queue is empty")
+	-- Fewer effects: no motion.
+	stub.slash("/gs", "fx")
+	fire("ticker", { player = "Bob Jones", n = 9, stake = 10, win = 300, mult = 30, level = "big" })
+	env.pump(1)
+	assert(W.ticker:IsShown() and W.ticker:GetAlpha() == 1, "shown at once with fewer effects")
+	stub.slash("/gs", "fx")
+	-- Off switch.
+	stub.slash("/gs", "ticker")
+	assert(GuildSlotsDB.ticker == false and not W.ticker:IsShown(), "/gs ticker turns it off")
+	fire("ticker", { player = "Bob Jones", n = 10, stake = 10, win = 300, mult = 30, level = "big" })
+	env.pump(2)
+	assert(not W.ticker:IsShown() and W.footer:IsShown(), "no entries while off")
+	stub.slash("/gs", "ticker")
+	assert(GuildSlotsDB.ticker == true, "back on")
+	-- Not in solo mode.
+	stub.slash("/gs", "solo")
+	fire("ticker", { player = "Bob Jones", n = 11, stake = 10, win = 300, mult = 30, level = "big" })
+	env.pump(2)
+	assert(not W.ticker:IsShown(), "no ticker in solo mode")
+	-- Entering guild mode shows the newest entries of session:ticker(), when there is one.
+	local had = rawget(session, "ticker")
+	session.ticker = function()
+		return { { player = "Carol", win = 2000, mult = 40, level = "big" }, { player = "Dave", win = 1, mult = 0.1, level = "big" } }
+	end
+	stub.slash("/gs", "guild")
+	env.pump(1)
+	assert(W.ticker:GetText():find("Dave", 1, true), "oldest of the newest first")
+	session.ticker = had
+	env.pump(math.ceil(ns.Theme.timing.tickerShow * 60) * 2 + 2)
+	assert(not W.ticker:IsShown(), "seeded entries shown and gone")
+
 	local guildBalance = session:game().balance
 
 	-- Switch to solo and back: both balances kept.
@@ -388,7 +514,7 @@ local function t1Flow(locale, unknown)
 	W.payToggle:Click()
 	assert(W.ptUnsupported:IsShown() and not W.ptContent:IsShown(), "paytable explains it too")
 	W.payToggle:Click()
-	-- Solo still plays T2.
+	-- Solo still plays (T3).
 	stub.slash("/gs", "solo")
 	W.spin:Click()
 	assert(S.phase == "round", "solo plays")
@@ -397,17 +523,91 @@ local function t1Flow(locale, unknown)
 	unknownMethods(stub, unknown)
 end
 
--- 5. No settings line: the officer form proposes T2.
+-- 5. No settings line: the officer form proposes T3 and names both lines tables.
 local function noLineFlow(locale, unknown)
 	local env = boot(locale, { line = false })
 	local ns, stub, L = env.ns, env.stub, env.L
 	stub.slash("/gs", "officer")
 	local O = ns.OfficerFrame.widgets
 	assert(O.status:GetText() == L.SET_MISSING, "no line")
-	assert(O.fields.T:GetText() == "T2", "table field prefilled with T2")
-	assert(O.line:GetText():find(";T=T2;", 1, true), "line for T2")
+	assert(O.fields.T:GetText() == "T3", "table field prefilled with T3")
+	assert(O.line:GetText():find(";T=T3;", 1, true), "line for T3")
+	local tables = string.format(L.NOTE_TABLES, string.format(L.TABLE_RTP, "T2", 95) .. ", "
+		.. string.format(L.TABLE_RTP, "T3", 92), "T3")
+	assert(O.formNote:GetText() == tables, "note names T2 and T3: " .. tostring(O.formNote:GetText()))
+	stub.type(O.fields.T, "T2")
+	assert(O.line:GetText():find(";T=T2;", 1, true), "T2 can still be chosen")
 	stub.type(O.fields.E, "10,25")
 	assert(O.line:GetText() == "" and O.formNote:GetText():find(L.F_E, 1, true), "25 is not a T2 stake")
+	stub.type(O.fields.T, "T3")
+	assert(O.line:GetText() == "" and O.formNote:GetText():find(L.F_E, 1, true), "25 is not a T3 stake")
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
+	unknownMethods(stub, unknown)
+end
+
+-- 6. Lines tables: a T2 guild account next to the T3 solo game in one window, then a new
+-- purchase under a T3 line. The reels, the paytable's return rate and the rounds follow the
+-- shown game's table.
+local function tablesFlow(locale, unknown)
+	local env = boot(locale, {})
+	local ns, stub, L = env.ns, env.stub, env.L
+	local W, S = ns.SlotFrame.widgets, ns.SlotFrame.state
+	local T2, T3 = ns.Tables.get("T2"), ns.Tables.get("T3")
+	local session = ns.Main.session()
+	env.pump(20)
+	ns.Main.setSelfTest(true)
+	assert(session:grant("Alice Smith", 1000), "grant under the T2 line")
+	env.pump(30)
+	assert(session:game().tbl.id == "T2", "the account plays T2")
+
+	local function onStrips(tbl)
+		for r = 1, 5 do
+			if W.reels[r].strip ~= tbl.reels[r] then return false end
+		end
+		return true
+	end
+	local function rtpShown(tbl)
+		W.payToggle:Click()
+		local text = W.ptRtp:GetText()
+		W.payToggle:Click()
+		return text == string.format(L.RTP, ns.Tables.stats(tbl, 10, 0).rtp * 100)
+	end
+	local function spinOnce()
+		stub.serverTime = stub.serverTime + 2
+		env.pump(120)
+		W.spin:Click()
+		settle(env)
+		if W.offerRow:IsShown() then W.take:Click() end
+	end
+
+	stub.slash("/gs", "guild")
+	assert(S.mode == "guild" and S.game.tbl == T2, "guild mode shows the T2 account")
+	assert(onStrips(T2), "T2 strips on the reels")
+	assert(rtpShown(T2), "paytable: 95 % return")
+	spinOnce()
+	assert(onStrips(T2), "still T2 after a guild round")
+
+	W.soloBtn:Click()
+	assert(S.mode == "solo" and S.game.tbl == T3, "solo plays T3")
+	assert(onStrips(T3), "T3 strips after the switch to solo")
+	assert(rtpShown(T3), "paytable: 92 % return")
+	W.spin:Click()
+	settle(env)
+	if W.offerRow:IsShown() then W.take:Click() end
+	assert(onStrips(T3), "still T3 after a solo round")
+
+	W.guildBtn:Click()
+	assert(S.game.tbl == T2 and onStrips(T2), "back to the T2 strips")
+
+	-- A new purchase under a T3 line: the same account now plays T3.
+	stub.infoText = "Welcome\nGSLOTS1;L=0;R=1;E=10,50,100;G=3;T=T3\n"
+	stub.slash("/gs", "help") -- the guild info is read on a hardware event
+	assert(session:grant("Alice Smith", 500), "grant under the T3 line")
+	env.pump(30)
+	assert(session:game().tbl.id == "T3", "the account plays T3 after the purchase")
+	spinOnce()
+	assert(onStrips(T3), "T3 strips in guild mode after the T3 purchase")
+	assert(rtpShown(T3), "paytable follows the account: 92 %")
 	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
 	unknownMethods(stub, unknown)
 end
@@ -420,6 +620,7 @@ for _, locale in ipairs({ "enUS", "deDE" }) do
 		noGuildFlow(locale, unknown)
 		t1Flow(locale, unknown)
 		noLineFlow(locale, unknown)
+		tablesFlow(locale, unknown)
 	end, debug.traceback)
 	if ok then
 		local list = {}

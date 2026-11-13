@@ -177,3 +177,104 @@ t.test("tease starts after the reel that brings the second book", function()
 	t.near(spin.stopAt[3], 1.3 + 0.7, 1e-9, "reel 3 longer")
 	t.near(spin.stopAt[5], 1.8 + 2.1, 1e-9, "reel 5 longest")
 end)
+
+local function window(cols)
+	return { stake = 10, win = 0, base = 0, stops = { 0, 0, 0, 0, 0 }, window = cols, lines = {},
+		scatter = { count = 0, win = 0 } }
+end
+
+t.test("tease kinds: two books, or reels 1-3 matching a top symbol on a line", function()
+	local K = { "K", "K", "K" }
+	local reel, kind = Plan.tease({ { "B", "K", "S" }, { "K", "B", "S" }, K, K, K }, "B", T2.lines, { "L", "C" })
+	t.eq(reel, 3, "books from reel 3")
+	t.eq(kind, "books", "books")
+	local sym
+	reel, kind, sym = Plan.tease({ { "K", "L", "S" }, { "K", "L", "S" }, { "K", "B", "S" }, K, K }, "B", T2.lines,
+		{ "L", "C" })
+	t.eq(reel, 4, "line tease from reel 4")
+	t.eq(kind, "line", "line")
+	t.eq(sym, "L", "on L, the book substitutes")
+	reel, kind, sym = Plan.tease({ { "C", "K", "S" }, { "K", "C", "S" }, { "K", "K", "C" }, K, K }, "B", T2.lines,
+		{ "L", "C" })
+	t.eq(sym, "C", "line 4 (0,1,2) of crowns")
+	t.eq(Plan.tease({ { "M", "K", "S" }, { "M", "K", "S" }, { "M", "K", "S" }, K, K }, "B", T2.lines, { "L", "C" }), nil,
+		"only the top symbols")
+	t.eq(Plan.tease({ { "L", "K", "S" }, { "L", "K", "S" }, { "L", "K", "S" }, K, K }, "B"), nil, "no line tease without lines")
+end)
+
+t.test("anticipation after two books: longer braking, hit or miss known in the plan", function()
+	local timing = ns.Theme.timing
+	local hit = Plan.build(round({ 40, 35, 52, 0, 0 }), timing).steps[1]
+	t.eq(hit.teaseKind, "books", "books")
+	t.eq(hit.teaseHit, true, "the third book came")
+	t.eq(hit.decel[2], timing.decel, "reel 2 brakes as usual")
+	t.ok(hit.decel[3] > timing.decel and hit.decel[5] > timing.decel, "teased reels brake longer")
+	t.ok(hit.decel[3] <= hit.stopAt[3] - timing.nudgeTime - timing.accel, "braking fits the reel motion")
+	local miss = Plan.build(round({ 40, 35, 0, 0, 0 }), timing).steps[1]
+	t.eq(miss.tease, 3, "two books tease")
+	t.eq(miss.teaseHit, false, "no third book")
+	local none = Plan.build(round({ 0, 0, 0, 0, 0 }), timing).steps[1]
+	t.eq(none.tease, nil, "no tease")
+	t.eq(none.teaseHit, nil, "nothing to hit")
+end)
+
+t.test("line tease: reels 4 and 5 get a short extra delay", function()
+	local timing = ns.Theme.timing
+	local K = { "K", "K", "K" }
+	local p = Plan.build(window({ { "K", "L", "S" }, { "K", "L", "S" }, { "K", "L", "S" }, K, K }), timing)
+	local s = p.steps[1]
+	t.eq(s.tease, 4, "from reel 4")
+	t.eq(s.teaseKind, "line", "line")
+	t.eq(s.teaseHit, false, "no four of a kind")
+	t.near(s.stopAt[3], timing.stop[3], 1e-9, "reel 3 as usual")
+	t.near(s.stopAt[4], timing.stop[4] + timing.lineTease, 1e-9, "reel 4 later")
+	t.near(s.stopAt[5], timing.stop[5] + 2 * timing.lineTease, 1e-9, "reel 5 later still")
+	t.eq(s.decel[5], timing.decel, "normal braking")
+end)
+
+t.test("turbo: shorter, all line wins at once, same amounts and end state", function()
+	local r = round({ 40, 35, 52, 0, 0 }, { { 33, 55, 50, 5, 29 } })
+	local normal = Plan.build(r, ns.Theme.timing)
+	local turbo = Plan.build(r, ns.Theme.timingTurbo)
+	t.ok(turbo.duration < normal.duration * 0.6, "clearly shorter: " .. turbo.duration .. " vs " .. normal.duration)
+	t.eq(#ofKind(turbo, "line"), 0, "no single line steps")
+	t.eq(#ofKind(turbo, "scatter"), 0, "scatter inside the all-lines step")
+	t.eq(ofKind(turbo, "allLines")[1].amount, r.base, "base game wins in one step")
+	t.eq(sumAmounts(turbo), r.base + r.free.win, "amounts still sum to the round win")
+	t.eq(turbo.steps[#turbo.steps].total, normal.steps[#normal.steps].total, "same final total")
+	t.ok(ofKind(turbo, "intro")[1].dur > 0 and ofKind(turbo, "big")[1].dur > 0, "intro and big win kept")
+	t.ok(ofKind(turbo, "intro")[1].dur < ofKind(normal, "intro")[1].dur, "intro shorter")
+	checkTimes(turbo)
+	local s = turbo.steps[1]
+	for i = 1, 5 do
+		t.ok(s.decel[i] <= s.stopAt[i] - ns.Theme.timingTurbo.nudgeTime - ns.Theme.timingTurbo.accel,
+			"turbo braking fits reel " .. i)
+	end
+end)
+
+t.test("big win: the banner steps up through the tiers, ticks rise in pitch", function()
+	local r = round({ 40, 35, 52, 0, 0 }, { { 33, 55, 50, 5, 29 } }) -- 1185 at stake 10: 118.5x
+	local timing = ns.Theme.timing
+	local big = ofKind(Plan.build(r, timing), "big")[1]
+	t.eq(big.level, 3, "legendary")
+	t.eq(#big.tiers, 3, "three tier steps")
+	t.eq(big.tiers[1].at, 0, "BIG WIN at once")
+	t.ok(big.tiers[2].at > 0 and big.tiers[3].at > big.tiers[2].at and big.tiers[3].at < big.count, "then up")
+	-- the count reaches the threshold at the tier step
+	for i = 2, 3 do
+		local v = ns.Anim.countUp(0, 1185, big.tiers[i].at + 1e-6, big.count)
+		t.ok(math.abs(v - timing.bigWin[i] * 10) <= 1, "tier " .. i .. " when the count passes it: " .. v)
+	end
+	t.near(big.count, timing.bigCountUp[3] * timing.bigCount, 1e-9, "count length")
+	t.ok(#big.ticks >= 10, "ticks through the count")
+	t.eq(big.ticks[1].n, 1, "lowest tick first")
+	local last = 0
+	for _, k in ipairs(big.ticks) do
+		t.ok(k.n >= last and k.n <= timing.tickLadder, "pitch rises")
+		t.ok(k.at < big.count, "within the count")
+		last = k.n
+	end
+	t.eq(last, timing.tickLadder, "ends on the highest tick")
+	local huge = ofKind(Plan.build(round({ 2, 16, 4, 4, 10 }), timing), "big")[1]
+	t.eq(#huge.tiers, 2, "75x steps to HUGE only")
+end)

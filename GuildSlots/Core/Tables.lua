@@ -46,49 +46,73 @@ local function charStrips(list)
 	return strips
 end
 
-local function newLinesTable()
-	return {
-		id = "T2",
-		kind = "lines",
-		reels = charStrips({
-			"KTMKDSGTCDTGWTGWSKMSKDGSWKDWLMSCTKDGSTWCB",
-			"KTGWSKWGKTWGKSWGMKSTWGSMGKTDSLCWKMTBCDWG",
-			"WGDSMTWDSMWSKTSDTGKWCSTGMWSGTKGCDKMDLGWCSWMLKTGKWTLSBDM",
-			"TGSWMGTMWTKWSGWKTGSTKSMWKGSMKGWKGWSMKTWGTWGBMLSTCD",
-			"WKSBKGSWTGMWKTMGWTGKDSBLTCGKM",
-		}),
-		freeReels = charStrips({
-			"SKGTWGKSTWKGWKSMTKGWDSMKDTGMSWDTKBTWLSGKC",
-			"SWKSDKSTWGTKGMKTCSKWSMWCTKGWTDMGSTWGLSDMGSKWLTGKMLKSCWTB",
-			"GTDGSKWTSWKSGTKSGTLWSGWKTWDGTMKDTKSDGLSGKTDCTWKGWMBTDKBMWSC",
-			"SDGSKMWGTKGSWDKTGDCMSWTGWKTWKCGSTDWMGWCKSBGDMSLDWCTKL",
-			"WGSTWSTGKSTGWTGKWGSKTSKGTBKWSMTGSTWDKTSKWGCMDSCKBDWLGST",
-		}),
-		rows = 3,
-		lineCount = 10,
-		-- Row (0 top, 1 middle, 2 bottom) on reels 1..5, per line.
-		lines = {
-			{ 1, 1, 1, 1, 1 }, { 0, 0, 0, 0, 0 }, { 2, 2, 2, 2, 2 }, { 0, 1, 2, 1, 0 }, { 2, 1, 0, 1, 2 },
-			{ 1, 2, 2, 2, 1 }, { 1, 0, 0, 0, 1 }, { 2, 2, 1, 0, 0 }, { 0, 0, 1, 2, 2 }, { 0, 1, 1, 1, 0 },
-		},
-		-- Multiples of the line bet for 2..5 of a kind; nil = no pay.
-		pays = {
-			K = { nil, nil, 5, 25, 100 }, S = { nil, nil, 5, 25, 100 }, G = { nil, nil, 5, 25, 100 },
-			T = { nil, nil, 5, 40, 150 }, W = { nil, nil, 5, 40, 150 },
-			M = { nil, 5, 30, 100, 750 }, D = { nil, 5, 30, 100, 750 },
-			C = { nil, 5, 40, 400, 2000 },
-			L = { nil, 10, 100, 1000, 5000 },
-		},
-		-- B: wild on lines, scatter pays in multiples of the stake for 3, 4, 5+ anywhere;
-		-- `trigger` or more books award `games` free games.
-		scatter = { symbol = "B", pays = { nil, nil, 2, 20, 200 }, trigger = 3, games = 10 },
-		-- Expanding symbol of a free-game series, by index 0..8.
-		expanding = { "K", "S", "G", "T", "W", "M", "D", "C", "L" },
-		-- Display order, best first.
-		order = { "L", "C", "D", "M", "W", "T", "G", "S", "K", "B" },
-		maxFree = 50,
-	}
+-- The rules every lines table shares (T2 and T3 differ only in their strips). Read-only.
+local LINES_RULES = {
+	rows = 3,
+	lineCount = 10,
+	-- Row (0 top, 1 middle, 2 bottom) on reels 1..5, per line.
+	lines = {
+		{ 1, 1, 1, 1, 1 }, { 0, 0, 0, 0, 0 }, { 2, 2, 2, 2, 2 }, { 0, 1, 2, 1, 0 }, { 2, 1, 0, 1, 2 },
+		{ 1, 2, 2, 2, 1 }, { 1, 0, 0, 0, 1 }, { 2, 2, 1, 0, 0 }, { 0, 0, 1, 2, 2 }, { 0, 1, 1, 1, 0 },
+	},
+	-- Multiples of the line bet for 2..5 of a kind; nil = no pay.
+	pays = {
+		K = { nil, nil, 5, 25, 100 }, S = { nil, nil, 5, 25, 100 }, G = { nil, nil, 5, 25, 100 },
+		T = { nil, nil, 5, 40, 150 }, W = { nil, nil, 5, 40, 150 },
+		M = { nil, 5, 30, 100, 750 }, D = { nil, 5, 30, 100, 750 },
+		C = { nil, 5, 40, 400, 2000 },
+		L = { nil, 10, 100, 1000, 5000 },
+	},
+	-- B: wild on lines, scatter pays in multiples of the stake for 3, 4, 5+ anywhere;
+	-- `trigger` or more books award `games` free games.
+	scatter = { symbol = "B", pays = { nil, nil, 2, 20, 200 }, trigger = 3, games = 10 },
+	-- Expanding symbol of a free-game series, by index 0..8.
+	expanding = { "K", "S", "G", "T", "W", "M", "D", "C", "L" },
+	-- Display order, best first.
+	order = { "L", "C", "D", "M", "W", "T", "G", "S", "K", "B" },
+	maxFree = 50,
+}
+
+-- buyPrice: price of a bought free-game series in multiples of the stake (solo only).
+local function newLinesTable(id, base, free, buyPrice)
+	local tbl = { id = id, kind = "lines", reels = charStrips(base), freeReels = charStrips(free), buyPrice = buyPrice }
+	for k, v in pairs(LINES_RULES) do
+		tbl[k] = v
+	end
+	return tbl
 end
+
+-- T2: a series is worth about 60.1 x the stake, so a purchase returns about 94 %.
+local T2 = newLinesTable("T2", {
+	"KTMKDSGTCDTGWTGWSKMSKDGSWKDWLMSCTKDGSTWCB",
+	"KTGWSKWGKTWGKSWGMKSTWGSMGKTDSLCWKMTBCDWG",
+	"WGDSMTWDSMWSKTSDTGKWCSTGMWSGTKGCDKMDLGWCSWMLKTGKWTLSBDM",
+	"TGSWMGTMWTKWSGWKTGSTKSMWKGSMKGWKGWSMKTWGTWGBMLSTCD",
+	"WKSBKGSWTGMWKTMGWTGKDSBLTCGKM",
+}, {
+	"SKGTWGKSTWKGWKSMTKGWDSMKDTGMSWDTKBTWLSGKC",
+	"SWKSDKSTWGTKGMKTCSKWSMWCTKGWTDMGSTWGLSDMGSKWLTGKMLKSCWTB",
+	"GTDGSKWTSWKSGTKSGTLWSGWKTWDGTMKDTKSDGLSGKTDCTWKGWMBTDKBMWSC",
+	"SDGSKMWGTKGSWDKTGDCMSWTGWKTWKCGSTDWMGWCKSBGDMSLDWCTKL",
+	"WGSTWSTGKSTGWTGKWGSKTSKGTBKWSMTGSTWDKTSKWGCMDSCKBDWLGST",
+}, 64)
+
+-- T3 (docs/table-t3-spec.md): T2 with two stops changed (base reel 2 stop 37 and free reel 1
+-- stop 30, D -> K; tools/ref/t3_tune.py), a return of about 92 %. A series is worth about
+-- 59.5 x the stake, so a purchase at 64 returns about 93 %.
+local T3 = newLinesTable("T3", {
+	"KTMKDSGTCDTGWTGWSKMSKDGSWKDWLMSCTKDGSTWCB",
+	"KTGWSKWGKTWGKSWGMKSTWGSMGKTDSLCWKMTBCKWG",
+	"WGDSMTWDSMWSKTSDTGKWCSTGMWSGTKGCDKMDLGWCSWMLKTGKWTLSBDM",
+	"TGSWMGTMWTKWSGWKTGSTKSMWKGSMKGWKGWSMKTWGTWGBMLSTCD",
+	"WKSBKGSWTGMWKTMGWTGKDSBLTCGKM",
+}, {
+	"SKGTWGKSTWKGWKSMTKGWDSMKDTGMSWKTKBTWLSGKC",
+	"SWKSDKSTWGTKGMKTCSKWSMWCTKGWTDMGSTWGLSDMGSKWLTGKMLKSCWTB",
+	"GTDGSKWTSWKSGTKSGTLWSGWKTWDGTMKDTKSDGLSGKTDCTWKGWMBTDKBMWSC",
+	"SDGSKMWGTKGSWDKTGDCMSWTGWKTWKCGSTDWMGWCKSBGDMSLDWCTKL",
+	"WGSTWSTGKSTGWTGKWGSKTSKGTBKWSMTGSTWDKTSKWGCMDSCKBDWLGST",
+}, 64)
 
 local BY_ID = {
 	T1 = newTable(
@@ -97,7 +121,8 @@ local BY_ID = {
 		{ K = 1, S = 2, G = 3, T = 5, W = 10, M = 20, D = 50 },
 		{ K = 5, S = 10, G = 15, T = 30, W = 60, M = 150, D = 500 }
 	),
-	T2 = newLinesTable(),
+	T2 = T2,
+	T3 = T3,
 }
 
 -- Cache of stats() results, keyed by table id, stake and cap.
@@ -109,6 +134,8 @@ local STATS_CACHE = {}
 local LINES_STATS = {
 	-- rtp and freeRate exact, hit and variance from 10^9 simulated rounds (tools/ref/t2_stats.py).
 	T2 = { rtp = 0.9499910643248847, hit = 0.324100448, variance = 62.9092862849537, freeRate = 0.005714817646609068 },
+	-- Same sources (tools/ref/t2_stats.py 1000000000 20260101 T3 -> tools/ref/t3_stats.json).
+	T3 = { rtp = 0.9199560947007686, hit = 0.312909203, variance = 61.38110165505235, freeRate = 0.005714817646609068 },
 }
 
 local function isStop(s)
@@ -288,6 +315,34 @@ Tables.evaluateLines = evaluateLines
 --                     when free games are awarded
 --   draw.free(i)   -> { s1..s5 } stops of the i-th free game of the round (i counts across retriggers)
 -- No input checks: callers pass a valid table, stake and cap. Returns the round without `n`.
+-- One free-game series (spec section 5): `award` games with the expanding symbol drawn once,
+-- retriggers add `award` more, at most tbl.maxFree games. Shared by playRound and playBought so
+-- the rules cannot drift apart. Returns { symbol, awarded, win, games }.
+local function playFree(tbl, stake, draw)
+	local trigger, award, limit = tbl.scatter.trigger, tbl.scatter.games, tbl.maxFree
+	local X = tbl.expanding[draw.symbol() + 1]
+	local freeStrips, games, freeWin = tbl.freeReels, {}, 0
+	local left, played = award, 0
+	while left > 0 and played < limit do
+		played, left = played + 1, left - 1
+		local game = evaluateLines(tbl, freeStrips, draw.free(played), stake, X)
+		game.retrigger = game.scatter.count >= trigger
+		if game.retrigger then
+			left = left + award
+		end
+		games[played] = game
+		freeWin = freeWin + game.win
+	end
+	return { symbol = X, awarded = played, win = freeWin, games = games }
+end
+
+local function capped(win, cap)
+	if cap and cap > 0 and win > cap then
+		return cap
+	end
+	return win
+end
+
 function Tables.playRound(tbl, stake, cap, draw)
 	local strips = tbl.reels
 	local stops = draw.base()
@@ -298,29 +353,27 @@ function Tables.playRound(tbl, stake, cap, draw)
 		base = base.win,
 	}
 	local win = base.win
-	local trigger, award, limit = tbl.scatter.trigger, tbl.scatter.games, tbl.maxFree
-	if base.scatter.count >= trigger then
-		local X = tbl.expanding[draw.symbol() + 1]
-		local freeStrips, games, freeWin = tbl.freeReels, {}, 0
-		local left, played = award, 0
-		while left > 0 and played < limit do
-			played, left = played + 1, left - 1
-			local game = evaluateLines(tbl, freeStrips, draw.free(played), stake, X)
-			game.retrigger = game.scatter.count >= trigger
-			if game.retrigger then
-				left = left + award
-			end
-			games[played] = game
-			freeWin = freeWin + game.win
-		end
-		round.free = { symbol = X, awarded = played, win = freeWin, games = games }
-		win = win + freeWin
+	if base.scatter.count >= tbl.scatter.trigger then
+		round.free = playFree(tbl, stake, draw)
+		win = win + round.free.win
 	end
-	if cap and cap > 0 and win > cap then
-		win = cap
-	end
-	round.win = win
+	round.win = capped(win, cap)
 	return round
+end
+
+-- A bought free-game series (docs/table-t2-spec.md, "Bought free games (solo only)"): no base
+-- game, straight into tbl.scatter.games free games with the normal rules. The round has the
+-- shape of playRound's with base = 0, no lines, no scatter win, bought = true and
+-- cost = tbl.buyPrice * stake; stops and window are nil (no base window to show). Uses only
+-- draw.symbol() and draw.free(i). Pure; no input checks.
+function Tables.playBought(tbl, stake, cap, draw)
+	local free = playFree(tbl, stake, draw)
+	return {
+		kind = "lines", stake = stake, lineBet = stake / tbl.lineCount,
+		lines = {}, scatter = { count = 0, win = 0 }, base = 0,
+		bought = true, cost = tbl.buyPrice * stake,
+		free = free, win = capped(free.win, cap),
+	}
 end
 
 local function isLinesTable(tbl)
