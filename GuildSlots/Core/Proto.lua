@@ -14,7 +14,7 @@ Proto.VERSION = "1"
 Proto.PREFIX = "GSLOTS"
 Proto.MAX = 255
 
-local find, sub, match, concat = string.find, string.sub, string.match, table.concat
+local find, sub, concat = string.find, string.sub, table.concat
 local dec, validName = Engine.dec, Engine.validName
 
 local MAX_INT = 9007199254740991 -- 2^53 - 1
@@ -57,86 +57,17 @@ local function payload(v)
 	return type(v) == "string" and #v >= 1 and #v <= 220 and not find(v, "%z")
 end
 
--- Audit item lists (docs/witness-spec.md section 1). An AUD item is s<n> or g<n>.<g>; an AUDR
--- item is that plus =<value 16 hex><flag> or =-. Up to 8 items joined with ","; "-" is none.
-local MAX_ITEMS = 8
-
-local function canonical(text, lo, hi)
-	if not text or #text > 16 or (text ~= "0" and not find(text, "^[1-9]%d*$")) then
-		return nil
-	end
-	local v = tonumber(text)
-	return v >= lo and v <= hi and v or nil
-end
-
--- One item, or nil. answer: true when the item carried "=...".
-local function auditItem(text)
-	local key, rest = match(text, "^([^=]*)=(.*)$")
-	key = key or text
-	local item = {}
-	local nText, gText = match(key, "^g([^.]*)%.(.*)$")
-	if nText then
-		item.kind, item.n, item.g = "gam", canonical(nText, 1, MAX_SPIN), canonical(gText, 1, 5)
-	elseif sub(key, 1, 1) == "s" then
-		item.kind, item.n, item.g = "spin", canonical(sub(key, 2), 1, MAX_SPIN), 0
-	end
-	if not item.n or not item.g then
-		return nil
-	end
-	if rest and rest ~= "-" then
-		local value, flag = match(rest, "^([0-9a-f]+)([+%-?])$")
-		if not value or #value ~= 16 then
-			return nil
-		end
-		item.value, item.flag = value, flag
-	end
-	return item, rest ~= nil
-end
-
--- Returns the items and whether they are answers (AUDR form), or nil. Mixed lists are invalid.
-local function parseItems(text)
-	if type(text) ~= "string" then
-		return nil
-	end
-	local list, answers = {}, nil
-	if text == "-" then
-		return list, nil
-	end
-	local pos = 1
-	while true do
-		local comma = find(text, ",", pos, true)
-		local item, answer = auditItem(sub(text, pos, comma and comma - 1 or #text))
-		if not item or #list >= MAX_ITEMS or (answers ~= nil and answers ~= answer) then
-			return nil
-		end
-		answers = answer
-		list[#list + 1] = item
-		if not comma then
-			return list, answers
-		end
-		pos = comma + 1
-	end
-end
-
-function Proto.auditItems(text)
-	return (parseItems(text))
-end
-
-local function audItems(v)
-	local list, answers = parseItems(v)
-	return list ~= nil and answers ~= true
-end
-
-local function audrItems(v)
-	local list, answers = parseItems(v)
-	return list ~= nil and answers ~= false
-end
+-- ALERT codes (docs/follow-spec.md section 4).
+local ALERT_CODES = { rewritten = true, bad_entry = true, bad_res = true, omitted = true, bad_value = true }
 
 local TYPES = {
 	HELLO = {
 		field("version", version),
 		field("n", int(0, MAX_SPIN)),
 		field("head", headOrDash),
+		-- docs/follow-spec.md section 2: the commit of the session secret, the previous secret.
+		field("commit", hex(32)),
+		field("reveal", headOrDash),
 	},
 	BUY1 = {
 		field("buyId", hex(16)),
@@ -202,7 +133,10 @@ local TYPES = {
 	LOGREQ = {
 		field("reqId", hex(16)),
 		field("player", validName),
+		-- docs/follow-spec.md section 5: entries the officer holds, and its short head after them.
 		field("from", int(0, MAX_SPIN)),
+		field("head", headOrDash),
+		valid = function(m) return (m.from == 0) == (m.head == "-") end,
 	},
 	LOG = {
 		field("reqId", hex(16)),
@@ -221,7 +155,7 @@ local TYPES = {
 		field("amount", int(1, MAX_INT)),
 		field("balanceAfter", int(0, MAX_INT)),
 		field("time", int(0, MAX_INT)),
-		field("head", hex(32)),
+		field("head", hex(64)), -- the full head after the payout entry
 		field("anchors", int(1, MAX_SPIN)),
 		field("n", int(0, MAX_SPIN)),
 		field("ck", hex(16)),
@@ -237,29 +171,14 @@ local TYPES = {
 		field("head", hex(32)),
 		field("time", int(0, MAX_INT)),
 	},
-}
-
--- Milestone 5: audit and checkpoint sync (docs/witness-spec.md section 1).
-TYPES.AUD = {
-	field("reqId", hex(16)),
-	field("witness", validName),
-	field("player", validName),
-	field("from", int(0, MAX_SPIN)),
-	field("items", audItems),
-}
-TYPES.AUDR = {
-	field("reqId", hex(16)),
-	field("player", validName),
-	field("items", audrItems),
-}
-TYPES.CSYNC = {
-	field("player", validName),
-	field("anchors", int(1, MAX_SPIN)),
-	field("head", hex(32)),
-	field("balance", int(0, MAX_INT)),
-	field("n", int(0, MAX_SPIN)),
-	field("ck", hex(16)),
-	field("time", int(0, MAX_INT)),
+	ALERT = {
+		field("reqId", hex(16)),
+		field("player", validName),
+		field("code", function(v) return ALERT_CODES[v] == true end),
+		field("n", int(0, MAX_SPIN)),
+		field("g", int(0, 5)),
+		field("time", int(0, MAX_INT)),
+	},
 }
 
 function Proto.encode(msgType, fields)

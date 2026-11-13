@@ -173,7 +173,7 @@ t.test("1000 level-0 spins with some gamble steps pack well under 3 KB", functio
 	t.ok(Ledger.replay("Test Guild", "Pia", Pack.decode(text)), "replays")
 end)
 
--- Milestone 5: dictionary forms and the partial-log header (docs/witness-spec.md section 5) ------
+-- Milestone 5: dictionary forms (docs/witness-spec.md section 5), from marker (follow-spec 5) -
 
 local V1, V2, V0 = "0123456789abcdef", "ffffffffffffffff", "0000000000000000"
 -- The same values in the 11-character form, worked out by hand: the top nibble, then five groups
@@ -284,52 +284,57 @@ t.test("decode rejects malformed dictionary items", function()
 	t.eq(Pack.decode("=G|1|99999999999999999999|0|ok|\nG0|v|"), nil, "no G after a huge step")
 end)
 
-t.test("a partial log carries a header and numbers on from it", function()
-	local header = {
-		head = string.rep("ab", 32), n = 41,
-		payout = "P|00000000000000b1|Olga|100|500|1300",
-		purchase = purchase("00000000000000a1"),
-	}
+t.test("a partial log starts with the from marker and numbers on from the given n", function()
 	local entries = { "S|42|10|0|ok|", "S|43|10|3|ok|Anna:" .. V1, "G|43|1|0|ok|", "P|00000000000000b2|Olga|1|1|1" }
-	local text = Pack.encode(entries, header)
+	local text = Pack.encode(entries, 17, 41)
 	t.eq(text, table.concat({
-		"^" .. header.head .. "|41", header.payout, header.purchase,
-		"s10", "@Anna", "S10|3|o|" .. W1 .. "1", "g", "=" .. entries[4],
+		">17", "s10", "@Anna", "S10|3|o|" .. W1 .. "1", "g", "=" .. entries[4],
 	}, "\n"), "packed text")
-	local got, h = Pack.decode(text)
-	same(got, entries, "suffix")
-	t.eq(h.head, header.head, "head")
-	t.eq(h.n, 41, "n")
-	t.eq(h.payout, header.payout, "payout")
-	t.eq(h.purchase, header.purchase, "purchase")
+	local got, from = Pack.decode(text, nil, 41)
+	same(got, entries, "entries after from")
+	t.eq(from, 17, "from")
 
-	-- An empty suffix.
-	got, h = Pack.decode(Pack.encode({}, header))
+	-- Decoded with another start n, the short forms number on from that one.
+	got = Pack.decode(text, nil, 40)
+	t.eq(got[1], "S|41|10|0|ok|", "numbers follow the n passed to decode")
+
+	-- Nothing after from.
+	text = Pack.encode({}, 17, 41)
+	t.eq(text, ">17", "marker alone")
+	got, from = Pack.decode(text, nil, 41)
 	t.eq(#got, 0, "no entries")
-	t.eq(h.n, 41, "header alone")
-
-	-- A whole account has no header.
-	got, h = Pack.decode(Pack.encode({ "S|1|10|0|ok|" }))
-	t.eq(#got, 1, "whole account")
-	t.eq(h, nil, "no header")
+	t.eq(from, 17, "from without entries")
 end)
 
-t.test("decode rejects a malformed header", function()
-	local P, B = "P|00000000000000b1|Olga|100|500|1300", purchase("00000000000000a1")
-	local H = string.rep("ab", 32)
+t.test("a whole account has no marker and always numbers from 0", function()
+	local entries = { purchase("00000000000000a1"), "S|1|10|0|ok|", "S|2|10|0|ok|" }
+	local text = Pack.encode(entries)
+	t.eq(text:sub(1, 1), "=", "no marker")
+	t.eq(Pack.encode(entries, nil, 41), text, "n is ignored without from")
+	t.eq(Pack.encode(entries, 0, 41), text, "from 0 is the whole account")
+	local got, from = Pack.decode(text, nil, 41)
+	same(got, entries, "n is ignored without a marker")
+	t.eq(from, nil, "no from")
+	t.eq(select(2, Pack.decode("")), nil, "empty text")
+end)
+
+t.test("decode rejects a malformed from marker or start n", function()
 	local bad = {
-		"^" .. H .. "|41", "^" .. H .. "|41\n" .. P, "^" .. H .. "|41\n" .. P .. "\n",
-		"^" .. H .. "|041\n" .. P .. "\n" .. B, "^" .. H .. "|2147483649\n" .. P .. "\n" .. B,
-		"^" .. H:upper() .. "|41\n" .. P .. "\n" .. B, "^" .. H:sub(2) .. "|41\n" .. P .. "\n" .. B,
-		"^" .. H .. "\n" .. P .. "\n" .. B, "^" .. H .. "|41|x\n" .. P .. "\n" .. B,
-		"^" .. H .. "|41\n" .. B .. "\n" .. P, -- payout and purchase swapped
-		"^" .. H .. "|41\n" .. P .. "\n" .. B .. "\n", -- empty item after the header
-		"=S|1|10|0|ok|\n^" .. H .. "|41\n" .. P .. "\n" .. B, -- header not first
+		">", ">0", ">01", ">-1", ">2147483649", ">1x", "> 1", ">1|2", ">1\n", ">1\n>2",
+		"s10\n>1", -- marker not first
 	}
 	for _, text in ipairs(bad) do
-		local ok, entries = pcall(Pack.decode, text)
+		local ok, entries, code = pcall(Pack.decode, text, nil, 3)
 		t.ok(ok, "raised")
 		t.eq(entries, nil, "rejects " .. text:gsub("\n", "\\n"))
+		t.eq(code, "bad_pack", "code for " .. text:gsub("\n", "\\n"))
+	end
+	t.ok(Pack.decode(">2147483648"), "from 2^31")
+	for _, n in ipairs({ -1, 1.5, "3", 2147483649 }) do
+		local ok, entries, code = pcall(Pack.decode, ">1\ns10", nil, n)
+		t.ok(ok, "raised on n " .. tostring(n))
+		t.eq(entries, nil, "start n " .. tostring(n))
+		t.eq(code, "bad_pack", "code")
 	end
 end)
 
@@ -339,7 +344,7 @@ t.test("decode survives random text with the new item forms", function()
 		x = (x * 1103515245 + 12345) % 2147483648
 		return x % n
 	end
-	local alphabet = "=sgSG@^|,*\n0123456789ovAPab_-:ok"
+	local alphabet = "=sgSG@>|,*\n0123456789ovAPab_-:ok"
 	for _ = 1, 3000 do
 		local parts = {}
 		for i = 1, r(50) do

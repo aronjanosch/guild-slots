@@ -23,6 +23,11 @@ t.test("witnessValue is the first 16 hex chars of the HMAC over the request", fu
 	t.eq(v, "be881c0c2b8bba7d")
 end)
 
+t.test("witnessCommit is the first 32 hex of Sha256.hex(GS1|WC|S)", function()
+	t.eq(Engine.witnessCommit("aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb"), "ad1c747c968b75abfbdb9e4a28f5d52d")
+	t.eq(Engine.witnessCommit(SEED), "bff8c13df05a9120ec5b4bb7a2b3e0d3")
+end)
+
 t.test("lot reads the first 8 hex chars as a number", function()
 	t.eq(Engine.lot("Bob", "Alice", "gam", 7, 2), 132085698)
 end)

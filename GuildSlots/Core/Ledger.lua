@@ -252,7 +252,7 @@ function RULES.B(state, e)
 	local balance = state.balance + e.tokens
 	return {
 		balance = balance, pending = 0, K = K, keyed = Sha256.keyed(K), settings = settings,
-		line = e.line, tbl = Tables.get(settings.T), anchors = state.anchors + 1,
+		line = e.line, tbl = Tables.get(settings.T), anchors = state.anchors + 1, purchase = Ledger.encode(e),
 	}, { type = "B", balance = balance, pending = 0 }
 end
 
@@ -364,40 +364,79 @@ function Ledger.apply(state, entry)
 	return info
 end
 
--- Checkpoints (docs/witness-spec.md section 6) ------------------------------------------------
+-- Checkpoint key (docs/witness-spec.md section 6) --------------------------------------------
 
--- The digest PAY and CSYNC carry: binds the spin number to the key and settings in force.
+-- The digest PAY carries: binds the spin number to the key and settings in force.
 function Ledger.checkpointKey(n, K, line)
 	return sub(Sha256.hex("GS1|CK|" .. dec(n) .. "|" .. K .. "|" .. line), 1, 16)
 end
 
--- cp = { head = 64 hex before the payout, n, payout = P text, purchase = B text,
---        anchors = B/P count after the payout, count = entries before the suffix or nil }.
--- Returns the state right after the payout, or nil, code.
-function Ledger.resume(guild, player, cp)
-	if type(cp) ~= "table" or not isHex(cp.head, 64) or not isInt(cp.n, 0, MAX_SPIN)
-		or not isInt(cp.anchors, 2, MAX_SPIN) or (cp.count ~= nil and not isInt(cp.count, 0, MAX_SPIN)) then
+-- Snapshots (docs/follow-spec.md section 3) --------------------------------------------------
+
+local function idList(set)
+	local list = {}
+	for id in pairs(set) do
+		list[#list + 1] = id
+	end
+	table.sort(list)
+	return list
+end
+
+-- A plain copy of the state (numbers and texts only), safe for SavedVariables.
+function Ledger.snapshot(state)
+	return {
+		head = state.head, count = state.count, anchors = state.anchors, balance = state.balance,
+		n = state.n, g = state.g, pending = state.pending, purchase = state.purchase,
+		buyIds = idList(state.buyIds), payIds = idList(state.payIds),
+	}
+end
+
+local function idSet(list)
+	if type(list) ~= "table" then
+		return nil
+	end
+	local set = {}
+	for _, id in ipairs(list) do
+		if not isHex(id, 16) then
+			return nil
+		end
+		set[id] = true
+	end
+	return set
+end
+
+-- The state a snapshot was taken of, or nil, code (bad_entry, bad_commit, bad_settings).
+function Ledger.restore(guild, player, snap)
+	if type(snap) ~= "table" or not isHex(snap.head, 64) or not isInt(snap.count, 0, MAX_SPIN)
+		or not isInt(snap.anchors, 0, MAX_SPIN) or not isInt(snap.balance, 0, MAX_INT)
+		or not isInt(snap.n, 0, MAX_SPIN) or not isInt(snap.g, 0, MAX_INT) or not isInt(snap.pending, 0, MAX_INT)
+		or (snap.purchase ~= nil and type(snap.purchase) ~= "string") then
 		return nil, "bad_entry"
 	end
-	local p, b = Ledger.decode(cp.payout), Ledger.decode(cp.purchase)
-	if not p or p.type ~= "P" or not b or b.type ~= "B" then
+	local buyIds, payIds = idSet(snap.buyIds), idSet(snap.payIds)
+	if not buyIds or not payIds then
 		return nil, "bad_entry"
-	end
-	if Engine.commit(b.seed) ~= b.commit then
-		return nil, "bad_commit"
-	end
-	local settings = Settings.parse(b.line)
-	if not settings then
-		return nil, "bad_settings"
 	end
 	local state = Ledger.start(guild, player)
-	local K = Engine.purchaseKey(b.buyId, b.seed, b.nonce)
-	state.head = Sha256.hex(cp.head .. "|" .. Ledger.encode(p))
-	state.count, state.anchors = cp.count or 0, cp.anchors
-	state.balance, state.n = p.balanceAfter, cp.n
-	state.K, state.keyed, state.settings, state.line, state.tbl = K, Sha256.keyed(K), settings, b.line, Tables.get(settings.T)
-	state.buyIds[b.buyId] = true
-	state.payIds[p.payId] = true
+	state.head, state.count, state.anchors, state.balance = snap.head, snap.count, snap.anchors, snap.balance
+	state.n, state.g, state.pending = snap.n, snap.g, snap.pending
+	state.buyIds, state.payIds = buyIds, payIds
+	if snap.purchase then
+		local b = Ledger.decode(snap.purchase)
+		if not b or b.type ~= "B" or not buyIds[b.buyId] then
+			return nil, "bad_entry"
+		end
+		if Engine.commit(b.seed) ~= b.commit then
+			return nil, "bad_commit"
+		end
+		local settings = Settings.parse(b.line)
+		if not settings then
+			return nil, "bad_settings"
+		end
+		state.K = Engine.purchaseKey(b.buyId, b.seed, b.nonce)
+		state.keyed, state.settings, state.line, state.tbl = Sha256.keyed(state.K), settings, b.line, Tables.get(settings.T)
+		state.purchase = snap.purchase
+	end
 	return state
 end
 
