@@ -151,7 +151,10 @@ New item forms next to the existing ones (`=`, `s`, `g`):
 
 - `@<name>`: adds a name to the dictionary of this packed text; the first gets index 1.
 - `S<stake>|<A>|<o or v>|<list>`: a spin entry numbered `n + 1`, status `ok` (`o`) or `void` (`v`).
-  `<list>` is `<index>:<value>` joined with `,` in the entry's order; empty for no contributions.
+  `<list>` is `<value64><index>` joined with `,` in the entry's order; empty for no contributions.
+  `<value64>` is the 16-hex value as exactly 11 characters of the alphabet `A-Z a-z 0-9 - _`
+  (values 0..63 in that order): the 64 bits big-endian, 6 bits per character, the first character
+  holding the top 4 bits. `<index>` is the decimal dictionary index.
 - `G<A>|<o or v>|<list>`: a gamble entry for the current `n` with step `g + 1`.
 
 `encode` uses these for spin and gamble entries that are in sequence and are not the level-0 form;
@@ -201,8 +204,13 @@ also sends one `CSYNC` per stored checkpoint it authored (`by` = own name), newe
   (`from = 0`, no such entry, not a payout) send the whole account.
 - `PAYREQ.count` stays the number of entries of the whole account, `PAYREQ.head` the current short
   head.
+- Transport: `LOG` chunks are spread over three prefixes, `GSLOTS`, `GSLOTS2` and `GSLOTS3`
+  (round robin, each with its own send queue and budget, since the server counts per prefix).
+  The extra prefixes carry nothing but `LOG`; a receiver treats a `LOG` the same whatever prefix
+  brought it. `Comm.LOG_PREFIXES` is the list, so a client that gets disconnected under this load
+  can be cut back to one.
 - Size: at most **600** chunks (payout-spec said 200). A request lives `300 + 1.2 * total` seconds
-  on both sides once `total` is known (the player knows it when packing, the officer from the first
+  on both sides (with three prefixes the transfer itself takes about `total / 3` seconds) once `total` is known (the player knows it when packing, the officer from the first
   `LOG`); `confirm` is allowed until 30 s before that.
 
 ### Resuming the ledger (`Core/Ledger.lua`)
