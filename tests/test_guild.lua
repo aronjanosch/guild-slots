@@ -529,7 +529,7 @@ local function groups(who)
 	return out
 end
 
-t.test("a level 1 spin collects three witnesses and settles at the end of the window", function()
+t.test("a level 1 spin collects three witnesses and settles once all of them answered", function()
 	local w, o, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
 	local g = p.session:game()
 	t.eq(g.level, 1, "game.level")
@@ -573,9 +573,10 @@ t.test("a level 1 spin collects three witnesses and settles at the end of the wi
 	local S = others.Tom.env.store.secret.S
 	t.eq(#S, 32, "secret")
 	t.eq(values.Tom, Engine.witnessValue(S, "Pia", "spin", 1, 0, 10, head), "Tom's value")
-	t.eq(#events(p, "result"), 0, "no result inside the window")
-	settle(w, 1.4)
-	t.eq(#events(p, "result"), 0, "no result at 1.4 s")
+	t.eq(#events(p, "result"), 0, "no result before a tick")
+	-- Every expected witness answered: the request settles early, but not before 0.3 s.
+	settle(w, 0.2)
+	t.eq(#events(p, "result"), 0, "no result at 0.2 s")
 	settle(w, 0.1)
 	local results = events(p, "result")
 	t.eq(#results, 1, "one result")
@@ -2147,4 +2148,206 @@ t.test("ticker input never raises", function()
 		tom.env.store.keys[GUILD][sender] = { K = "k", line = LINE_PAY, time = 1 }
 		t.ok(pcall(s.onMessage, s, sender, spinText(i)), "flood")
 	end
+end)
+
+-- Witness commit (docs/follow-spec.md section 2) -----------------------------------------------
+
+local DAY = 86400
+
+t.test("the secret rotates after 24 hours at session creation and HELLO reveals the previous one", function()
+	local w = newWorld()
+	local o = addSession(w, "Olga")
+	local store = o.env.store
+	-- The fake randomHex of a new session repeats its sequence: a hand-made first secret.
+	local S1 = string.rep("7", 32)
+	store.secret.S = S1
+	w.now = w.now + DAY - 1
+	addSession(w, "Olga", { store = store })
+	t.eq(store.secret.S, S1, "kept within 24 h")
+	t.eq(store.secret.prev, nil, "nothing previous")
+	w.now = w.now + 1
+	local o2 = addSession(w, "Olga", { store = store })
+	t.ok(store.secret.S ~= S1, "a new secret after 24 h")
+	t.eq(store.secret.time, w.now, "created now")
+	t.eq(store.secret.prev.S, S1, "the old one is kept as prev")
+	o2.session:tick()
+	flush(w)
+	local hello = sentOf(w, "HELLO", "Olga")[1].msg
+	t.eq(hello.commit, Engine.witnessCommit(store.secret.S), "commit of the new secret")
+	t.eq(hello.reveal, S1, "reveal of the previous secret")
+	-- prev is kept 14 days from its own creation.
+	w.now = w.now + 14 * DAY - DAY - 1
+	store.secret.time = w.now -- keep the current secret from rotating again
+	addSession(w, "Olga", { store = store })
+	t.eq(store.secret.prev and store.secret.prev.S, S1, "kept within 14 days")
+	w.now = w.now + 1
+	store.secret.time = w.now
+	addSession(w, "Olga", { store = store })
+	t.eq(store.secret.prev, nil, "dropped after 14 days")
+end)
+
+t.test("each client keeps the commit of every other sender's latest HELLO", function()
+	local w = newWorld()
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia")
+	o.session:tick()
+	p.session:tick()
+	flush(w)
+	local commits = o.env.store.commits[GUILD]
+	t.eq(commits.Pia.commit, Engine.witnessCommit(p.env.store.secret.S), "Pia's commit")
+	t.eq(commits.Pia.time, w.now, "time")
+	t.eq(commits.Olga, nil, "not the own")
+end)
+
+t.test("a WIT from a sender without a known commit does not count", function()
+	local w, _, p = witnessWorld(LINE_W1, { "Tom" })
+	-- Zed never sent a HELLO: he is online through other messages but not a witness.
+	inject(w, "Zed", "RES", { kind = "spin", n = 1, g = 0, status = "void", who = "-", head = ZERO_HEAD })
+	local names = {}
+	for _, s in ipairs(p.session:online()) do names[s.name] = true end
+	t.ok(names.Zed, "Zed is online")
+	local r = assert(p.session:game():spin())
+	t.eq(p.env.store.open[GUILD].Pia.A, 2, "A counts Olga and Tom, not Zed")
+	-- Zed's value would be drawn (A <= Z), but he has no commit.
+	inject(w, "Zed", "WIT", { player = "Pia", kind = "spin", n = r.n, g = 0, value = string.rep("e", 16) })
+	flush(w)
+	settle(w)
+	local e = lastEntry(p)
+	t.eq(e.contribs:find("Zed", 1, true), nil, "Zed not included")
+	t.eq(#Engine.parseContribs(e.contribs), 2, "Olga and Tom")
+end)
+
+local function hello(w, sender, fields)
+	fields.version = fields.version or "0.3.0"
+	fields.n = fields.n or 0
+	fields.head = fields.head or "-"
+	fields.reveal = fields.reveal or "-"
+	inject(w, sender, "HELLO", fields)
+end
+
+local function notices(s, kind)
+	local out = {}
+	for _, d in ipairs(events(s, "notice")) do
+		if d.kind == kind then out[#out + 1] = d end
+	end
+	return out
+end
+
+t.test("a witness whose answers do not match its revealed secret is caught by a sampling client", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local X, Y, Z = string.rep("1", 32), string.rep("2", 32), string.rep("3", 32)
+	hello(w, "Mal", { commit = Engine.witnessCommit(X) })
+	local head = Ledger.shortHead(p.session.state)
+	local r = assert(p.session:game():spin())
+	flush(w)
+	-- Mal answers with a value of another secret than the one he committed to.
+	inject(w, "Mal", "WIT", { player = "Pia", kind = "spin", n = r.n, g = 0,
+		value = Engine.witnessValue(Y, "Pia", "spin", r.n, 0, 10, head) })
+	settle(w)
+	local sample = o.env.store.samples[GUILD].Mal
+	t.eq(sample.commit, Engine.witnessCommit(X), "sampled under Mal's commit")
+	t.eq(sample.seen, 1, "seen")
+	t.eq(#sample.rows, 1, "one row")
+	local row = sample.rows[1]
+	t.eq(row.player, "Pia", "row player")
+	t.eq(row.kind, "spin", "row kind")
+	t.eq(row.n, r.n, "row n")
+	t.eq(row.amount, 10, "row amount")
+	t.eq(row.head, head, "row head")
+	t.eq(o.env.store.samples[GUILD].Tom.rows[1].value, sentOf(w, "WIT", "Tom")[1].msg.value, "Tom sampled too")
+	t.eq(o.env.store.samples[GUILD].Olga, nil, "the own answers are not sampled")
+	t.eq(#notices(o, "witness_cheat"), 0, "nothing yet")
+	-- Mal reveals X with his next HELLO.
+	hello(w, "Mal", { commit = Engine.witnessCommit(Z), reveal = X })
+	local cheat = notices(o, "witness_cheat")
+	t.eq(#cheat, 1, "one notice")
+	t.eq(cheat[1].name, "Mal", "names the witness")
+	local alerts = o.session:alerts("Pia")
+	t.eq(#alerts, 1, "one alert")
+	t.eq(alerts[1].code, "bad_value", "code")
+	t.eq(alerts[1].n, r.n, "n")
+	t.eq(alerts[1].g, 0, "g")
+	t.eq(alerts[1].player, "Pia", "player")
+	t.eq(o.env.store.samples[GUILD].Mal, nil, "samples dropped")
+	t.eq(#notices(others.Tom, "witness_cheat"), 1, "Tom caught him as well")
+	-- An honest witness rotates after 24 h; its reveal matches what it answered.
+	w.now = w.now + DAY
+	local tom2 = replaceSession(w, others.Tom, addSession(w, "Tom", { store = others.Tom.env.store }))
+	tom2.session:tick()
+	flush(w)
+	t.eq(#notices(o, "witness_cheat"), 1, "no notice for Tom")
+	t.eq(o.env.store.samples[GUILD].Tom, nil, "Tom's samples checked and dropped")
+	t.eq(#o.session:alerts("Pia"), 1, "no new alert")
+end)
+
+t.test("samples: a reservoir of 20 per witness and commit, a new commit keeps the old one", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom" })
+	local X, X2 = string.rep("4", 32), string.rep("5", 32)
+	hello(w, "Mal", { commit = Engine.witnessCommit(X) })
+	for n = 1, 30 do
+		inject(w, "Pia", "SPIN", { n = n, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+		inject(w, "Mal", "WIT", { player = "Pia", kind = "spin", n = n, g = 0,
+			value = Engine.witnessValue(X, "Pia", "spin", n, 0, 10, ZERO_HEAD) })
+		w.now = w.now + 1
+	end
+	-- A WIT without a heard request is not sampled.
+	inject(w, "Mal", "WIT", { player = "Pia", kind = "spin", n = 99, g = 0, value = string.rep("a", 16) })
+	local s = o.env.store.samples[GUILD].Mal
+	t.eq(s.seen, 30, "seen counts every sampled WIT")
+	t.eq(#s.rows, 20, "at most 20 rows")
+	hello(w, "Mal", { commit = Engine.witnessCommit(X2) })
+	inject(w, "Pia", "SPIN", { n = 31, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	inject(w, "Mal", "WIT", { player = "Pia", kind = "spin", n = 31, g = 0,
+		value = Engine.witnessValue(X2, "Pia", "spin", 31, 0, 10, ZERO_HEAD) })
+	s = o.env.store.samples[GUILD].Mal
+	t.eq(s.commit, Engine.witnessCommit(X2), "new reservoir")
+	t.eq(s.seen, 1, "fresh count")
+	t.eq(s.old.commit, Engine.witnessCommit(X), "the old one kept")
+	-- The reveal of X checks the old reservoir: all honest.
+	hello(w, "Mal", { commit = Engine.witnessCommit(X2), reveal = X })
+	s = o.env.store.samples[GUILD].Mal
+	t.eq(s.old, nil, "old checked and dropped")
+	t.eq(s.commit, Engine.witnessCommit(X2), "current stays")
+	t.eq(#notices(o, "witness_cheat"), 0, "honest")
+	t.eq(#o.session:alerts("Pia"), 0, "no alert")
+	-- Old reservoirs go after 14 days, at session creation.
+	s.old = { commit = Engine.witnessCommit(X), seen = 1, rows = {}, time = w.now }
+	w.now = w.now + 14 * DAY
+	addSession(w, "Olga", { store = o.env.store })
+	t.eq(o.env.store.samples[GUILD].Mal, nil, "all of Mal's samples are older than 14 days")
+	t.ok(p, "player")
+end)
+
+-- Settle early (docs/follow-spec.md section 6) --------------------------------------------------
+
+t.test("settle early: a missing expected witness keeps the window open until due", function()
+	local w, _, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local tomValue
+	w.drop = function(text)
+		local m = Proto.decode(text)
+		return m and m.type == "WIT" and others.Tom.env.store.witness and others.Tom.env.store.witness[GUILD]
+			and m.value == others.Tom.env.store.witness[GUILD][1].value
+	end
+	assert(p.session:game():spin())
+	flush(w)
+	w.drop = nil
+	tomValue = others.Tom.env.store.witness[GUILD][1].value
+	settle(w, 1.0)
+	t.eq(#events(p, "result"), 0, "Tom has not answered: still collecting at 1.0 s")
+	settle(w, 0.5)
+	t.eq(#events(p, "result"), 1, "settled at due")
+	t.eq(lastEntry(p).contribs:find(tomValue, 1, true), nil, "without Tom")
+end)
+
+t.test("settle early with the lottery: only the drawn names are waited for", function()
+	local names = {}
+	for i = 1, 11 do
+		names[i] = "W" .. i
+	end
+	local w, _, p = witnessWorld("GSLOTS1;L=1;W=1;R=1;E=10,50,100;G=3", names)
+	assert(p.session:game():spin())
+	flush(w)
+	settle(w, 0.3)
+	t.eq(#events(p, "result"), 1, "every drawn witness answered: settled at 0.3 s")
+	t.eq(lastEntry(p).status, "ok", "ok")
 end)

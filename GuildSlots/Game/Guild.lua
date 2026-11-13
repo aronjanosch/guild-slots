@@ -39,12 +39,17 @@ local TICKER_PER_SENDER = 1 -- seconds between two recalculations for one sender
 local TICKER_PER_SECOND = 5 -- recalculations per second in total
 local WITNESS_INTERVAL = 2.5 -- seconds between spins or gamble steps at level 1 and 2
 local WITNESS_WINDOW = 1.5 -- seconds the player collects WIT, unless env.witnessWindow says otherwise
-local WITNESS_AGE = 14 * 86400 -- seconds a session secret and a witness row are kept
+local SETTLE_MIN = 0.3 -- seconds a request is open at least, even when every expected witness answered
+local WITNESS_AGE = 14 * 86400 -- seconds a previous secret, a witness row, a sample and an alert are kept
+local SECRET_LIFE = 86400 -- seconds a session secret is used before it is replaced at session creation
 local WITNESS_KEEP = 5000 -- witness rows per guild
 local WITNESS_RATE = 2 -- answers per player per second
 local MAX_A = 10000
 local TICKER_WIT_MAX = 16 -- WIT values the ticker keeps per SPIN
 local TICKER_WIT_AGE = 10 -- seconds they are kept
+local LIVE_WIT_MAX = 64 -- WIT values kept per heard request of another player
+local SAMPLE_ROWS = 20 -- rows per sample reservoir
+local ALERT_KEEP = 200 -- own alerts per guild
 local REASONS = { declined = true, mismatch = true, expired = true, busy = true, too_large = true, bad_log = true }
 
 -- Player request states that lock the game, and officer request states still open.
@@ -143,6 +148,8 @@ function Guild.new(env)
 		lastAction = nil,
 		noticed = false,
 		declined = false,
+		created = env.now(),
+		live = {}, -- player -> the newest SPIN/GAM heard from that player, with its WIT values
 	}, Session)
 
 	local accounts = subtable(subtable(self.store, "accounts"), self.guild)
@@ -163,6 +170,7 @@ function Guild.new(env)
 		self.state = Ledger.start(self.guild, self.me)
 	end
 	self:initWitness()
+	self:cleanFollow()
 	self:restoreOpen()
 
 	self.gameObj = setmetatable({ session = self, stake = nil }, Game)
@@ -672,7 +680,7 @@ end
 -- creation; the secret is created here because HELLO carries its commit (docs/follow-spec.md 2).
 function Session:initWitness()
 	local now = self.env.now()
-	self:secret()
+	self:rotateSecret()
 	local all = self.store.witness
 	local list = type(all) == "table" and all[self.guild]
 	if type(list) ~= "table" then
@@ -694,16 +702,61 @@ function Session:initWitness()
 	all[self.guild] = out
 end
 
--- The session secret S, created at session creation (or when missing) and replaced after 14 days.
-function Session:secret()
+local function validSecret(sec)
+	return type(sec) == "table" and type(sec.S) == "string" and #sec.S == 32 and type(sec.time) == "number"
+end
+
+-- At session creation: a secret older than 24 hours is replaced and moves to store.secret.prev,
+-- which HELLO reveals and which is kept 14 days from its own creation (docs/follow-spec.md 2).
+function Session:rotateSecret()
 	local now = self.env.now()
 	local sec = self.store.secret
-	if type(sec) ~= "table" or type(sec.S) ~= "string" or #sec.S ~= 32 or type(sec.time) ~= "number"
-		or now - sec.time >= WITNESS_AGE then
-		sec = { S = self.env.randomHex(32), time = floor(now) }
+	if validSecret(sec) and now - sec.time >= SECRET_LIFE then
+		sec = { S = self.env.randomHex(32), time = floor(now), prev = { S = sec.S, time = sec.time } }
+		self.store.secret = sec
+	end
+	if validSecret(sec) and sec.prev ~= nil and (not validSecret(sec.prev) or now - sec.prev.time >= WITNESS_AGE) then
+		sec.prev = nil
+	end
+	self:secret()
+end
+
+-- The session secret S; created when missing. It does not rotate within a session.
+function Session:secret()
+	local sec = self.store.secret
+	if not validSecret(sec) then
+		sec = { S = self.env.randomHex(32), time = floor(self.env.now()) }
 		self.store.secret = sec
 	end
 	return sec.S
+end
+
+-- The previous secret HELLO reveals, or "-".
+function Session:revealed()
+	local prev = self.store.secret and self.store.secret.prev
+	return validSecret(prev) and prev.S or "-"
+end
+
+-- Commits ------------------------------------------------------------------------------------
+-- store.commits[guild][name] = { commit, time } of the latest HELLO of every other sender.
+
+function Session:commits()
+	return subtable(subtable(self.store, "commits"), self.guild)
+end
+
+-- The known commit of a name, or nil. A stored commit counts (a WIT counts, the name is a witness).
+function Session:commitOf(name)
+	local c = self:commits()[name]
+	return type(c) == "table" and type(c.commit) == "string" and c.commit or nil
+end
+
+-- The commit of a name heard in this session, or nil: only those are safe to sample under, since
+-- the witness may have rotated its secret while this client was away.
+function Session:liveCommit(name)
+	local c = self:commits()[name]
+	if type(c) == "table" and type(c.commit) == "string" and type(c.time) == "number" and c.time >= self.created then
+		return c.commit
+	end
 end
 
 function Session:addWitnessRow(row)
@@ -821,7 +874,7 @@ end
 function Session:witnessesOnline(level, W)
 	local env, A = self.env, 0
 	for _, s in ipairs(self:online()) do
-		if s.name ~= self.me then
+		if s.name ~= self.me and self:commitOf(s.name) then
 			if level == 2 and env.isOfficer(s.name) then
 				return 0
 			end
@@ -835,6 +888,27 @@ function Session:witnessesOnline(level, W)
 		return nil, "few_players"
 	end
 	return math.min(A, MAX_A)
+end
+
+-- The names that should answer a request (docs/follow-spec.md section 6): online with a known
+-- commit, not the own name, and drawn at level 1 or officers at level 2.
+function Session:expectedWitnesses(rec, level)
+	local out, Z = {}, self.state.settings.Z
+	for _, s in ipairs(self:online()) do
+		local name = s.name
+		if name ~= self.me and self:commitOf(name) then
+			local ok
+			if level == 2 then
+				ok = self.env.isOfficer(name)
+			else
+				ok = Engine.drawn(Engine.lot(name, self.me, rec.kind, rec.n, rec.g), rec.A, Z)
+			end
+			if ok then
+				out[#out + 1] = name
+			end
+		end
+	end
+	return out
 end
 
 -- Stores the open request, sends SPIN or GAM and starts the window. r = { kind, n, g, stake, amount, A }.
@@ -861,7 +935,7 @@ function Session:startRequest(r)
 		return nil, "send"
 	end
 	local due = now + (env.witnessWindow or WITNESS_WINDOW)
-	self.wreq = { rec = rec, level = level, due = due, got = {}, seen = {} }
+	self.wreq = { rec = rec, level = level, due = due, got = {}, seen = {}, expect = self:expectedWitnesses(rec, level) }
 	if r.kind == "spin" then
 		self.declined = true -- an open gamble offer is taken; the spin's own offer comes with its entry
 	end
@@ -873,7 +947,7 @@ end
 -- A WIT for the own open request.
 function Session:collectWit(sender, msg)
 	local q = self.wreq
-	if not q or msg.player ~= self.me or sender == self.me or q.seen[sender] then
+	if not q or msg.player ~= self.me or sender == self.me or q.seen[sender] or not self:commitOf(sender) then
 		return
 	end
 	local rec = q.rec
@@ -956,8 +1030,20 @@ end
 -- At the first tick at or after `due`: write the entry, send RES, raise `result`.
 function Session:settleRequest()
 	local q = self.wreq
-	if not q or self.env.now() < q.due then
+	if not q then
 		return
+	end
+	local now = self.env.now()
+	if now < q.due then
+		-- Settle early once every expected witness answered, but not before the reels started.
+		if now - q.rec.time < SETTLE_MIN - 1e-9 then
+			return
+		end
+		for _, name in ipairs(q.expect) do
+			if not q.seen[name] then
+				return
+			end
+		end
 	end
 	self.wreq = nil
 	local rec = q.rec
@@ -1508,6 +1594,202 @@ function Session:osync()
 	end
 end
 
+-- Requests heard from others ------------------------------------------------------------------
+-- self.live[player] = the newest SPIN/GAM of another player: { kind, n, g, amount, head, A, level,
+-- wits = { name -> value }, count, ambiguous }. Samples and following read the WIT values from it.
+
+function Session:hearRequest(sender, msg, kind)
+	if sender == self.me then
+		return nil
+	end
+	local g = kind == "gam" and msg.g or 0
+	local amount = kind == "gam" and msg.amount or msg.stake
+	local prev = self.live[sender]
+	if prev and prev.kind == kind and prev.n == msg.n and prev.g == g then
+		if prev.amount == amount and prev.head == msg.head then
+			return prev -- the same request again: its values stay
+		end
+		-- The same number with other terms: a late WIT could belong to either, so none is sampled.
+		local rec = { kind = kind, n = msg.n, g = g, amount = amount, head = msg.head, A = msg.A, level = msg.level,
+			wits = {}, count = 0, ambiguous = true }
+		self.live[sender] = rec
+		return rec
+	end
+	local rec = { kind = kind, n = msg.n, g = g, amount = amount, head = msg.head, A = msg.A, level = msg.level,
+		wits = {}, count = 0 }
+	self.live[sender] = rec
+	return rec
+end
+
+-- A WIT for another player's request: kept for following, sampled when the sender is another.
+function Session:hearWit(sender, msg)
+	local player = msg.player
+	local rec = self.live[player]
+	if not rec or sender == player or rec.kind ~= msg.kind or rec.n ~= msg.n or rec.g ~= msg.g then
+		return
+	end
+	if rec.wits[sender] == nil and rec.count < LIVE_WIT_MAX then
+		rec.wits[sender] = msg.value
+		rec.count = rec.count + 1
+	end
+	if sender ~= self.me and not rec.ambiguous then
+		self:sample(sender, {
+			player = player, kind = rec.kind, n = rec.n, g = rec.g, amount = rec.amount, head = rec.head, value = msg.value,
+		})
+	end
+end
+
+-- Samples (docs/follow-spec.md section 2) ------------------------------------------------------
+-- store.samples[guild][witness] = { commit, seen, rows, time, old = { commit, seen, rows, time } }
+
+function Session:samples()
+	return subtable(subtable(self.store, "samples"), self.guild)
+end
+
+local function randomBelow(env, n)
+	return (tonumber(env.randomHex(8), 16) or 0) % n
+end
+
+function Session:sample(witness, row)
+	local commit = self:liveCommit(witness)
+	if not commit then
+		return
+	end
+	local all = self:samples()
+	local res = all[witness]
+	if type(res) ~= "table" or type(res.rows) ~= "table" or type(res.seen) ~= "number" then
+		res = nil
+	end
+	if not res or res.commit ~= commit then
+		local old = res and res.seen > 0 and res or nil
+		if old then
+			old.old = nil
+		end
+		res = { commit = commit, seen = 0, rows = {}, time = floor(self.env.now()), old = old }
+		all[witness] = res
+	end
+	res.seen = res.seen + 1
+	if #res.rows < SAMPLE_ROWS then
+		res.rows[#res.rows + 1] = row
+	else
+		local j = randomBelow(self.env, res.seen) + 1
+		if j <= SAMPLE_ROWS then
+			res.rows[j] = row
+		end
+	end
+end
+
+-- Checks the rows of one reservoir against the revealed secret; true when one differed.
+function Session:checkRows(rows, S)
+	local bad = false
+	for _, row in ipairs(rows) do
+		if type(row) == "table" and type(row.player) == "string" and (row.kind == "spin" or row.kind == "gam")
+			and type(row.n) == "number" and type(row.g) == "number" and type(row.amount) == "number"
+			and type(row.head) == "string" then
+			local ok, value = pcall(Engine.witnessValue, S, row.player, row.kind, row.n, row.g, row.amount, row.head)
+			if ok and value ~= row.value then
+				bad = true
+				self:addAlert(row.player, "bad_value", row.n, row.g)
+			end
+		end
+	end
+	return bad
+end
+
+-- A HELLO's reveal: the reservoir under the commit it hashes to is checked and dropped.
+function Session:checkReveal(sender, reveal)
+	if reveal == "-" then
+		return
+	end
+	local all = self:samples()
+	local res = all[sender]
+	if type(res) ~= "table" then
+		return
+	end
+	local commit = Engine.witnessCommit(reveal)
+	local bad = false
+	if type(res.old) == "table" and res.old.commit == commit then
+		bad = type(res.old.rows) == "table" and self:checkRows(res.old.rows, reveal)
+		res.old = nil
+	end
+	if res.commit == commit then
+		bad = (type(res.rows) == "table" and self:checkRows(res.rows, reveal)) or bad
+		all[sender] = type(res.old) == "table" and res.old or nil
+	end
+	if bad then
+		event(self, "notice", { kind = "witness_cheat", name = sender })
+	end
+end
+
+-- Alerts (docs/follow-spec.md section 4) -------------------------------------------------------
+-- store.alerts[guild] = { { player, code, n, g, time }, … }, oldest first.
+
+function Session:alertList()
+	return subtable(subtable(self.store, "alerts"), self.guild)
+end
+
+-- Stores an own observation once per (player, code, n, g).
+function Session:addAlert(player, code, n, g)
+	local list = self:alertList()
+	for _, a in ipairs(list) do
+		if a.player == player and a.code == code and a.n == n and a.g == g then
+			return
+		end
+	end
+	list[#list + 1] = { player = player, code = code, n = n, g = g, time = floor(self.env.now()) }
+	while #list > ALERT_KEEP do
+		table.remove(list, 1)
+	end
+end
+
+-- The own alerts about a player, newest first.
+function Session:alerts(player)
+	local out = {}
+	local list = self:alertList()
+	for i = #list, 1, -1 do
+		local a = list[i]
+		if a.player == player then
+			out[#out + 1] = { player = a.player, code = a.code, n = a.n, g = a.g, time = a.time }
+		end
+	end
+	return out
+end
+
+-- At creation: alerts, samples and commits older than 14 days go.
+function Session:cleanFollow()
+	local now = self.env.now()
+	local alerts, kept = self:alertList(), {}
+	for _, a in ipairs(alerts) do
+		if type(a) == "table" and type(a.time) == "number" and now - a.time < WITNESS_AGE and type(a.player) == "string"
+			and type(a.code) == "string" and type(a.n) == "number" and type(a.g) == "number" then
+			kept[#kept + 1] = a
+		end
+	end
+	while #kept > ALERT_KEEP do
+		table.remove(kept, 1)
+	end
+	self.store.alerts[self.guild] = kept
+	local function fresh(r)
+		return type(r) == "table" and type(r.time) == "number" and now - r.time < WITNESS_AGE
+			and type(r.rows) == "table" and type(r.seen) == "number" and type(r.commit) == "string"
+	end
+	local samples = self:samples()
+	for name, res in pairs(samples) do
+		if type(res) == "table" and not fresh(res.old) then
+			res.old = nil
+		end
+		if not fresh(res) then
+			samples[name] = type(res) == "table" and res.old or nil
+		end
+	end
+	local commits = self:commits()
+	for name, c in pairs(commits) do
+		if type(c) ~= "table" or type(c.time) ~= "number" or now - c.time >= WITNESS_AGE then
+			commits[name] = nil
+		end
+	end
+end
+
 -- Presence -----------------------------------------------------------------------------------
 
 function Session:alive(sender, version)
@@ -1552,7 +1834,7 @@ function Session:sendHello()
 		n = hasAccount and state.n or 0,
 		head = hasAccount and Ledger.shortHead(state) or "-",
 		commit = Engine.witnessCommit(self:secret()),
-		reveal = "-", -- TODO(follow): reveal the previous secret once it rotates
+		reveal = self:revealed(),
 	})
 end
 
@@ -1621,6 +1903,10 @@ function Session:onMessage(sender, text)
 	elseif kind == "HELLO" then
 		self:alive(sender, msg.version)
 		self:hear(sender, msg.n, msg.head)
+		if sender ~= self.me then
+			self:checkReveal(sender, msg.reveal)
+			self:commits()[sender] = { commit = msg.commit, time = env.now() }
+		end
 		if not self.noticed and type(env.version) == "string" and newerVersion(msg.version, env.version) then
 			self.noticed = true
 			event(self, "notice", { kind = "update", version = msg.version, from = sender })
@@ -1628,15 +1914,18 @@ function Session:onMessage(sender, text)
 	elseif kind == "SPIN" then
 		self:alive(sender)
 		self:hear(sender, msg.n, msg.head, { n = msg.n, g = 0, head = msg.head })
+		self:hearRequest(sender, msg, "spin")
 		self:onTickerSpin(sender, msg)
 		self:answerRequest(sender, msg, "spin")
 	elseif kind == "GAM" then
 		self:alive(sender)
 		self:hear(sender, msg.n, msg.head, { n = msg.n, g = msg.g, head = msg.head })
+		self:hearRequest(sender, msg, "gam")
 		self:answerRequest(sender, msg, "gam")
 	elseif kind == "WIT" then
 		self:alive(sender)
 		self:collectWit(sender, msg)
+		self:hearWit(sender, msg)
 		self:onTickerWit(sender, msg)
 	elseif kind == "RES" then
 		self:alive(sender)
