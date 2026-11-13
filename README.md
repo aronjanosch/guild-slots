@@ -46,6 +46,9 @@ with yet on the Tokens tab, with the tokens the amount buys at the guild rate `X
 log can only be read at the vault; the addon only reads it. Amounts in the grant form, the cash-out
 panel and the payout review show their gold equivalent at the guild rate.
 
+With a witnessed account, an officer's client that was listening while the player spun pays out
+without a transfer; it only fetches the entries it missed.
+
 Exchanging gold for tokens happens by hand between players and is their own business. Blizzard
 calls player-run casinos "not supported" rather than banned, and gold as a paid entry can lead to
 account actions; that is why the addon itself never touches gold.
@@ -59,13 +62,19 @@ account actions; that is why the addon itself never touches gold.
 | 2 Solo mode | done, tested in game |
 | 3 Guild mode, security level 0 | done, tested in game with one character |
 | 4 Payout, anchors | done, tested in game with one character |
-| 5 Security levels 1 and 2 (witnesses) | open |
+| 5 Witnessed mode: every client contributes and follows | built, not yet tested in game |
 | 6 Polish | open |
 
-Security level 0 means: the key of a purchase is known to the player's client, so a modified
-client can look ahead. Stake limits, the luck index and the look-ahead shown to officers are the
-counterweight until witnesses (levels 1 and 2) exist. Officers are trusted in version 1; see
-"Known limits" in [docs/payout-spec.md](docs/payout-spec.md).
+Two modes, set by the officer:
+
+- **Open.** Always playable. The key of a purchase is known to the player's client, so a modified
+  client can look ahead. Stake limits, the luck index and the look-ahead shown to officers are the
+  counterweight.
+- **Witnessed.** Needs W other addon users online. Every client commits to its own secret,
+  contributes to every spin and recalculates it. One honest client online during a spin is enough
+  to notice manipulation. Known limits are in [docs/follow-spec.md](docs/follow-spec.md).
+
+Officers are trusted in version 1; see "Known limits" in [docs/payout-spec.md](docs/payout-spec.md).
 
 ## Layout
 
@@ -81,7 +90,7 @@ docs/              specs and in-game checklists
 
 Specs: [core](docs/core-spec.md), [table T2](docs/table-t2-spec.md), [table T3](docs/table-t3-spec.md),
 [guild mode](docs/guild-spec.md),
-[payout](docs/payout-spec.md).
+[payout](docs/payout-spec.md), [witnesses](docs/witness-spec.md), [following](docs/follow-spec.md).
 
 ## Develop
 

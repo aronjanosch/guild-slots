@@ -61,6 +61,7 @@ end
 local ALERT_CODES = { rewritten = true, bad_entry = true, bad_res = true, omitted = true, bad_value = true }
 
 local TYPES = {
+	HI = {}, -- "I just arrived": asks the others for a HELLO
 	HELLO = {
 		field("version", version),
 		field("n", int(0, MAX_SPIN)),
