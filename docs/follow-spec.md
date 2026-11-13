@@ -251,4 +251,26 @@ Decisions made while building the pure core (sections 1 to 5); the tests pin the
 - **Luck with `start`.** The index runs over the given entries and still restarts at a payout among them; with `start` and no entries `report.luck` is nil (the look-ahead is still given).
 - **Witness time with `start`.** The `isOfficer` time for level-2 witnesses is nil until the first purchase or payout among the given entries.
 - **Alerts.** Rows that are not tables or whose `code` is not one of the five are dropped; one yellow check-7 finding `alert_<code>` (index nil) per distinct code in the order first seen; `report.alerts` is always a list (empty without the input) and is given even when the replay fails.
-- **Session for now.** The secret keeps its 14-day life and is created at session creation; `HELLO.reveal` is `-` until rotation is built; the officer sends `LOGREQ` with `from = 0`, `head = -`; anchors store the first 32 hex of `PAY.head`, and the player compares the full head.
+- **Session for now** (superseded for the secret and `reveal` by "Clarifications (session)"). The secret keeps its 14-day life and is created at session creation; `HELLO.reveal` is `-` until rotation is built; the officer sends `LOGREQ` with `from = 0`, `head = -`; anchors store the first 32 hex of `PAY.head`, and the player compares the full head.
+
+## Clarifications (session)
+
+Decisions made while building sections 2, 3, 4 and 6 in `Game/Guild.lua`; `tests/test_guild.lua` pins them.
+
+- **Secret rotation.** Only at session creation; a session that runs longer than 24 hours keeps its secret. `prev` is dropped 14 days after its own creation time.
+- **Known commit.** Any stored commit counts for `WIT` and `witnessesOnline`; samples are taken only under a commit heard in this session, because a witness may have rotated while this client was away and a stale commit would raise a false `witness_cheat`.
+- **Commit cleanup.** Stored commits older than 14 days are dropped at session creation.
+- **Samples.** The own `WIT` values and a `WIT` from the player itself are not sampled; a request heard twice with the same number but other terms samples nothing for it (a late `WIT` could belong to either). A reservoir carries `time` (its creation); current and old reservoirs older than 14 days go at session creation.
+- **`witness_cheat`.** One `notice` per reveal, `{ kind = "witness_cheat", name = <witness> }`; every differing row is a `bad_value` alert.
+- **Settle early.** The expected names are fixed when the request is sent (level 2: online officers with a known commit); with none expected the request settles at 0.3 s. Settling happens in `tick()`.
+- **Queue.** Every followed message (purchase, `SPIN`, `GAM`, `RES`, `PAY`, `HELLO`) waits in one queue in arrival order; only ledger applications count toward the 8 per tick; all of them count toward the 50 per player. `WIT` values are attached at once to the request they belong to.
+- **Trust after a restart.** A record loaded from the store raises no `rewritten` until a message matched its head in this session (a payout or purchase may have happened while the client was away); such a mismatch is `lost` without an alert.
+- **Purchase start.** The account start is a `BUY2` with `anchors` 0 and the empty account's head. The officer's `base` is then the empty account and `entries` holds the purchase text, so a check over them is a whole-account check.
+- **Purchases this client cannot rebuild.** A purchase whose line does not hash like the own, a `BUY3` without a heard `BUY2`, and a watched purchase that expires after its `BUY2` make the stream `lost` without an alert. A purchase heard twice (the issuing officer) is applied once.
+- **Level mismatch.** A `SPIN`/`GAM` whose `level` differs from the followed account's level (after the number and head checks passed) is `bad_entry`.
+- **`HELLO`.** A lower or higher `n` is `lost` without an alert; while a level 1/2 request is open the `HELLO` is skipped (the `RES` decides).
+- **PAY start.** `store.keys[guild][player]` also keeps `purchase` (the purchase entry text). The state built from a `PAY` holds only that purchase's id and the payout's id in `buyIds`/`payIds`, and `g = 0`.
+- **Entries cap.** When an officer's list would pass 3000 entries, `entries` and `base` both become nil until the next starting point.
+- **`omitted`.** Raised by the witness at the `RES` only when `who` has fewer than 8 tags (with 8 the limit may have left it out legitimately), its `WIT` went out at least 0.5 s earlier, and the `RES` is the first for that row.
+- **Sending alerts.** The officer addressed by the `PAYREQ` sends none (it reads its own store). A batch that finds `budget() < 3` waits and is dropped 10 s after its due time.
+- **Incoming alerts.** `ALERT` messages are kept in memory per `reqId` only for a heard `PAYREQ` of the same player, at most 50 per `reqId`, once per `(by, code, n, g)`; the own echo is not kept. They go with the `PAYREQ` record 15 minutes after it.
