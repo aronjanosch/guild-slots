@@ -8,6 +8,7 @@ local H64 = H32 .. H32
 local SAMPLES = {
 	{ "HELLO", { version = "0.3.0", n = 0, head = "-", commit = H32, reveal = "-" } },
 	{ "HELLO", { version = "1.0-beta", n = 57, head = H32, commit = H32, reveal = H32 } },
+	{ "HI", {} },
 	{ "BUY1", { buyId = H16, player = "Some Player", tokens = 1000000000, commit = H64, time = 1700000000, lineHash = "deadbeef" } },
 	{ "BUY2", { buyId = H16, nonce = H32, head = H64, anchors = 0 } },
 	{ "BUY2", { buyId = H16, nonce = H32, head = H64, anchors = 2147483648 } },
@@ -58,7 +59,7 @@ t.test("decode(encode(x)) gives x back for every type", function()
 		for k in pairs(msg) do
 			t.ok(k == "type" or s[2][k] ~= nil, "no extra field " .. k)
 		end
-		t.ok(count > 0)
+		t.ok(count > 0 or s[1] == "HI")
 	end
 end)
 
@@ -237,6 +238,7 @@ t.test("decode rejects everything that is not exactly a known message", function
 		"1|BUY3|" .. H16 .. "|" .. H32 .. "\0",
 		"1|BUY1|" .. H16 .. "||1|" .. H64 .. "|1|deadbeef",
 		"1|BUY1|" .. H16 .. "|A\1B|1|" .. H64 .. "|1|deadbeef",
+		"1|HI|", "1|HI|x", "1|HI||", "1|HI\0",
 		"1|HELLO|" .. string.rep("1", 300) .. "|0|-|" .. H32 .. "|-",
 	}
 	for _, text in ipairs(bad) do
@@ -325,4 +327,9 @@ t.test("the audit and checkpoint messages are gone", function()
 	t.eq(Proto.decode("1|AUDR|" .. H16 .. "|P|-"), nil, "AUDR")
 	t.eq(Proto.decode("1|CSYNC|P|1|" .. H32 .. "|0|0|" .. H16 .. "|0"), nil, "CSYNC")
 	t.eq(Proto.auditItems, nil, "auditItems")
+end)
+
+t.test("HI has no fields", function()
+	t.eq(Proto.encode("HI", {}), "1|HI", "HI")
+	t.eq(Proto.decode("1|HI").type, "HI", "decoded")
 end)

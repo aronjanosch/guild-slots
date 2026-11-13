@@ -1080,7 +1080,7 @@ t.test("HELLO on the first tick and then every 120..140 s", function()
 	o.session:tick()
 	p.session:tick()
 	flush(w)
-	t.eq(sentTypes(w), "HELLO,HELLO", "two HELLOs")
+	t.eq(sentTypes(w), "HELLO,HI,HELLO,HI", "two HELLOs, each followed by a HI")
 	t.eq(w.log[1].text, "1|HELLO|0.3.0|0|-|" .. Engine.witnessCommit(o.env.store.secret.S) .. "|-", "no account yet")
 	local online = o.session:online()
 	t.eq(#online, 2, "both online, own echo included")
@@ -1089,10 +1089,10 @@ t.test("HELLO on the first tick and then every 120..140 s", function()
 	t.eq(online[2].version, "0.3.1", "version stored")
 	w.now = w.now + 119
 	o.session:tick()
-	t.eq(#w.log, 2, "no HELLO before 120 s")
+	t.eq(#w.log, 4, "no HELLO before 120 s")
 	w.now = w.now + 21
 	o.session:tick()
-	t.eq(#w.log, 3, "HELLO by 140 s")
+	t.eq(#w.log, 5, "HELLO by 140 s, no second HI")
 	flush(w)
 	w.now = w.now + 301
 	t.eq(#o.session:online(), 0, "nobody heard within 300 s")
@@ -1104,7 +1104,8 @@ t.test("HELLO carries the own spin number and head; the officer records it", fun
 	flush(w)
 	p.session:tick()
 	flush(w)
-	local hello = w.log[#w.log].msg
+	local helloEntries = sentOf(w, "HELLO", "Pia")
+	local hello = helloEntries[#helloEntries].msg
 	t.eq(hello.type, "HELLO", "type")
 	t.eq(hello.n, 1, "n")
 	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
@@ -1881,7 +1882,7 @@ t.test("OSYNC brings the newest anchors to a client that was offline", function(
 	w2.now = w2.now + 1
 	o2.session:tick()
 	flush(w2)
-	t.eq(sentTypes(w2, "Olga"), "HELLO,OSYNC", "one OSYNC")
+	t.eq(sentTypes(w2, "Olga"), "HELLO,HI,OSYNC", "one OSYNC")
 	local a = tim.session:anchor("Pia")
 	t.eq(a.anchors, want.anchors, "anchors")
 	t.eq(a.head, want.head, "head")
@@ -1889,7 +1890,7 @@ t.test("OSYNC brings the newest anchors to a client that was offline", function(
 	w2.now = w2.now + 100
 	o2.session:tick()
 	flush(w2)
-	t.eq(sentTypes(w2, "Olga"), "HELLO,OSYNC", "only once")
+	t.eq(sentTypes(w2, "Olga"), "HELLO,HI,OSYNC", "only once")
 	-- From a non-officer, or not higher: ignored.
 	inject(w2, "Tim", "OSYNC", { player = "Pia", anchors = 9, head = H32, time = 1 })
 	t.eq(tim.session:anchor("Pia").anchors, want.anchors, "non-officer ignored")
@@ -3090,4 +3091,75 @@ t.test("followed without the officer's entries: no luck index, the report says s
 	t.eq(r.report.luck, nil, "no luck index")
 	t.eq(r.report.balance, playerState(p).balance, "balance")
 	t.eq(r.report.light, "green", "green: " .. findingCodes(r.report))
+end)
+
+-- HI ----------------------------------------------------------------------------------------------
+
+local function helloCount(w, from)
+	return #sentOf(w, "HELLO", from)
+end
+
+-- Ticks every session once a second for `seconds`, delivering as it goes.
+local function runFor(w, seconds)
+	for _ = 1, seconds do
+		settle(w, 1)
+	end
+end
+
+t.test("HI after a restart: the others' HELLOs arrive within 8 s and a witnessed spin works", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	w.now = w.now + 30
+	local p2 = replaceSession(w, p, addSession(w, "Pia", { store = p.env.store }))
+	p2.session:tick()
+	flush(w)
+	t.eq(sentTypes(w, "Pia"):sub(-8), "HELLO,HI", "HELLO then HI")
+	t.eq(p2.session:game():status(), "few_players", "nobody has answered yet")
+	local before = helloCount(w)
+	runFor(w, 8)
+	t.eq(helloCount(w) - before, 3, "Olga, Tom and Uma answered once each")
+	t.eq(p2.session:game():status(), "ok", "witnesses heard")
+	t.ok(p2.session:game():spin(), "spin possible")
+end)
+
+t.test("HI: no answer when the own HELLO is younger than 20 s", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom" })
+	w.now = w.now + 10
+	local before = helloCount(w, "Tom")
+	inject(w, "Pia", "HI", {})
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before, "Tom stays quiet")
+	w.now = w.now + 30
+	inject(w, "Pia", "HI", {})
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before + 1, "Tom answers after 20 s")
+end)
+
+t.test("HI: several HIs give one HELLO, and that HELLO restarts the schedule", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom" })
+	w.now = w.now + 30
+	local before = helloCount(w, "Tom")
+	for _ = 1, 3 do
+		inject(w, "Pia", "HI", {})
+		w.now = w.now + 1
+	end
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before + 1, "one answer")
+	w.now = w.now + 100
+	for _, s in ipairs(w.sessions) do s:tick() end
+	flush(w)
+	t.eq(helloCount(w, "Tom"), before + 1, "no regular HELLO yet, the schedule restarted at the answer")
+end)
+
+t.test("HI: no answer with a low budget, and the own echo is ignored", function()
+	local w, o, p = witnessWorld(LINE_W1, { "Tom" })
+	w.now = w.now + 30
+	local before = helloCount(w, "Tom")
+	w.budget = 2
+	inject(w, "Pia", "HI", {})
+	w.budget = 10
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before, "skipped")
+	inject(w, "Tom", "HI", {})
+	runFor(w, 9)
+	t.eq(helloCount(w, "Tom"), before, "own HI does not count")
 end)

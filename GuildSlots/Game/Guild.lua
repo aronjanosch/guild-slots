@@ -21,6 +21,8 @@ local SPIN_INTERVAL = 1.5 -- seconds between spins or gamble steps
 local SPIN_BUDGET = 3 -- queue budget a spin needs
 local HELLO_EVERY = 120 -- seconds, plus a random 0..20
 local HELLO_JITTER = 20
+local HI_DELAY = 8 -- seconds: a HI is answered with a HELLO after a random 1..8
+local HI_GUARD = 20 -- no answer when the own last HELLO is younger than this
 local ONLINE_WINDOW = 300 -- seconds a sign of life counts
 local KEEP_PURCHASES = 100
 local MAX_TOKENS = 1000000000
@@ -2532,14 +2534,48 @@ function Session:sendHello()
 	})
 end
 
+-- A HELLO that counts as the regular one: the 120 s schedule restarts from it.
+function Session:helloNow(now)
+	local env = self.env
+	self:sendHello()
+	self.lastHello = now
+	self.helloAt = nil
+	local jitter = (tonumber(env.randomHex(4), 16) or 0) % (HELLO_JITTER + 1)
+	self.nextHello = now + HELLO_EVERY + jitter
+end
+
+-- A HI from another sender: answer with a HELLO after 1..8 s (docs/guild-spec.md, Presence).
+function Session:onHi()
+	local env = self.env
+	local now = env.now()
+	if env.budget() < SPIN_BUDGET or self.helloAt then
+		return
+	end
+	if self.lastHello and now - self.lastHello < HI_GUARD then
+		return
+	end
+	if self.nextHello and self.nextHello <= now + HI_DELAY then
+		return
+	end
+	self.helloAt = now + 1 + (tonumber(env.randomHex(4), 16) or 0) % HI_DELAY
+end
+
 function Session:tick()
 	local env = self.env
 	self:expire()
 	local now = env.now()
 	if not self.nextHello or now >= self.nextHello then
-		self:sendHello()
-		local jitter = (tonumber(env.randomHex(4), 16) or 0) % (HELLO_JITTER + 1)
-		self.nextHello = now + HELLO_EVERY + jitter
+		local first = not self.nextHello
+		self:helloNow(now)
+		if first then
+			self:send("HI", {})
+		end
+	elseif self.helloAt and now >= self.helloAt then
+		if env.budget() >= SPIN_BUDGET then
+			self:helloNow(now)
+		else
+			self.helloAt = nil
+		end
 	end
 	self:settleRequest()
 	self:pumpRes()
@@ -2616,6 +2652,11 @@ function Session:onMessage(sender, text)
 		if not self.noticed and type(env.version) == "string" and newerVersion(msg.version, env.version) then
 			self.noticed = true
 			event(self, "notice", { kind = "update", version = msg.version, from = sender })
+		end
+	elseif kind == "HI" then
+		self:alive(sender)
+		if sender ~= self.me then
+			self:onHi()
 		end
 	elseif kind == "SPIN" then
 		self:alive(sender)

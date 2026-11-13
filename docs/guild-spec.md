@@ -31,6 +31,7 @@ message of this milestone.
 | Type | From | Fields after the type, in order |
 |---|---|---|
 | `HELLO` | anyone | `version` (addon version, 1..16 bytes of `[0-9A-Za-z.-]`), `n` (own last spin number, 0 if none), `head` (own short head, or `-` without an account) |
+| `HI` | anyone | none ("I just arrived"), asks the others for a `HELLO` |
 | `BUY1` | officer | `buyId` (16 hex), `player` (name), `tokens` (1..1,000,000,000), `commit` (64 hex), `time` (server time, seconds), `lineHash` (8 hex) |
 | `BUY2` | player | `buyId` (16 hex), `nonce` (32 hex), `head` (32 hex, short head before the purchase) |
 | `BUY3` | officer | `buyId` (16 hex), `seed` (32 hex) |
@@ -237,6 +238,13 @@ game:status()     -> "ok" | "no_account" | "no_funds" | "level" | "broken"
 
 - `HELLO` goes out on the first `tick()` and then every 120 s plus a random 0..20 s
   (from `randomHex`), with the own last spin number and short head.
+- A session sends one `HI` right after its first `HELLO`. A client that hears a `HI` from another
+  sender answers with its own `HELLO` after a random 1..8 s (from `randomHex`), unless its own
+  last `HELLO` went out less than 20 s ago or one is already scheduled within the next 8 s. The
+  answer is a regular `HELLO`: the 120 s schedule restarts from it. It is sent only when
+  `budget() >= 3`, otherwise skipped. The own echo of `HI` is ignored; several `HI`s inside the
+  delay produce one `HELLO`. After a login or `/reload` the others' `HELLO`s (and so the online
+  list and the witness commits) arrive within about 8 s instead of up to 140 s.
 - Every valid message from a sender counts as a sign of life; `HELLO` also stores the version.
   `online()` lists senders heard within 300 s, the own name included once the own echo arrived.
 - When the listener is an officer, `SPIN`, `GAM` and `HELLO` update `store.heard` for the sender
