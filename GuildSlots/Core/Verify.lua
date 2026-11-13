@@ -122,6 +122,23 @@ local function audit(rows, recs, recList, add)
 	return unconfirmed
 end
 
+-- The state right after the checkpoint's payout, or nil when the header and the stored
+-- checkpoint disagree (or there is none).
+local function resumed(input, resume)
+	local cp = input.checkpoint
+	if type(cp) ~= "table" then
+		return nil
+	end
+	local state = Ledger.resume(input.guild, input.player, {
+		head = resume.head, n = resume.n, payout = resume.payout, purchase = resume.purchase, anchors = cp.anchors,
+	})
+	if not state or Ledger.shortHead(state) ~= cp.head or state.balance ~= cp.balance or resume.n ~= cp.n
+		or Ledger.checkpointKey(resume.n, state.K, state.line) ~= cp.ck then
+		return nil
+	end
+	return state
+end
+
 function Verify.run(input)
 	local findings = {}
 	local function add(check, level, code, index)
@@ -133,27 +150,41 @@ function Verify.run(input)
 	local isOfficer = type(input.isOfficer) == "function" and input.isOfficer or function() return nil end
 	local state = Ledger.start(input.guild, input.player)
 	local failed = false
+	local lastTime = nil -- time of the last purchase or payout, for isOfficer on witnesses
 
-	-- Check 1: the anchor is resolved when its B/P entry is replayed.
+	-- A partial log starts from the checkpoint the officer holds (docs/witness-spec.md section 6).
+	local resume = type(input.resume) == "table" and input.resume or nil
+	if resume then
+		state = resumed(input, resume)
+		if not state then
+			add(1, "red", "checkpoint_mismatch", nil)
+			return { findings = findings, light = "red", unconfirmed = 0 }
+		end
+		lastTime = Ledger.decode(resume.payout).time
+	end
+
+	-- Check 1: the anchor is resolved when its B/P entry is replayed. One at or before the
+	-- checkpoint is resolved by the header.
 	local anchor = type(input.anchor) == "table" and input.anchor or nil
 	local anchorCount = anchor and anchor.anchors
 	if anchor and type(anchorCount) ~= "number" then
 		anchorCount = -1 -- malformed: never reached
 	end
 	local anchorIndex, anchorOk = nil, false
-	if anchorCount == 0 then
+	if anchorCount == state.anchors then
 		anchorOk = Ledger.shortHead(state) == anchor.head
+	elseif anchorCount and anchorCount >= 0 and anchorCount < state.anchors then
+		anchorOk = true -- covered by the checkpoint
 	end
 	local unknown = {} -- check 3: { index, number of B/P entries up to it }
 
-	-- Check 4: the SPIN/GAM heard live.
+	-- Check 4: the SPIN/GAM heard live; one at or before the checkpoint is not checked.
 	local heard = nil
-	if type(input.heard) == "table" and type(input.heard.n) == "number" then
+	if type(input.heard) == "table" and type(input.heard.n) == "number" and not (resume and input.heard.n <= state.n) then
 		local g = input.heard.g
 		heard = { n = input.heard.n, g = type(g) == "number" and g or 0, head = input.heard.head }
 	end
 	local heardFound = false
-	local lastTime = nil -- time of the last purchase or payout, for isOfficer on witnesses
 
 	-- Check 7: spins and steps at level 1/2 by "kind|n|g", and in account order.
 	local recs, recList = {}, {}
@@ -241,8 +272,11 @@ function Verify.run(input)
 				anchorIndex = i
 				anchorOk = Ledger.shortHead(state) == anchor.head
 			end
-			if not known[kind == "B" and e.buyId or e.payId] then
+			local seenAt = known[kind == "B" and e.buyId or e.payId]
+			if not seenAt then
 				unknown[#unknown + 1] = { i, state.anchors }
+			elseif type(seenAt) == "number" and seenAt ~= state.anchors then
+				add(3, "red", "replayed", i)
 			end
 			if kind == "B" then
 				local officer = isOfficer(e.officer, e.time)
