@@ -455,18 +455,567 @@ t.test("no_funds and setStake", function()
 	t.eq(w.log[#w.log].msg.type, "BUY3", "nothing sent")
 end)
 
-t.test("a level 1 account cannot spin yet", function()
+-- Witnesses (docs/witness-spec.md) ------------------------------------------------------------------
+
+local Engine = ns.Engine
+local LINE_W1 = "GSLOTS1;L=1;W=2;R=1;E=10,50,100;G=3"
+local ZERO_HEAD = string.rep("0", 32)
+
+-- Officer Olga, player Pia with 1000 tokens bought under `line`, plus one session per name in
+-- `names`. Everyone has sent a HELLO, so every session sees every other one online.
+local function witnessWorld(line, names, opts)
+	opts = opts or {}
 	local w = newWorld()
-	w.line = "GSLOTS1;L=1"
+	w.line = line
+	for name in pairs(opts.officers or {}) do
+		w.officers[name] = true
+	end
 	local o = addSession(w, "Olga")
 	local p = addSession(w, "Pia")
-	assert(o.session:grant("Pia", 100))
+	local others = {}
+	for _, name in ipairs(names or {}) do
+		others[name] = addSession(w, name)
+	end
+	assert(o.session:grant("Pia", opts.tokens or 1000))
+	flush(w)
+	for _, session in ipairs(w.sessions) do
+		session:tick()
+	end
+	flush(w)
+	return w, o, p, others
+end
+
+-- Moves the clock to the end of the window and lets every session tick once.
+local function settle(w, seconds)
+	w.now = w.now + (seconds or 1.5)
+	for _, session in ipairs(w.sessions) do
+		session:tick()
+	end
+	flush(w)
+end
+
+local function sentOf(w, msgType, from)
+	local out = {}
+	for _, e in ipairs(w.log) do
+		if e.msg and e.msg.type == msgType and (not from or e.sender == from) then
+			out[#out + 1] = e
+		end
+	end
+	return out
+end
+
+local function lastEntry(s)
+	local entries = account(s, "Pia").entries
+	return Ledger.decode(entries[#entries])
+end
+
+local function events(s, name)
+	local out = {}
+	for _, ev in ipairs(s.events) do
+		if ev[1] == name then
+			out[#out + 1] = ev[2]
+		end
+	end
+	return out
+end
+
+local function groups(who)
+	local out = {}
+	if who ~= "-" then
+		for i = 1, #who, 4 do
+			out[#out + 1] = who:sub(i, i + 3)
+		end
+	end
+	return out
+end
+
+t.test("a level 1 spin collects three witnesses and settles at the end of the window", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local g = p.session:game()
+	t.eq(g.level, 1, "game.level")
+	t.eq(g:status(), "ok", "status")
+	local head = Ledger.shortHead(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries))
+	local r, code = g:spin()
+	t.ok(r, "spin: " .. tostring(code))
+	t.eq(r.kind, "wait", "wait")
+	t.eq(r.what, "spin", "what")
+	t.eq(r.n, 1, "n")
+	t.eq(r.g, 0, "g")
+	t.eq(r.due, w.now + 1.5, "due")
+	t.eq(g:state(), "collecting", "collecting")
+	local _, c2 = g:spin()
+	t.eq(c2, "collecting", "a second spin waits")
+	local _, c3 = g:setStake(50)
+	t.eq(c3, "busy", "no stake change while collecting")
+	local rec = p.env.store.open[GUILD].Pia
+	t.eq(rec.kind, "spin", "open kind")
+	t.eq(rec.n, 1, "open n")
+	t.eq(rec.g, 0, "open g")
+	t.eq(rec.stake, 10, "open stake")
+	t.eq(rec.amount, 10, "open amount")
+	t.eq(rec.A, 3, "A counts Olga, Tom and Uma")
+	t.eq(rec.head, head, "head before")
+	local spin = sentOf(w, "SPIN")[1].msg
+	t.eq(spin.level, 1, "SPIN level")
+	t.eq(spin.A, 3, "SPIN A")
+	t.eq(#account(p, "Pia").entries, 1, "nothing written yet")
+	flush(w)
+	local wits = sentOf(w, "WIT")
+	t.eq(#wits, 3, "three witnesses answered")
+	local values = {}
+	for _, e in ipairs(wits) do
+		t.eq(e.msg.player, "Pia", "player")
+		t.eq(e.msg.kind, "spin", "kind")
+		t.eq(e.msg.n, 1, "n")
+		t.eq(e.msg.g, 0, "g")
+		values[e.sender] = e.msg.value
+	end
+	local S = others.Tom.env.store.secret.S
+	t.eq(#S, 32, "secret")
+	t.eq(values.Tom, Engine.witnessValue(S, "Pia", "spin", 1, 0, 10, head), "Tom's value")
+	t.eq(#events(p, "result"), 0, "no result inside the window")
+	settle(w, 1.4)
+	t.eq(#events(p, "result"), 0, "no result at 1.4 s")
+	settle(w, 0.1)
+	local results = events(p, "result")
+	t.eq(#results, 1, "one result")
+	local res = results[1]
+	t.eq(res.kind, "spin", "result kind")
+	t.eq(res.n, 1, "result n")
+	t.eq(#res.window, 3, "T1 window")
+	t.eq(res.balance, g.balance, "balance")
+	t.eq(g:state() ~= "collecting", true, "not collecting")
+	t.eq(p.env.store.open[GUILD].Pia, nil, "open record gone")
+	local e = lastEntry(p)
+	t.eq(e.type, "S", "entry")
+	t.eq(e.status, "ok", "status ok")
+	t.eq(e.A, 3, "entry A")
+	t.eq(e.contribs, "Olga:" .. values.Olga .. ",Tom:" .. values.Tom .. ",Uma:" .. values.Uma, "contribs")
+	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+	t.ok(state, "replays")
+	t.eq(state.balance, g.balance, "replayed balance")
+	local resMsg = sentOf(w, "RES", "Pia")[1].msg
+	t.eq(resMsg.status, "ok", "RES ok")
+	t.eq(resMsg.who, values.Olga:sub(1, 4) .. values.Tom:sub(1, 4) .. values.Uma:sub(1, 4), "who")
+	t.eq(resMsg.head, Ledger.shortHead(state), "RES head after")
+	local rows = others.Tom.env.store.witness[GUILD]
+	t.eq(#rows, 1, "one witness row")
+	t.eq(rows[1].player, "Pia", "row player")
+	t.eq(rows[1].res, "in", "marked in")
+	t.eq(o.env.store.witness[GUILD][1].res, "in", "Olga marked in")
+	t.eq(p.env.store.witness, nil, "the player answers nothing itself")
+end)
+
+t.test("a void spin: fewer than W answers in time", function()
+	local w, _, p, others = witnessWorld("GSLOTS1;L=1;W=3;R=1;E=10,50,100;G=3", { "Tom", "Uma" })
+	local g = p.session:game()
+	local balance = g.balance
+	w.drop = function(text)
+		local m = Proto.decode(text)
+		return m and m.type == "WIT" and m.value == (others.Uma.env.store.witness
+			and others.Uma.env.store.witness[GUILD] and others.Uma.env.store.witness[GUILD][1]
+			and others.Uma.env.store.witness[GUILD][1].value)
+	end
+	assert(g:spin())
+	flush(w)
+	w.drop = nil
+	settle(w)
+	local res = events(p, "result")[1]
+	t.eq(res.kind, "void", "void")
+	t.eq(res.what, "spin", "what")
+	t.eq(res.n, 1, "n")
+	t.eq(res.need, 3, "need")
+	t.eq(res.got, 2, "got")
+	t.eq(res.balance, balance, "stake kept")
+	t.eq(g.balance, balance, "game balance")
+	local e = lastEntry(p)
+	t.eq(e.status, "void", "void entry")
+	t.eq(#Engine.parseContribs(e.contribs), 2, "the two that arrived")
+	local resMsg = sentOf(w, "RES", "Pia")[1].msg
+	t.eq(resMsg.status, "void", "RES void")
+	t.eq(#groups(resMsg.who), 2, "two tags")
+	t.eq(others.Tom.env.store.witness[GUILD][1].res, "void_in", "Tom void_in")
+	t.eq(others.Uma.env.store.witness[GUILD][1].res, "void_out", "Uma void_out")
+	t.eq(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries).balance, balance, "replays")
+	-- The next spin goes on with the next number.
+	w.now = w.now + 1
+	local r = assert(g:spin())
+	t.eq(r.n, 2, "next number")
+end)
+
+t.test("few_players: fewer than W other addon users online", function()
+	local w, _, p = witnessWorld(LINE_W1, {})
+	local g = p.session:game()
+	t.eq(g:status(), "few_players", "only Olga")
+	local _, code = g:spin()
+	t.eq(code, "few_players", "spin refused")
+	t.eq(#sentOf(w, "SPIN"), 0, "nothing sent")
+	local tom = addSession(w, "Tom")
+	tom.session:tick()
+	flush(w)
+	t.eq(g:status(), "ok", "Tom came online")
+end)
+
+t.test("the lottery: with more clients than Z only the drawn ones answer", function()
+	local names = {}
+	for i = 1, 11 do
+		names[i] = "W" .. i
+	end
+	-- W = 1, Z = 5; A = 12 (Olga and 11 more).
+	local w, _, p = witnessWorld("GSLOTS1;L=1;W=1;R=1;E=10,50,100;G=3", names)
+	local g = p.session:game()
+	local r = assert(g:spin())
+	flush(w)
+	local rec = p.env.store.open[GUILD].Pia
+	t.eq(rec.A, 12, "A")
+	local answered = {}
+	for _, e in ipairs(sentOf(w, "WIT")) do
+		answered[e.sender] = true
+	end
+	local expected = 0
+	for _, name in ipairs({ "Olga", unpack(names) }) do
+		local drawn = Engine.drawn(Engine.lot(name, "Pia", "spin", 1, 0), 12, 5)
+		t.eq(answered[name] == true, drawn, "answer of " .. name .. " follows the lot")
+		if drawn then expected = expected + 1 end
+	end
+	t.ok(expected < 12, "not everyone was drawn")
+	settle(w)
+	local e = lastEntry(p)
+	t.eq(#Engine.parseContribs(e.contribs), math.min(expected, 8), "contributions")
+	t.eq(e.status, expected >= 1 and "ok" or "void", "status")
+	t.ok(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries), "replays")
+	t.ok(r, "spin")
+	-- A witness ignores an A that is off by more than double or half its own count.
+	local before = #sentOf(w, "WIT")
+	w.now = w.now + 5
+	for _, A in ipairs({ 5, 25 }) do
+		inject(w, "Pia", "SPIN", { n = 50, stake = 10, level = 1, head = ZERO_HEAD, A = A })
+	end
+	t.eq(#sentOf(w, "WIT"), before, "no answers to a wrong A")
+end)
+
+t.test("at most 8 contributions count; the witness left out is marked out", function()
+	local names = {}
+	for i = 1, 8 do
+		names[i] = "W" .. i
+	end
+	-- W = 3, Z = 9; A = 9 (Olga and 8 more): everyone is drawn, nine answer.
+	local w, o, p, others = witnessWorld("GSLOTS1;L=1;W=3;R=1;E=10,50,100;G=3", names)
+	local g = p.session:game()
+	assert(g:spin())
+	flush(w)
+	t.eq(#sentOf(w, "WIT"), 9, "nine answers")
+	settle(w)
+	local e = lastEntry(p)
+	t.eq(e.status, "ok", "ok")
+	local list = Engine.parseContribs(e.contribs)
+	t.eq(#list, 8, "eight kept")
+	local inCount, out = 0, 0
+	local all = { o }
+	for _, name in ipairs(names) do
+		all[#all + 1] = others[name]
+	end
+	for _, s in ipairs(all) do
+		local res = s.env.store.witness[GUILD][1].res
+		if res == "in" then inCount = inCount + 1 elseif res == "out" then out = out + 1 end
+	end
+	t.eq(inCount, 8, "eight in")
+	t.eq(out, 1, "one out")
+end)
+
+t.test("witness messages never raise, with a request open on every side", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom" })
+	local g = p.session:game()
+	assert(g:spin())
+	flush(w)
+	settle(w)
+	w.now = w.now + 2
+	assert(g:spin())
+	local samples = {}
+	for _, e in ipairs(w.log) do
+		samples[#samples + 1] = e.text
+	end
+	flush(w)
+	local x = 12345
+	local alphabet = "1|WITRESspingamokvoid-0123456789abcdef\0"
+	local sessions = { o.session, p.session, others.Tom.session }
+	for i = 1, 1500 do
+		x = (x * 1103515245 + 12345) % 2147483648
+		local base = samples[x % #samples + 1]
+		local k = x % #base + 1
+		local c = (x % 37) + 1
+		local text = base:sub(1, k - 1) .. alphabet:sub(c, c) .. base:sub(k + 1)
+		for _, s in ipairs(sessions) do
+			local ok, err = pcall(s.onMessage, s, ({ "Olga", "Pia", "Tom", "Zed" })[i % 4 + 1], text)
+			t.ok(ok, "raised: " .. tostring(err))
+		end
+		if i % 100 == 0 then
+			w.now = w.now + 0.7
+			for _, s in ipairs(sessions) do
+				t.ok(pcall(s.tick, s), "tick")
+			end
+			w.queue = {}
+		end
+	end
+	t.ok(Ledger.replay(GUILD, "Pia", account(p, "Pia").entries), "account still replays")
+end)
+
+local LINE_W2 = "GSLOTS1;L=2;R=1;E=10,50,100;G=3"
+
+t.test("level 2: only officers answer, one is enough", function()
+	local w, o, p, others = witnessWorld(LINE_W2, { "Tom" })
+	local g = p.session:game()
+	t.eq(g.level, 2, "level")
+	t.eq(g:status(), "ok", "Olga is online")
+	local r = assert(g:spin())
+	t.eq(r.kind, "wait", "wait")
+	t.eq(p.env.store.open[GUILD].Pia.A, 0, "A is 0 at level 2")
+	t.eq(sentOf(w, "SPIN")[1].msg.level, 2, "SPIN level 2")
+	flush(w)
+	local wits = sentOf(w, "WIT")
+	t.eq(#wits, 1, "one answer")
+	t.eq(wits[1].sender, "Olga", "from the officer")
+	t.eq(others.Tom.env.store.witness, nil, "Tom is no officer")
+	-- A forged WIT from a non-officer does not count.
+	inject(w, "Tom", "WIT", { player = "Pia", kind = "spin", n = 1, g = 0, value = string.rep("e", 16) })
+	settle(w)
+	local e = lastEntry(p)
+	t.eq(e.status, "ok", "ok")
+	t.eq(e.A, 0, "entry A")
+	t.eq(e.contribs, "Olga:" .. wits[1].msg.value, "only Olga")
+	t.eq(events(p, "result")[1].kind, "spin", "result")
+	t.eq(o.env.store.witness[GUILD][1].res, "in", "marked")
+end)
+
+t.test("level 2 without an officer online: no_officer", function()
+	local w = newWorld()
+	w.line = LINE_W2
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia")
+	local tom = addSession(w, "Tom")
+	assert(o.session:grant("Pia", 1000))
+	flush(w)
+	-- Olga logs off before anyone heard a HELLO from her.
+	for i, s in ipairs(w.sessions) do
+		if s == o.session then table.remove(w.sessions, i) break end
+	end
+	w.now = w.now + 400
+	p.session:tick()
+	tom.session:tick()
 	flush(w)
 	local g = p.session:game()
-	t.eq(g.balance, 100, "credited")
-	t.eq(g:status(), "level", "status")
+	t.eq(g:status(), "no_officer", "status")
 	local _, code = g:spin()
-	t.eq(code, "level", "spin")
+	t.eq(code, "no_officer", "spin refused")
+	-- An officer who is the player does not count either.
+	w.officers.Pia = true
+	t.eq(g:status(), "no_officer", "the own name is no witness")
+end)
+
+t.test("a repeated SPIN: same terms get the same value, other terms get no answer", function()
+	local w, _, _, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local tom = others.Tom
+	local function answers()
+		local c = 0
+		for _, e in ipairs(sentOf(w, "WIT", "Tom")) do c = c + 1 end
+		return c
+	end
+	-- Pia's client is replaced by hand-made messages.
+	inject(w, "Pia", "SPIN", { n = 9, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 1, "first answer")
+	local value = sentOf(w, "WIT", "Tom")[1].msg.value
+	w.now = w.now + 1
+	inject(w, "Pia", "SPIN", { n = 9, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 2, "same terms answered again")
+	t.eq(sentOf(w, "WIT", "Tom")[2].msg.value, value, "with the same value")
+	w.now = w.now + 1
+	inject(w, "Pia", "SPIN", { n = 9, stake = 50, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 2, "another stake: no answer")
+	inject(w, "Pia", "SPIN", { n = 9, stake = 10, level = 1, head = string.rep("1", 32), A = 3 })
+	t.eq(answers(), 2, "another head: no answer")
+	t.eq(#tom.env.store.witness[GUILD], 1, "one row")
+	-- At most two answers per player per second, and none below a budget of 3.
+	w.now = w.now + 1
+	for n = 20, 24 do
+		inject(w, "Pia", "SPIN", { n = n, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	end
+	t.eq(answers(), 4, "two per second")
+	w.now = w.now + 1
+	w.budget = 2
+	inject(w, "Pia", "SPIN", { n = 30, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 4, "budget below 3")
+	w.budget = 10
+	-- Level 0 and the own echo are never answered.
+	inject(w, "Pia", "SPIN", { n = 31, stake = 10, level = 0, head = ZERO_HEAD, A = 0 })
+	inject(w, "Tom", "SPIN", { n = 32, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	t.eq(answers(), 4, "level 0 and own SPIN")
+end)
+
+t.test("witness rows and the secret: cleanup at session creation", function()
+	local w, _, _, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local store = others.Tom.env.store
+	inject(w, "Pia", "SPIN", { n = 1, stake = 10, level = 1, head = ZERO_HEAD, A = 3 })
+	local S = store.secret.S
+	local rows = store.witness[GUILD]
+	for i = 1, 5003 do
+		rows[#rows + 1] = { player = "X", kind = "spin", n = i, g = 0, amount = 10, head = ZERO_HEAD, value = string.rep("a", 16), time = w.now }
+	end
+	table.insert(rows, 1, { player = "Old", kind = "spin", n = 1, g = 0, amount = 10, head = ZERO_HEAD, value = string.rep("a", 16), time = w.now - 15 * 86400 })
+	addSession(w, "Tom", { store = store })
+	t.eq(#store.witness[GUILD], 5000, "at most 5000")
+	t.eq(store.witness[GUILD][5000].n, 5003, "the newest stays")
+	t.eq(store.secret.S, S, "secret kept within 14 days")
+	w.now = w.now + 14 * 86400
+	local again = addSession(w, "Tom", { store = store })
+	t.eq(#store.witness[GUILD], 0, "rows older than 14 days dropped")
+	t.eq(store.secret, nil, "old secret dropped")
+	again.session:onMessage("Pia", assert(Proto.encode("SPIN", { n = 2, stake = 10, level = 1, head = ZERO_HEAD, A = 1 })))
+	t.ok(store.secret and store.secret.S ~= S, "a new secret on the next answer")
+end)
+
+t.test("a restart with an open request writes a void and sends RES on the first tick", function()
+	local w, _, p = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local g = p.session:game()
+	local balance = g.balance
+	assert(g:spin())
+	flush(w)
+	-- Reload inside the window.
+	for i, s in ipairs(w.sessions) do
+		if s == p.session then table.remove(w.sessions, i) break end
+	end
+	local p2 = addSession(w, "Pia", { store = p.env.store })
+	local e = lastEntry(p2)
+	t.eq(e.type, "S", "spin entry")
+	t.eq(e.status, "void", "void")
+	t.eq(e.contribs, "", "no contributions")
+	t.eq(p2.env.store.open[GUILD].Pia, nil, "record gone")
+	t.eq(p2.session:game().balance, balance, "stake kept")
+	t.eq(#sentOf(w, "RES"), 0, "no RES before the tick")
+	p2.session:tick()
+	flush(w)
+	local res = sentOf(w, "RES", "Pia")
+	t.eq(#res, 1, "RES on the first tick")
+	t.eq(res[1].msg.status, "void", "void")
+	t.eq(res[1].msg.who, "-", "nobody")
+	t.ok(Ledger.replay(GUILD, "Pia", account(p2, "Pia").entries), "replays")
+	-- A record whose head no longer fits is dropped.
+	p2.env.store.open[GUILD].Pia = { kind = "spin", n = 9, g = 0, stake = 10, amount = 10, A = 3, head = ZERO_HEAD, time = 1 }
+	local count = #account(p2, "Pia").entries
+	local p3 = addSession(w, "Pia", { store = p2.env.store })
+	t.eq(#account(p3, "Pia").entries, count, "nothing written")
+	t.eq(p3.env.store.open[GUILD].Pia, nil, "dropped")
+end)
+
+t.test("level 1 gamble steps, a void step, the 2.5 s interval, and the account replays", function()
+	local w, _, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" }, { tokens = 5000 })
+	local g = p.session:game()
+	local spins, steps, voids = 0, 0, 0
+	for i = 1, 120 do
+		if g:state() == "gamble" then
+			local before = g.pending
+			local dropAll = voids == 0
+			if dropAll then
+				w.drop = function(text) local m = Proto.decode(text) return m and m.type == "WIT" end
+			end
+			local r, code = g:gamble()
+			t.ok(r, "gamble: " .. tostring(code))
+			t.eq(r.kind, "wait", "wait")
+			t.eq(r.what, "gamble", "what")
+			t.eq(p.env.store.open[GUILD].Pia.amount, before, "amount at risk")
+			t.eq(sentOf(w, "GAM")[#sentOf(w, "GAM")].msg.level, 1, "GAM level")
+			flush(w)
+			w.drop = nil
+			settle(w)
+			local res = events(p, "result")
+			res = res[#res]
+			if dropAll then
+				t.eq(res.kind, "void", "void step")
+				t.eq(res.what, "gamble", "what")
+				t.eq(res.got, 0, "got")
+				t.eq(res.need, 2, "need")
+				t.eq(res.pending, g.pending, "pending")
+				t.eq(res.g, r.g, "g")
+				voids = voids + 1
+				if r.g < 3 then
+					t.eq(res.pending, before, "the offer stays open")
+					t.eq(g:state(), "gamble", "can try again")
+				end
+			else
+				t.eq(res.kind, "gamble", "kind")
+				t.eq(res.amount, before, "amount")
+				t.eq(res.step, r.g, "step")
+				steps = steps + 1
+			end
+		elseif g.balance >= g.stake then
+			local r = assert(g:spin())
+			t.eq(r.kind, "wait", "wait")
+			flush(w)
+			settle(w)
+			spins = spins + 1
+		end
+		-- 1.5 s window + 1 s: the 2.5 s interval has passed.
+		local _, code = g:spin()
+		if g:state() == "idle" then
+			t.eq(code, "wait", "interval at 1.5 s")
+		end
+		w.now = w.now + 1
+		if voids > 0 and steps > 2 and spins > 15 then break end
+	end
+	t.ok(voids > 0 and steps > 0, "steps made")
+	local state = Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+	t.ok(state, "replays")
+	t.eq(state.balance, g.balance, "same balance")
+	-- Every GAM was answered with the amount bound into the value.
+	local rows = others.Tom.env.store.witness[GUILD]
+	t.ok(#rows > spins, "rows for spins and steps")
+end)
+
+t.test("the ticker at level 1 announces what the player's result gives", function()
+	local lv = { big = 2, huge = 5, legendary = 10 }
+	local w = newWorld()
+	w.line = "GSLOTS1;L=1;W=2;R=1;E=10,50,100;G=3;T=T2"
+	local o = addSession(w, "Olga")
+	local p = addSession(w, "Pia")
+	local tom = addSession(w, "Tom")
+	addSession(w, "Uma")
+	tom.env.tickerLevels = lv
+	assert(o.session:grant("Pia", 2000))
+	flush(w)
+	for _, s in ipairs(w.sessions) do s:tick() end
+	flush(w)
+	local g = p.session:game()
+	local results = {}
+	for _ = 1, 60 do
+		if g.balance < g.stake then break end
+		assert(g:spin())
+		flush(w)
+		settle(w)
+		local r = events(p, "result")
+		r = r[#r]
+		results[r.n] = r
+		if g:state() == "gamble" then g:take() end
+		w.now = w.now + 1
+	end
+	local got, n = {}, 0
+	for _, e in ipairs(events(tom, "ticker")) do
+		got[e.n] = e
+		n = n + 1
+	end
+	local expected = 0
+	for num, r in pairs(results) do
+		local level = r.round.win >= lv.legendary * r.stake and "legendary" or r.round.win >= lv.huge * r.stake and "huge"
+			or r.round.win >= lv.big * r.stake and "big" or r.round.free and "free" or nil
+		if level then
+			expected = expected + 1
+			t.ok(got[num], "announced " .. num)
+			t.eq(got[num] and got[num].win, r.round.win, "win")
+			t.eq(got[num] and got[num].level, level, "level")
+		else
+			t.eq(got[num], nil, "quiet " .. num)
+		end
+	end
+	t.ok(expected > 0, "something notable")
+	t.eq(n, expected, "no extra announcements")
 end)
 
 t.test("restart from the store keeps account, purchases and spins", function()
