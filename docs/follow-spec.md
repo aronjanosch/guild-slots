@@ -233,3 +233,22 @@ Replaces witness-spec section 8 where they differ:
   or stays silent. The luck index is the counterweight.
 - Alerts are unproven claims; a member can raise false ones against a player. They are yellow.
 - An officer who never listened gets the whole account, which is slow for a long witnessed account.
+
+## Clarifications (core)
+
+Decisions made while building the pure core (sections 1 to 5); the tests pin them.
+
+- **`LOGREQ` pairs.** `from = 0` goes with `head = -` and `from > 0` with a 32-hex head; any other pair does not encode or decode.
+- **`ALERT` fields.** `n` and `g` are not checked against each other (`g` may be 1..5 with any `n`); the five codes are the only ones on the wire, `witness_cheat` is a notice, not an alert.
+- **`HELLO.reveal`.** Any 32 lowercase hex or `-`; Proto does not check it against an earlier commit.
+- **`from` marker.** `>` + canonical decimal 1..2^31; `>0`, a marker not on the first line, or an empty item after it is `bad_pack`. `Pack.encode(entries, 0, n)` writes no marker (from 0 is the whole account). With no entries the text is the marker line alone.
+- **Start `n`.** Used only when the marker is present, on both sides; a whole account always numbers from 0, whatever `n` is passed. A start `n` that is not an integer 0..2^31 is `bad_pack`.
+- **Snapshot form.** `{ head, count, anchors, balance, n, g, pending, purchase = B text or nil, buyIds = { id, … }, payIds = { id, … } }`, id lists sorted. A state before any purchase has no `purchase` and restores to a state without settings.
+- **State carries its purchase.** `Ledger.apply` of a `B` entry stores its text as `state.purchase`, so `snapshot` needs nothing else.
+- **`restore` codes.** A malformed field or id list, a purchase text that is not a `B`, or a purchase whose id is not among `buyIds` is `bad_entry`; then `bad_commit`, `bad_settings` as in `apply`.
+- **`start` is not changed.** Verify replays on `Ledger.copy(start)`; `report.state` is that copy.
+- **Anchor with `start`.** An anchor with `anchors` at or below `start.anchors` counts as covered (no finding), whatever its head: the start may lie after the anchor's entry, so its head cannot be compared there.
+- **Luck with `start`.** The index runs over the given entries and still restarts at a payout among them; with `start` and no entries `report.luck` is nil (the look-ahead is still given).
+- **Witness time with `start`.** The `isOfficer` time for level-2 witnesses is nil until the first purchase or payout among the given entries.
+- **Alerts.** Rows that are not tables or whose `code` is not one of the five are dropped; one yellow check-7 finding `alert_<code>` (index nil) per distinct code in the order first seen; `report.alerts` is always a list (empty without the input) and is given even when the replay fails.
+- **Session for now.** The secret keeps its 14-day life and is created at session creation; `HELLO.reveal` is `-` until rotation is built; the officer sends `LOGREQ` with `from = 0`, `head = -`; anchors store the first 32 hex of `PAY.head`, and the player compares the full head.
