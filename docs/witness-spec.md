@@ -225,7 +225,7 @@ the removed audit messages, the partial-log header and `Ledger.resume` are gone 
 - **Dictionary forms.** `S`/`G` items are used only when the decoder rebuilds the text byte for byte (canonical numbers, `ok`/`void`, contributions `name:16 lowercase hex` with valid names, in any order); everything else stays `=`. A level-0 `void` spin uses `S`.
 - **Pack checks.** Pack does not range-check `A` or stakes (the ledger does); a repeated `@` name, an index outside the dictionary, or a value whose first character is above `P` (15) is `bad_pack`.
 - **`replayed` everywhere.** A numeric `known[id]` is checked on whole accounts as well; a number equal to the position counts as known, `true` keeps its meaning.
-- **Session numbers for now.** `Game/Guild.lua` keeps 200 chunks per request until the session ticket raises it to 600; `Pack.split` already cuts 220 bytes.
+- **Session numbers.** `Game/Guild.lua` allows 600 chunks per request and the lifetime `300 + 1.2 * total` on both sides (follow-spec, "Clarifications (session)"); `Pack.split` cuts 220 bytes.
 
 ## Clarifications (session)
 

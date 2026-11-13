@@ -25,9 +25,12 @@ local ONLINE_WINDOW = 300 -- seconds a sign of life counts
 local KEEP_PURCHASES = 100
 local MAX_TOKENS = 1000000000
 
-local REQUEST_TIMEOUT = 300 -- seconds a payout request stays open
-local CONFIRM_LIMIT = 270 -- seconds after which the officer can no longer confirm
-local MAX_CHUNKS = 200 -- LOG messages per request
+local REQUEST_TIMEOUT = 300 -- seconds a payout request stays open, plus LIFE_PER_CHUNK per LOG chunk
+local LIFE_PER_CHUNK = 1.2
+local CONFIRM_MARGIN = 30 -- the officer can confirm until this many seconds before the end
+local MAX_CHUNKS = 600 -- LOG messages per request
+local ALERT_WAIT = 4 -- seconds after the PAYREQ before the officer builds the report (alerts arrive)
+local LOG_REPLAY = 500 -- own entries the player replays per tick() for a partial log
 local KEEP_REQUESTS = 50
 local STEP_BUDGET = 150 -- entries verified per tick() unless env.stepBudget says otherwise
 local OSYNC_DELAY = 20 -- seconds after the first tick as an officer
@@ -60,6 +63,11 @@ local FOLLOW_STEPS = 8 -- followed ledger entries applied per tick()
 local FOLLOW_QUEUE = 50 -- followed messages waiting per player
 local FOLLOW_ENTRIES = 3000 -- entries an officer keeps per followed account
 local REASONS = { declined = true, mismatch = true, expired = true, busy = true, too_large = true, bad_log = true }
+
+-- Seconds a payout request lives: 300 + 1.2 per LOG chunk once the number is known.
+local function lifetime(total)
+	return REQUEST_TIMEOUT + LIFE_PER_CHUNK * (type(total) == "number" and total or 0)
+end
 
 -- Player request states that lock the game, and officer request states still open.
 local PLAYER_OPEN = { wait_officer = true, sending = true, wait_decision = true }
@@ -285,12 +293,12 @@ function Session:expire()
 		end
 	end
 	local r = self.request
-	if r and PLAYER_OPEN[r.status] and now - r.time >= REQUEST_TIMEOUT then
+	if r and PLAYER_OPEN[r.status] and now - r.time >= lifetime(r.total) then
 		self:setPayout("expired")
 	end
 	for i = #self.reqs, 1, -1 do
 		local q = self.reqs[i]
-		if q and now - q.time >= REQUEST_TIMEOUT then
+		if q and now - q.time >= lifetime(q.total) then
 			self:setReq(q, "expired")
 		end
 	end
@@ -775,14 +783,10 @@ function Session:commits()
 	return subtable(subtable(self.store, "commits"), self.guild)
 end
 
--- The known commit of a name, or nil. A stored commit counts (a WIT counts, the name is a witness).
-function Session:commitOf(name)
-	local c = self:commits()[name]
-	return type(c) == "table" and type(c.commit) == "string" and c.commit or nil
-end
-
--- The commit of a name heard in this session, or nil: only those are safe to sample under, since
--- the witness may have rotated its secret while this client was away.
+-- The commit of a name heard in this session, or nil. Only such a name is a witness (its WIT
+-- counts, witnessesOnline counts it) and only such a commit is safe to sample under, since the
+-- witness may have rotated its secret while this client was away. A commit stored by an earlier
+-- session does not count.
 function Session:liveCommit(name)
 	local c = self:commits()[name]
 	if type(c) == "table" and type(c.commit) == "string" and type(c.time) == "number" and c.time >= self.created then
@@ -914,7 +918,7 @@ end
 function Session:witnessesOnline(level, W)
 	local env, A = self.env, 0
 	for _, s in ipairs(self:online()) do
-		if s.name ~= self.me and self:commitOf(s.name) then
+		if s.name ~= self.me and self:liveCommit(s.name) then
 			if level == 2 and env.isOfficer(s.name) then
 				return 0
 			end
@@ -936,7 +940,7 @@ function Session:expectedWitnesses(rec, level)
 	local out, Z = {}, self.state.settings.Z
 	for _, s in ipairs(self:online()) do
 		local name = s.name
-		if name ~= self.me and self:commitOf(name) then
+		if name ~= self.me and self:liveCommit(name) then
 			local ok
 			if level == 2 then
 				ok = self.env.isOfficer(name)
@@ -987,7 +991,7 @@ end
 -- A WIT for the own open request.
 function Session:collectWit(sender, msg)
 	local q = self.wreq
-	if not q or msg.player ~= self.me or sender == self.me or q.seen[sender] or not self:commitOf(sender) then
+	if not q or msg.player ~= self.me or sender == self.me or q.seen[sender] or not self:liveCommit(sender) then
 		return
 	end
 	local rec = q.rec
@@ -1163,7 +1167,7 @@ function Session:payout()
 	end
 	return {
 		reqId = r.reqId, officer = r.officer, amount = r.amount, status = r.status, sent = r.sent,
-		total = r.total, code = r.code, time = r.time,
+		total = r.total, code = r.code, time = r.time, life = lifetime(r.total),
 	}
 end
 
@@ -1242,6 +1246,55 @@ function Session:requestPayout(officer, amount)
 	return reqId
 end
 
+-- The packed text of the request's log: the whole account, or with r.part the entries after
+-- entry r.from, numbered on from r.fromN (docs/follow-spec.md section 5).
+function Session:logText(r)
+	local entries = self.account.entries
+	if not r.part then
+		return Pack.encode(entries)
+	end
+	local list = {}
+	for i = r.from + 1, #entries do
+		list[#list + 1] = entries[i]
+	end
+	return Pack.encode(list, r.from, r.fromN)
+end
+
+-- A partial log needs the own short head after entry `from`: the account is replayed up to there,
+-- LOG_REPLAY entries per call. Returns true once r.part is decided.
+function Session:prepareLog(r)
+	local entries = self.account.entries
+	if not r.from or r.from <= 0 or r.from > #entries then
+		r.part = false
+		return true
+	end
+	local prep = self.logPrep
+	if not prep or prep.reqId ~= r.reqId then
+		prep = { reqId = r.reqId, i = 0, state = Ledger.start(self.guild, self.me) }
+		self.logPrep = prep
+	end
+	local stop = math.min(r.from, prep.i + LOG_REPLAY)
+	while prep.i < stop do
+		local i = prep.i + 1
+		local entry = Ledger.decode(entries[i])
+		if not entry or not Ledger.apply(prep.state, entry) then
+			prep.failed = true
+			break
+		end
+		prep.i = i
+	end
+	if not prep.failed and prep.i < r.from then
+		return false
+	end
+	self.logPrep = nil
+	if not prep.failed and Ledger.shortHead(prep.state) == r.fromHead then
+		r.part, r.fromN = true, prep.state.n
+	else
+		r.part = false
+	end
+	return true
+end
+
 -- Sends LOG chunks until the queue refuses one; the rest goes out on the next tick().
 function Session:pumpLog()
 	local r = self.request
@@ -1250,9 +1303,21 @@ function Session:pumpLog()
 	end
 	local chunks = self.logChunks
 	if not chunks then
-		chunks = Pack.split(Pack.encode(self.account.entries))
-		if #chunks ~= r.total then
-			return self:setPayout("failed", "mismatch") -- the account changed under a restored request
+		if r.total == 0 then
+			-- Not packed yet: decide between a partial log and the whole account.
+			if r.part == nil and not self:prepareLog(r) then
+				return
+			end
+			chunks = Pack.split(self:logText(r))
+			if #chunks > MAX_CHUNKS then
+				return self:setPayout("failed", "too_large")
+			end
+			r.total, r.sent = #chunks, 0
+		else
+			chunks = Pack.split(self:logText(r))
+			if #chunks ~= r.total then
+				return self:setPayout("failed", "mismatch") -- the account changed under a restored request
+			end
 		end
 		self.logChunks = chunks
 	end
@@ -1266,16 +1331,15 @@ function Session:pumpLog()
 	self:setPayout("wait_decision")
 end
 
+-- LOGREQ: from = 0 asks for the whole account; from > 0 for the entries after entry `from`
+-- when the own short head after it equals `head`, else the whole account is sent.
 function Session:onLogReq(sender, msg)
 	local r = self.request
 	if not r or r.status ~= "wait_officer" or r.reqId ~= msg.reqId or sender ~= r.officer or msg.player ~= self.me then
 		return
 	end
-	local chunks = Pack.split(Pack.encode(self.account.entries))
-	if #chunks > MAX_CHUNKS then
-		return self:setPayout("failed", "too_large")
-	end
-	self.logChunks, r.total, r.sent = chunks, #chunks, 0
+	r.from, r.fromHead, r.fromN, r.part = msg.from, msg.head, nil, nil
+	self.logChunks, self.logPrep, r.total, r.sent = nil, nil, 0, 0
 	self:setPayout("sending")
 	self:pumpLog()
 end
@@ -1318,7 +1382,9 @@ end
 
 -- Payout, officer side ------------------------------------------------------------------------
 
-local REQ_PUBLIC = { "reqId", "player", "amount", "time", "status", "received", "total", "progress", "code" }
+local REQ_PUBLIC = {
+	"reqId", "player", "amount", "time", "status", "received", "total", "progress", "code", "followed", "partial",
+}
 
 -- The request record without the account text; the report without the replayed state.
 local function requestCopy(r)
@@ -1335,6 +1401,7 @@ local function requestCopy(r)
 		end
 		c.report = rep
 	end
+	c.life = lifetime(r.total)
 	return c
 end
 
@@ -1361,7 +1428,8 @@ end
 function Session:setReq(r, status, code)
 	r.status, r.code = status, code
 	if not OFFICER_OPEN[status] then
-		r.co, r.entries, r.chunks = nil, nil, nil
+		r.co, r.entries, r.chunks, r.start, r.base = nil, nil, nil, nil, nil
+		r.fromState, r.fromBase, r.prior = nil, nil, nil
 		for i, q in ipairs(self.reqs) do
 			if q == r then
 				table.remove(self.reqs, i)
@@ -1404,10 +1472,78 @@ function Session:onPayReq(sender, msg)
 		self:sendReject(r.reqId, sender, "too_large")
 		return self:setReq(r, "failed", "too_large")
 	end
-	if not self:send("LOGREQ", { reqId = r.reqId, player = sender, from = 0, head = "-" }) then
+	r.deciding = true
+	event(self, "request", requestCopy(r))
+	self:payDecide(r)
+end
+
+-- What the officer's follow record offers for a payout check: { state, count, base, entries }
+-- (base/entries only with an officer's entry list) or nil. A lost record still counts: its
+-- snapshot is a true state of the past.
+function Session:followPoint(player)
+	local rec = self:followRecord(player)
+	if not rec then
+		return nil
+	end
+	local state = Ledger.restore(self.guild, player, rec.snap)
+	if not state or not state.settings then
+		return nil
+	end
+	local point = { state = state, count = type(rec.count) == "number" and rec.count or nil }
+	if type(rec.entries) == "table" and type(rec.base) == "table" then
+		local base = Ledger.restore(self.guild, player, rec.base)
+		if base then
+			local list = {}
+			for i, text in ipairs(rec.entries) do
+				list[i] = text
+			end
+			point.base, point.entries = base, list
+		end
+	end
+	return point
+end
+
+-- Decides how to get the account once the followed messages of that player are applied
+-- (docs/follow-spec.md section 5): nothing missing, a partial log, or the whole account.
+function Session:payDecide(r)
+	if not r.deciding then
+		return
+	end
+	local f = self.fol[r.player]
+	if f and f.queued > 0 then
+		return -- the PAYREQ came after these: wait until they are applied
+	end
+	r.deciding = nil
+	local point = self:followPoint(r.player)
+	if point and Ledger.shortHead(point.state) == r.head and (point.count == nil or point.count == r.count) then
+		r.followed = true
+		if point.entries then
+			r.start, r.base = point.base, point.base
+			return self:startVerify(r, point.entries)
+		end
+		r.start, r.base = point.state, point.state
+		return self:startVerify(r, {})
+	end
+	local fields = { reqId = r.reqId, player = r.player, from = 0, head = "-" }
+	if point and point.count and point.count >= 1 and point.count < r.count then
+		fields.from, fields.head = point.count, Ledger.shortHead(point.state)
+		r.from, r.fromState = point.count, point.state
+		if point.entries then
+			r.fromBase, r.prior = point.base, point.entries
+		end
+	end
+	if not self:send("LOGREQ", fields) then
 		return self:setReq(r, "failed", "send")
 	end
-	event(self, "request", requestCopy(r))
+end
+
+-- Requests waiting for their decision (tick).
+function Session:payDecideAll()
+	for _, r in ipairs(self.reqs) do
+		if r.deciding and r.status == "fetching" then
+			self:payDecide(r)
+		end
+	end
 end
 
 function Session:onLog(sender, msg)
@@ -1433,21 +1569,57 @@ function Session:onLog(sender, msg)
 	if r.received < r.total then
 		return
 	end
-	local entries, code = Pack.decode(table.concat(r.chunks, "", 1, r.total), r.count)
+	local startN = r.fromState and r.fromState.n or 0
+	local entries, from = Pack.decode(table.concat(r.chunks, "", 1, r.total), r.count, startN)
 	r.chunks = nil
 	if not entries then
-		local reason = code == "too_many" and "mismatch" or "bad_log"
+		local reason = from == "too_many" and "mismatch" or "bad_log"
 		self:sendReject(r.reqId, r.player, reason)
 		return self:setReq(r, "failed", reason)
 	end
-	if #entries ~= r.count then
+	if from ~= nil and from ~= r.from then
+		self:sendReject(r.reqId, r.player, "bad_log")
+		return self:setReq(r, "failed", "bad_log")
+	end
+	if #entries ~= r.count - (from or 0) then
 		self:sendReject(r.reqId, r.player, "mismatch")
 		return self:setReq(r, "failed", "mismatch")
 	end
+	if from then
+		-- A partial log: on top of the officer's entries since its base, or of the followed state.
+		r.partial = true
+		if r.prior then
+			local all = r.prior
+			for _, text in ipairs(entries) do
+				all[#all + 1] = text
+			end
+			r.start, r.base, entries = r.fromBase, r.fromBase, all
+		else
+			r.start, r.base = r.fromState, r.fromState
+		end
+	end
+	r.fromState, r.fromBase, r.prior = nil, nil, nil
 	self:startVerify(r, entries)
 end
 
+-- Holds the entries to check; the check starts in verifyStep once ALERT_WAIT seconds have passed
+-- since the PAYREQ, so the alerts of other clients are in. r.start = the state the entries follow
+-- (nil: the whole account), r.base = the state the officer's entry list starts from.
 function Session:startVerify(r, entries)
+	r.entries = entries
+	self:setReq(r, "checking")
+end
+
+-- The alerts for a request: those heard from others and the own ones about the player.
+function Session:requestAlerts(r)
+	local list = self:heardAlerts(r.reqId)
+	for _, a in ipairs(self:alerts(r.player)) do
+		list[#list + 1] = { by = self.me, player = a.player, code = a.code, n = a.n, g = a.g, time = a.time }
+	end
+	return list
+end
+
+function Session:verifyInput(r)
 	local env = self.env
 	local known = {}
 	local seen = self.store.seen and self.store.seen[self.guild] and self.store.seen[self.guild][r.player]
@@ -1459,10 +1631,11 @@ function Session:startVerify(r, entries)
 	local heardList = self.store.heard and self.store.heard[self.guild]
 	local heard = type(heardList) == "table" and type(heardList[r.player]) == "table" and heardList[r.player].live or nil
 	local budget = env.stepBudget or STEP_BUDGET
+	local entries = r.entries
 	local steps, total = 0, #entries
-	local input = {
-		guild = self.guild, player = r.player, entries = entries, amount = r.amount,
-		anchor = self:anchor(r.player), known = known,
+	return {
+		guild = self.guild, player = r.player, entries = entries, amount = r.amount, start = r.start,
+		anchor = self:anchor(r.player), known = known, audit = {}, alerts = self:requestAlerts(r),
 		heard = type(heard) == "table" and { n = heard.n, g = heard.g, head = heard.head } or nil,
 		isOfficer = function(name) return env.isOfficer(name) and true or false end,
 		onStep = function(i)
@@ -1474,14 +1647,29 @@ function Session:startVerify(r, entries)
 			end
 		end,
 	}
-	r.entries = entries
-	r.co = coroutine.create(function() return Verify.run(input) end)
-	self:setReq(r, "checking")
+end
+
+-- No red finding of checks 1 to 6: the replayed state can be followed on.
+local function trusted(report)
+	if not report.state then
+		return false
+	end
+	for _, f in ipairs(report.findings) do
+		if f.level == "red" and f.check <= 6 then
+			return false
+		end
+	end
+	return true
 end
 
 -- Resumes the verification of the oldest request being checked by one step budget.
 function Session:verifyStep()
+	local now = self.env.now()
 	for _, r in ipairs(self.reqs) do
+		if r.status == "checking" and not r.co and now - r.time >= ALERT_WAIT - 1e-9 then
+			local input = self:verifyInput(r)
+			r.co = coroutine.create(function() return Verify.run(input) end)
+		end
 		if r.status == "checking" and r.co then
 			local ok, report = coroutine.resume(r.co)
 			if not ok then
@@ -1489,11 +1677,21 @@ function Session:verifyStep()
 				return self:setReq(r, "failed", "verify")
 			end
 			if coroutine.status(r.co) == "dead" then
+				local entries = r.entries
 				r.co, r.entries = nil, nil
 				if report.state and Ledger.shortHead(report.state) ~= r.head then
 					self:sendReject(r.reqId, r.player, "mismatch")
 					return self:setReq(r, "failed", "mismatch")
 				end
+				if trusted(report) then
+					-- Starting point 3: follow on from the replayed state.
+					local texts = {}
+					for i, e in ipairs(entries) do
+						texts[i] = type(e) == "string" and e or Ledger.encode(e)
+					end
+					self:followStart(r.player, report.state, r.count, r.base or Ledger.start(self.guild, r.player), texts)
+				end
+				r.start, r.base = nil, nil
 				r.report, r.progress = report, 1
 				self:setReq(r, "ready")
 			end
@@ -1513,7 +1711,7 @@ function Session:confirm(reqId)
 		return nil, "not_ready"
 	end
 	local now = env.now()
-	if now - r.time >= CONFIRM_LIMIT then
+	if now - r.time >= lifetime(r.total) - CONFIRM_MARGIN then
 		self:sendReject(r.reqId, r.player, "expired")
 		self:setReq(r, "expired")
 		return nil, "expired"
@@ -1546,6 +1744,8 @@ function Session:confirm(reqId)
 	r.payId = entry.payId
 	self:storeAnchor(r.player, { anchors = after.anchors, head = head, time = entry.time, by = self.me })
 	self:markSeen(r.player, entry.payId)
+	-- The follow record moves to the state after the payout, with the officer's base there.
+	self:followStart(r.player, after, r.count + 1)
 	self:setReq(r, "paid")
 	return entry.payId
 end
@@ -2344,9 +2544,10 @@ function Session:tick()
 	self:settleRequest()
 	self:pumpRes()
 	self:pumpLog()
+	self:followTick()
+	self:payDecideAll()
 	self:verifyStep()
 	self:osync()
-	self:followTick()
 	self:pumpAlerts()
 	if not self.witPrune or now - self.witPrune >= TICKER_WIT_AGE then
 		self.witPrune = now
