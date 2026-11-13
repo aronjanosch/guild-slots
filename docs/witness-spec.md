@@ -183,7 +183,9 @@ ck = first 16 hex of Sha256.hex("GS1|CK|" | n | K | line)
 ```
 
 with `n` the account's spin number, `K` and `line` the key and the stored settings line of the
-purchase in force (`Engine.dec` for `n`). `PAY` carries `n` and `ck`. Every client that stores the
+purchase in force (`Engine.dec` for `n`). One implementation serves the session and Verify:
+`Ledger.checkpointKey(n, K, line) -> 16 hex`, which hashes the text
+`"GS1|CK|" .. dec(n) .. "|" .. K .. "|" .. line`. `PAY` carries `n` and `ck`. Every client that stores the
 anchor of a `PAY` (payout-spec, "Anchors") also stores
 
 ```
@@ -317,6 +319,26 @@ The report's `unconfirmed` is shown to the officer. Request status order on the 
 | `AUD` / `AUDR` | whisper, list per witness | GUILD, 8 items, the witness adds what `RES` left out | whisper unmeasured; one message per witness keeps the budget |
 | Log range | since the last payout | since the last payout the officer holds a checkpoint for, else all | the cut needs a state both sides agree on; `PAY` now carries it |
 | `Z` at the witness | from the request | from the witness's own guild info | the witness does not know the player's account |
+
+## Clarifications (core)
+
+Decisions made while building the pure core (sections 1, 5 and 6); the tests pin them.
+
+- **`ck` text.** `"GS1|CK|" .. dec(n) .. "|" .. K .. "|" .. line` (one bar after `CK`, `K` as 64 hex), exported as `Ledger.checkpointKey`.
+- **Audit items.** `Proto.auditItems` gives `kind = "spin"` or `"gam"`, `g = 0` for a spin, gamble `g` 1..5 (as in `GAM`), `n` 1..2^31; an item `=-` gives `value` and `flag` nil.
+- **No mixed lists.** A list holds only `AUD` items or only answers; `AUD` accepts only the first and `AUDR` only the second; `-` is valid in both.
+- **Long audit messages.** Eight items with long names and large numbers can exceed 255 bytes; `encode` then returns `too_long` and the sender has to send fewer items.
+- **`LOG` size.** A 220-byte payload fits in 255 bytes while `total` has at most five digits; `seq`/`total` still decode up to 2^31 so a too large log can be refused.
+- **Dictionary forms.** `S`/`G` items are used only when the decoder rebuilds the text byte for byte (canonical numbers, `ok`/`void`, contributions `name:16 lowercase hex` with valid names, in any order); everything else stays `=`. A level-0 `void` spin uses `S`.
+- **Pack checks.** Pack does not range-check `A` or stakes (the ledger does); a repeated `@` name, an index outside the dictionary, or a value whose first character is above `P` (15) is `bad_pack`.
+- **Header form.** `head` is 64 lowercase hex, `n` 0..2^31; the second and third lines must start with `P|` and `B|` (Ledger.resume checks the rest); with no entries the text ends after the purchase line. `encode` does not validate the header.
+- **`Ledger.resume` codes.** A malformed `cp` (head, `n`, `anchors` below 2, `count`) or a payout text that is not a `P` / purchase text that is not a `B` gives `bad_entry`.
+- **Mismatch report.** With `checkpoint_mismatch` the report holds only that finding: light red, `unconfirmed = 0`, no `balance`, `state`, `luck` or `lookahead`.
+- **Anchor below the checkpoint.** An anchor with fewer `anchors` than the checkpoint counts as covered by it (no finding); one equal to it is compared with the short head after the payout.
+- **`replayed` everywhere.** A numeric `known[id]` is checked on whole accounts as well; a number equal to the position counts as known, `true` keeps its meaning.
+- **Check 4 at the checkpoint.** A `heard` with `n` at or below the checkpoint's `n` is skipped whatever its `g` (the payout ends any gamble of spin `n`).
+- **Header purchase and time.** No check 2 or 3 findings for the header's purchase or payout; the `isOfficer` time for level-2 witnesses starts at the payout's `time`.
+- **Session numbers for now.** `Game/Guild.lua` keeps 200 chunks per request until the session ticket raises it to 600; `Pack.split` already cuts 220 bytes.
 
 ## Clarifications (session)
 

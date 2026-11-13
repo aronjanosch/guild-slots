@@ -364,6 +364,43 @@ function Ledger.apply(state, entry)
 	return info
 end
 
+-- Checkpoints (docs/witness-spec.md section 6) ------------------------------------------------
+
+-- The digest PAY and CSYNC carry: binds the spin number to the key and settings in force.
+function Ledger.checkpointKey(n, K, line)
+	return sub(Sha256.hex("GS1|CK|" .. dec(n) .. "|" .. K .. "|" .. line), 1, 16)
+end
+
+-- cp = { head = 64 hex before the payout, n, payout = P text, purchase = B text,
+--        anchors = B/P count after the payout, count = entries before the suffix or nil }.
+-- Returns the state right after the payout, or nil, code.
+function Ledger.resume(guild, player, cp)
+	if type(cp) ~= "table" or not isHex(cp.head, 64) or not isInt(cp.n, 0, MAX_SPIN)
+		or not isInt(cp.anchors, 2, MAX_SPIN) or (cp.count ~= nil and not isInt(cp.count, 0, MAX_SPIN)) then
+		return nil, "bad_entry"
+	end
+	local p, b = Ledger.decode(cp.payout), Ledger.decode(cp.purchase)
+	if not p or p.type ~= "P" or not b or b.type ~= "B" then
+		return nil, "bad_entry"
+	end
+	if Engine.commit(b.seed) ~= b.commit then
+		return nil, "bad_commit"
+	end
+	local settings = Settings.parse(b.line)
+	if not settings then
+		return nil, "bad_settings"
+	end
+	local state = Ledger.start(guild, player)
+	local K = Engine.purchaseKey(b.buyId, b.seed, b.nonce)
+	state.head = Sha256.hex(cp.head .. "|" .. Ledger.encode(p))
+	state.count, state.anchors = cp.count or 0, cp.anchors
+	state.balance, state.n = p.balanceAfter, cp.n
+	state.K, state.keyed, state.settings, state.line, state.tbl = K, Sha256.keyed(K), settings, b.line, Tables.get(settings.T)
+	state.buyIds[b.buyId] = true
+	state.payIds[p.payId] = true
+	return state
+end
+
 -- entries are tables or text forms. Returns state, or nil, code, index of the failing entry.
 function Ledger.replay(guild, player, entries, onStep)
 	local state = Ledger.start(guild, player)

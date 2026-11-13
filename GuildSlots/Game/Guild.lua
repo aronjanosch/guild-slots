@@ -1281,7 +1281,7 @@ function Session:onPayReq(sender, msg)
 		self:sendReject(r.reqId, sender, "too_large")
 		return self:setReq(r, "failed", "too_large")
 	end
-	if not self:send("LOGREQ", { reqId = r.reqId, player = sender }) then
+	if not self:send("LOGREQ", { reqId = r.reqId, player = sender, from = 0 }) then
 		return self:setReq(r, "failed", "send")
 	end
 	event(self, "request", requestCopy(r))
@@ -1415,6 +1415,7 @@ function Session:confirm(reqId)
 	local ok = self:send("PAY", {
 		reqId = r.reqId, payId = entry.payId, player = r.player, amount = entry.amount,
 		balanceAfter = entry.balanceAfter, time = entry.time, head = head, anchors = after.anchors,
+		n = after.n, ck = Ledger.checkpointKey(after.n, after.K, after.line),
 	})
 	if not ok then
 		return nil, "send"

@@ -1,10 +1,14 @@
 local _, ns = ...
 
 -- Packs an account (entry text forms) into one text for the LOG messages and back
--- (docs/payout-spec.md section 3). Items are separated by "\n":
---   =<entry text>            one entry, verbatim
---   s<stake>[*<count>]       level-0 spins S|n|<stake>|0|ok|, numbered on from the last spin
---   g[*<count>]              level-0 gamble steps G|n|g|0|ok| of the current spin
+-- (docs/payout-spec.md section 3, docs/witness-spec.md section 5). Items are separated by "\n":
+--   =<entry text>              one entry, verbatim
+--   s<stake>[*<count>]         level-0 spins S|n|<stake>|0|ok|, numbered on from the last spin
+--   g[*<count>]                level-0 gamble steps G|n|g|0|ok| of the current spin
+--   @<name>                    adds a name to the dictionary (index 1, 2, ...)
+--   S<stake>|<A>|<o|v>|<list>  spin n + 1 with status and contributions <value64><index>,...
+--   G<A>|<o|v>|<list>          gamble step g + 1 of the current spin, same list form
+-- A partial log starts with three lines: ^<head 64 hex>|<n>, the payout text, the purchase text.
 -- Pure Lua 5.1. decode never raises, whatever the input.
 
 local Engine = ns.Engine
@@ -12,14 +16,15 @@ local Engine = ns.Engine
 local Pack = {}
 ns.Pack = Pack
 
-local find, sub, match, concat = string.find, string.sub, string.match, table.concat
-local dec = Engine.dec
+local find, sub, match, concat, byte, floor = string.find, string.sub, string.match, table.concat, string.byte, math.floor
+local dec, validName = Engine.dec, Engine.validName
 
-Pack.CHUNK = 200
+Pack.CHUNK = 220
 -- decode never builds more entries than this unless the caller passes its own limit.
 Pack.MAX_ENTRIES = 100000
 
 local MAX_NUMBER = 9007199254740991 -- 2^53 - 1
+local MAX_SPIN = 2147483648 -- 2^31
 
 -- Canonical decimal of at most 16 digits below 2^53, or nil.
 local function number(text)
@@ -58,10 +63,133 @@ local function stepText(n, g)
 	return "G|" .. dec(n) .. "|" .. dec(g) .. "|0|ok|"
 end
 
-function Pack.encode(entries)
+-- Values ------------------------------------------------------------------------------------------
+
+-- A 64-bit value as 11 characters: the top 4 bits, then ten characters of 6 bits. Three hex
+-- digits (12 bits) make two characters, so no bit operations are needed.
+local ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+local HEX = "0123456789abcdef"
+local DIGIT = {} -- character byte -> 0..63
+for i = 1, 64 do
+	DIGIT[byte(ALPHABET, i)] = i - 1
+end
+
+local function at(s, i)
+	return sub(s, i + 1, i + 1)
+end
+
+local function toValue64(hex)
+	local out = { at(ALPHABET, tonumber(sub(hex, 1, 1), 16)) }
+	for i = 2, 16, 3 do
+		local v = tonumber(sub(hex, i, i + 2), 16)
+		out[#out + 1] = at(ALPHABET, floor(v / 64)) .. at(ALPHABET, v % 64)
+	end
+	return concat(out)
+end
+
+-- 11 characters to 16 hex, or nil (wrong length, a character outside the alphabet, top above 15).
+local function fromValue64(text)
+	if #text ~= 11 then
+		return nil
+	end
+	local top = DIGIT[byte(text, 1)]
+	if not top or top > 15 then
+		return nil
+	end
+	local out = { at(HEX, top) }
+	for i = 2, 10, 2 do
+		local a, b = DIGIT[byte(text, i)], DIGIT[byte(text, i + 1)]
+		if not a or not b then
+			return nil
+		end
+		local v = a * 64 + b
+		out[#out + 1] = at(HEX, floor(v / 256)) .. at(HEX, floor(v / 16) % 16) .. at(HEX, v % 16)
+	end
+	return concat(out)
+end
+
+-- Dictionary items --------------------------------------------------------------------------------
+
+local STATUS = { ok = "o", void = "v" }
+local STATUS_TEXT = { o = "ok", v = "void" }
+
+-- The fields of an S or G entry text, when a dictionary item can hold them, or nil:
+-- n, g (nil for S), stake text (nil for G), A text, status letter, { { name, value }, ... }.
+local function parseFields(text)
+	local n, g, stake, A, status, list
+	if sub(text, 1, 2) == "S|" then
+		n, stake, A, status, list = match(text, "^S|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+		local s = number(stake)
+		if not s or s < 1 then
+			return nil
+		end
+	elseif sub(text, 1, 2) == "G|" then
+		n, g, A, status, list = match(text, "^G|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+		g = number(g)
+		if not g then
+			return nil
+		end
+	else
+		return nil
+	end
+	n = number(n)
+	if not n or not number(A) or not STATUS[status] then
+		return nil
+	end
+	local contribs = {}
+	if list ~= "" then
+		local pos = 1
+		while true do
+			local comma = find(list, ",", pos, true)
+			local name, value = match(sub(list, pos, comma and comma - 1 or #list), "^(.*):(.*)$")
+			if not name or not validName(name) or #value ~= 16 or find(value, "[^0-9a-f]") then
+				return nil
+			end
+			contribs[#contribs + 1] = { name, value }
+			if not comma then
+				break
+			end
+			pos = comma + 1
+		end
+	end
+	return n, g, stake, A, STATUS[status], contribs
+end
+
+-- The contributions text of a dictionary item's list, or nil.
+local function listText(list, dict)
+	if list == "" then
+		return ""
+	end
+	local parts, pos = {}, 1
+	while true do
+		local comma = find(list, ",", pos, true)
+		local item = sub(list, pos, comma and comma - 1 or #list)
+		local value = fromValue64(sub(item, 1, 11))
+		local index = number(sub(item, 12))
+		local name = index and dict[index]
+		if not value or not name then
+			return nil
+		end
+		parts[#parts + 1] = name .. ":" .. value
+		if not comma then
+			return concat(parts, ",")
+		end
+		pos = comma + 1
+	end
+end
+
+-- Encode ------------------------------------------------------------------------------------------
+
+function Pack.encode(entries, header)
 	local items = {}
-	local n, g = 0, 0
+	if header then
+		items[1] = "^" .. header.head .. "|" .. dec(header.n)
+		items[2] = header.payout
+		items[3] = header.purchase
+	end
+	local n, g = header and header.n or 0, 0
 	local kind, stake, count = nil, nil, 0 -- the run being collected: "s" or "g"
+	local dict, names = {}, 0 -- name -> dictionary index
 
 	local function flush()
 		if kind then
@@ -69,6 +197,50 @@ function Pack.encode(entries)
 			items[#items + 1] = count > 1 and (item .. "*" .. count) or item
 		end
 		kind, stake, count = nil, nil, 0
+	end
+
+	-- Writes an in-sequence S/G entry as a dictionary item; false when it does not fit one.
+	local function dictItem(text)
+		if not n or not g then
+			return false
+		end
+		local en, eg, estake, A, status, contribs = parseFields(text)
+		local start
+		if not en then
+			return false
+		elseif estake and en == n + 1 then
+			start = "S|" .. dec(en) .. "|" .. estake
+		elseif eg and en == n and eg == g + 1 then
+			start = "G|" .. dec(en) .. "|" .. dec(eg)
+		else
+			return false
+		end
+		-- The decoder rebuilds the text from the parts: it must be this very text.
+		local parts = {}
+		for i, c in ipairs(contribs) do
+			parts[i] = c[1] .. ":" .. c[2]
+		end
+		if start .. "|" .. A .. "|" .. STATUS_TEXT[status] .. "|" .. concat(parts, ",") ~= text then
+			return false
+		end
+		flush()
+		local list = {}
+		for i, c in ipairs(contribs) do
+			if not dict[c[1]] then
+				names = names + 1
+				dict[c[1]] = names
+				items[#items + 1] = "@" .. c[1]
+			end
+			list[i] = toValue64(c[2]) .. dict[c[1]]
+		end
+		local prefix = estake and ("S" .. estake .. "|") or "G"
+		items[#items + 1] = prefix .. A .. "|" .. status .. "|" .. concat(list, ",")
+		if estake then
+			n, g = en, 0
+		else
+			g = eg
+		end
+		return true
 	end
 
 	for _, text in ipairs(entries) do
@@ -87,7 +259,7 @@ function Pack.encode(entries)
 			end
 			count = count + 1
 			g = g + 1
-		else
+		elseif not dictItem(text) then
 			flush()
 			items[#items + 1] = "=" .. text
 			n, g = track(text, n, g)
@@ -97,17 +269,44 @@ function Pack.encode(entries)
 	return concat(items, "\n")
 end
 
+-- Decode ------------------------------------------------------------------------------------------
+
+-- The header of a partial log and the position right after its third line, or nil.
+local function readHeader(text)
+	local head, nText, payout, purchase, after = match(text, "^%^([^\n|]*)|([^\n]*)\n([^\n]*)\n([^\n]*)()")
+	if not head or #head ~= 64 or find(head, "[^0-9a-f]") then
+		return nil
+	end
+	local n = number(nText)
+	if not n or n > MAX_SPIN or sub(payout, 1, 2) ~= "P|" or sub(purchase, 1, 2) ~= "B|" then
+		return nil
+	end
+	return { head = head, n = n, payout = payout, purchase = purchase }, after
+end
+
+-- Returns entries, header (nil for a whole account), or nil, code.
 function Pack.decode(text, limit)
 	if type(text) ~= "string" then
 		return nil, "bad_pack"
 	end
 	limit = limit or Pack.MAX_ENTRIES
 	local entries = {}
-	if text == "" then
+	local header, pos = nil, 1
+	local n, g = 0, 0
+	if sub(text, 1, 1) == "^" then
+		header, pos = readHeader(text)
+		if not header then
+			return nil, "bad_pack"
+		end
+		if pos > #text then
+			return entries, header
+		end
+		pos = pos + 1 -- the "\n" after the purchase line
+		n = header.n
+	elseif text == "" then
 		return entries
 	end
-	local n, g = 0, 0
-	local pos = 1
+	local dict, inDict = {}, {}
 	while true do
 		local nl = find(text, "\n", pos, true)
 		local item = sub(text, pos, nl and nl - 1 or #text)
@@ -122,6 +321,43 @@ function Pack.decode(text, limit)
 			end
 			entries[#entries + 1] = entry
 			n, g = track(entry, n, g)
+		elseif head == "@" then
+			local name = sub(item, 2)
+			if not validName(name) or inDict[name] then
+				return nil, "bad_pack"
+			end
+			inDict[name] = true
+			dict[#dict + 1] = name
+		elseif head == "S" or head == "G" then
+			local stake, A, status, list
+			if head == "S" then
+				stake, A, status, list = match(item, "^S([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+				local s = number(stake)
+				if not s or s < 1 then
+					return nil, "bad_pack"
+				end
+			else
+				A, status, list = match(item, "^G([^|]*)|([^|]*)|([^|]*)$")
+			end
+			local contribs = list and listText(list, dict)
+			if not contribs or not number(A) or not STATUS_TEXT[status] or not n or not g then
+				return nil, "bad_pack"
+			end
+			if #entries >= limit then
+				return nil, "too_many"
+			end
+			if (head == "S" and n + 1 > MAX_NUMBER) or (head == "G" and g + 1 > MAX_NUMBER) then
+				return nil, "bad_pack"
+			end
+			local entry
+			if head == "S" then
+				n, g = n + 1, 0
+				entry = "S|" .. dec(n) .. "|" .. stake
+			else
+				g = g + 1
+				entry = "G|" .. dec(n) .. "|" .. dec(g)
+			end
+			entries[#entries + 1] = entry .. "|" .. A .. "|" .. STATUS_TEXT[status] .. "|" .. contribs
 		elseif head == "s" or head == "g" then
 			local body, countText = match(item, "^.([^*]*)%*(.*)$")
 			if not body then
@@ -167,7 +403,7 @@ function Pack.decode(text, limit)
 		end
 		pos = nl + 1
 	end
-	return entries
+	return entries, header
 end
 
 function Pack.split(text, size)
