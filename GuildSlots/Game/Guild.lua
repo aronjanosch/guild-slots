@@ -3,7 +3,8 @@ local _, ns = ...
 -- The guild session at security level 0 (docs/guild-spec.md section 6): the own account, token
 -- purchases between an officer and a player, level-0 spins and gamble steps, and presence.
 -- Payouts, anchors and OSYNC follow docs/payout-spec.md section 4. Witnesses at level 1 and 2
--- (both sides) and the level-1/2 ticker follow docs/witness-spec.md sections 2 to 4.
+-- (both sides) and the level-1/2 ticker follow docs/witness-spec.md sections 2 to 4. The witness
+-- commit, following, alerts and early settling follow docs/follow-spec.md sections 2, 3, 4 and 6.
 -- Pure Lua 5.1: clock, random text, sending and the guild data all come in through `env`.
 -- onMessage never raises on any text a sender may put on the wire.
 
@@ -50,6 +51,14 @@ local TICKER_WIT_AGE = 10 -- seconds they are kept
 local LIVE_WIT_MAX = 64 -- WIT values kept per heard request of another player
 local SAMPLE_ROWS = 20 -- rows per sample reservoir
 local ALERT_KEEP = 200 -- own alerts per guild
+local ALERT_SEND = 3 -- ALERT messages per PAYREQ
+local ALERT_DELAY = 3 -- seconds, the most an ALERT batch waits after the PAYREQ (random 0..3)
+local ALERT_GIVE_UP = 10 -- seconds after its due time a batch that found no budget is dropped
+local ALERT_IN_MAX = 50 -- ALERT rows kept per reqId
+local OMIT_MARGIN = 0.5 -- seconds a WIT must precede the RES to count as omitted
+local FOLLOW_STEPS = 8 -- followed ledger entries applied per tick()
+local FOLLOW_QUEUE = 50 -- followed messages waiting per player
+local FOLLOW_ENTRIES = 3000 -- entries an officer keeps per followed account
 local REASONS = { declined = true, mismatch = true, expired = true, busy = true, too_large = true, bad_log = true }
 
 -- Player request states that lock the game, and officer request states still open.
@@ -150,6 +159,14 @@ function Guild.new(env)
 		declined = false,
 		created = env.now(),
 		live = {}, -- player -> the newest SPIN/GAM heard from that player, with its WIT values
+		fol = {}, -- player -> { state, req, trusted, queued } of the followed account (in memory)
+		fq = {}, -- followed steps waiting, in arrival order: { player, k, … }
+		fqHead = 1, -- index of the oldest waiting step
+		fqTail = 0, -- index of the newest
+		payreqs = {}, -- reqId -> { player, count, head, officer, time } of every PAYREQ heard
+		alertsIn = {}, -- reqId -> { { by, player, code, n, g, time }, … } ALERT messages heard
+		alertOut = {}, -- ALERT batches waiting for their delay: { reqId, player, due, until, rows }
+		witSent = {}, -- "player|kind|n|g" -> time the own WIT for that request went out
 	}, Session)
 
 	local accounts = subtable(subtable(self.store, "accounts"), self.guild)
@@ -261,6 +278,10 @@ function Session:expire()
 		if now - w.started >= 2 * STEP_TIMEOUT then
 			self.watch[id] = nil
 			self:dropKey(w.player, w.time)
+			if w.nonce then
+				-- The player answered but the seed was not heard: the purchase may have completed.
+				self:followQueue(w.player, { k = "lost" })
+			end
 		end
 	end
 	local r = self.request
@@ -406,7 +427,8 @@ end
 
 -- Guild ticker: the key and rules of the latest complete purchase heard for another player.
 -- store.keys[guild][player] = { K, line, time }; at most KEEP_KEYS players, the oldest dropped.
-function Session:storeKey(w, K, line)
+-- `purchase` is the purchase entry text: a PAY restarts following from it (docs/follow-spec.md 3).
+function Session:storeKey(w, K, line, purchase)
 	if w.player == self.me or type(w.time) ~= "number" then
 		return
 	end
@@ -415,7 +437,7 @@ function Session:storeKey(w, K, line)
 	if type(cur) == "table" and type(cur.time) == "number" and cur.time > w.time then
 		return
 	end
-	list[w.player] = { K = K, line = line, time = w.time }
+	list[w.player] = { K = K, line = line, time = w.time, purchase = purchase }
 	local count = 0
 	for _ in pairs(list) do
 		count = count + 1
@@ -468,16 +490,19 @@ function Session:purchaseAnchor(w, seed)
 	local line = w.line
 	if not parsedLine(line) or Proto.lineHash(line) ~= w.lineHash then
 		self:dropKey(w.player, w.time)
+		self:followQueue(w.player, { k = "lost" }) -- the account changed in a way this client cannot follow
 		return
 	end
-	self:storeKey(w, Engine.purchaseKey(w.buyId, seed, w.nonce), line)
 	local text = Ledger.encode({
 		type = "B", buyId = w.buyId, officer = w.officer, tokens = w.tokens, commit = w.commit, seed = seed,
 		nonce = w.nonce, time = w.time, line = line,
 	})
+	self:storeKey(w, Engine.purchaseKey(w.buyId, seed, w.nonce), line, text)
 	if not text then
 		return
 	end
+	self:followQueue(w.player, { k = "buy", text = text, buyId = w.buyId, head = w.head, anchors = w.anchors },
+		w.anchors == 0)
 	self:storeAnchor(w.player, {
 		anchors = w.anchors + 1, head = sub(Sha256.hex(w.head .. "|" .. text), 1, 32), time = w.time, by = w.officer,
 	})
@@ -510,9 +535,15 @@ end
 
 function Session:watchBuy3(sender, msg)
 	local w = self.watch[msg.buyId]
-	if w and w.nonce and sender == w.officer then
+	if w and sender == w.officer then
 		self.watch[msg.buyId] = nil
-		self:purchaseAnchor(w, msg.seed)
+		if w.nonce then
+			self:purchaseAnchor(w, msg.seed)
+		else
+			-- The BUY2 was missed: the player may now hold a purchase this client cannot rebuild.
+			self:dropKey(w.player, w.time)
+			self:followQueue(w.player, { k = "lost" })
+		end
 	end
 end
 
@@ -836,6 +867,7 @@ function Session:answerRequest(sender, msg, kind)
 	end
 	if self:send("WIT", { player = sender, kind = kind, n = msg.n, g = g, value = row.value }) then
 		rate.count = rate.count + 1
+		self.witSent[witKey(sender, kind, msg.n, g)] = now
 	end
 end
 
@@ -857,6 +889,14 @@ function Session:markWitness(sender, msg)
 		row.res = hit and "in" or "out"
 	else
 		row.res = hit and "void_in" or "void_out"
+	end
+	-- Left out although the own WIT went out in time. With 8 included the limit may have left it
+	-- out, so only fewer than 8 counts.
+	local key = witKey(sender, msg.kind, msg.n, msg.g)
+	local sent = self.witSent[key]
+	self.witSent[key] = nil
+	if not hit and sent and self.env.now() - sent >= OMIT_MARGIN - 1e-9 and (msg.who == "-" or #msg.who < 32) then
+		self:addAlert(sender, "omitted", msg.n, msg.g)
 	end
 end
 
@@ -1639,6 +1679,393 @@ function Session:hearWit(sender, msg)
 	end
 end
 
+-- Following (docs/follow-spec.md section 3) ----------------------------------------------------
+-- store.follow[guild][player] = { snap, count, lost, entries, base } (see the spec). In memory:
+-- self.fol[player] = { state (restored lazily), req (open level 1/2 request), trusted, queued }.
+-- Messages about a followed player wait in self.fq (arrival order) and tick() applies at most
+-- FOLLOW_STEPS ledger entries per call.
+
+function Session:followList()
+	return subtable(subtable(self.store, "follow"), self.guild)
+end
+
+-- The stored record of a player, or nil.
+function Session:followRecord(player)
+	local rec = self:followList()[player]
+	if type(rec) ~= "table" or type(rec.snap) ~= "table" then
+		return nil
+	end
+	return rec
+end
+
+function Session:folOf(player)
+	local f = self.fol[player]
+	if not f then
+		f = { queued = 0 }
+		self.fol[player] = f
+	end
+	return f
+end
+
+-- The followed ledger state of a player (restored from the snapshot when needed), or nil when
+-- the player is not followed or the stream is lost.
+function Session:followedState(player)
+	local rec = self:followRecord(player)
+	if not rec or rec.lost then
+		return nil
+	end
+	local f = self:folOf(player)
+	if not f.state then
+		local state = Ledger.restore(self.guild, player, rec.snap)
+		if not state or not state.settings then
+			rec.lost = true
+			return nil
+		end
+		f.state = state
+	end
+	return f.state
+end
+
+-- Starts (or restarts) following a player at a ledger state this client trusts. `state` is not
+-- changed. count = entries of the whole account at that state, or nil. Officers also keep `base`
+-- (a ledger state, default `state`) and `entries` (texts from base to state, default none).
+-- Starting point 3 (a payout check on an officer's client) calls this with the replayed state.
+function Session:followStart(player, state, count, base, entries)
+	if player == self.me or type(state) ~= "table" or not state.settings then
+		return false
+	end
+	local rec = { snap = Ledger.snapshot(state), count = count }
+	if self.env.isOfficer(self.me) then
+		rec.base = Ledger.snapshot(base or state)
+		local list = {}
+		for i, text in ipairs(entries or {}) do
+			list[i] = text
+		end
+		rec.entries = #list <= FOLLOW_ENTRIES and list or nil
+		if not rec.entries then
+			rec.base = nil
+		end
+	end
+	self:followList()[player] = rec
+	local f = self:folOf(player)
+	f.state, f.req, f.trusted = Ledger.copy(state), nil, true
+	return true
+end
+
+-- The stream broke: the snapshot stays as the last checked state.
+function Session:followLost(player, code, n, g)
+	local f = self:folOf(player)
+	local rec = self:followRecord(player)
+	if code and (code ~= "rewritten" or f.trusted) then
+		self:addAlert(player, code, n, g)
+	end
+	if rec then
+		rec.lost = true
+	end
+	f.state, f.req = nil, nil
+end
+
+-- An entry applied to the followed state: write the snapshot back and keep the officer's entries.
+function Session:followCommit(player, state, text)
+	local rec = self:followRecord(player)
+	rec.snap = Ledger.snapshot(state)
+	if type(rec.count) == "number" then
+		rec.count = rec.count + 1
+	end
+	if type(rec.entries) == "table" then
+		if #rec.entries >= FOLLOW_ENTRIES then
+			rec.entries, rec.base = nil, nil
+		else
+			rec.entries[#rec.entries + 1] = text
+		end
+	end
+	self:folOf(player).trusted = true
+end
+
+-- Applies an entry to the followed state. Returns true, or nil after marking the stream lost.
+function Session:followApply(player, state, entry, n, g)
+	local info = Ledger.apply(state, entry)
+	if not info then
+		self:followLost(player, "bad_entry", n, g)
+		return nil
+	end
+	self:followCommit(player, state, Ledger.encode(entry))
+	return true
+end
+
+-- Queues a message about another player. Starting points are queued for anyone; steps only for
+-- players this client follows (or will, once a queued starting point is applied).
+function Session:followQueue(player, item, isStart)
+	if player == self.me or not Engine.validName(player) then
+		return
+	end
+	local f = self.fol[player]
+	local queued = f and f.queued or 0
+	if not isStart and queued == 0 then
+		local rec = self:followRecord(player)
+		if not rec or rec.lost then
+			return
+		end
+	end
+	f = self:folOf(player)
+	if f.queued >= FOLLOW_QUEUE then
+		-- Too much waiting: the stream is lost; the queued steps of that player go.
+		local keep = {}
+		for i = self.fqHead, self.fqTail do
+			local q = self.fq[i]
+			if q.player ~= player then
+				keep[#keep + 1] = q
+			end
+		end
+		self.fq, self.fqHead, self.fqTail, f.queued = keep, 1, #keep, 0
+		self:followLost(player)
+		if not isStart then
+			return
+		end
+	end
+	f.queued = f.queued + 1
+	item.player = player
+	self.fqTail = self.fqTail + 1
+	self.fq[self.fqTail] = item
+end
+
+-- Applies queued steps until FOLLOW_STEPS entries were applied.
+function Session:followTick()
+	local applied = 0
+	while applied < FOLLOW_STEPS and self.fqHead <= self.fqTail do
+		local item = self.fq[self.fqHead]
+		self.fq[self.fqHead] = nil
+		self.fqHead = self.fqHead + 1
+		local f = self:folOf(item.player)
+		f.queued = f.queued - 1
+		applied = applied + (self:followStep(item.player, item) or 0)
+	end
+	if self.fqHead > self.fqTail then
+		self.fq, self.fqHead, self.fqTail = {}, 1, 0
+	end
+end
+
+-- One queued message. Returns the number of ledger entries applied (0 or 1).
+function Session:followStep(player, item)
+	local k = item.k
+	if k == "buy" then
+		return self:followBuy(player, item)
+	elseif k == "pay" then
+		return self:followPay(player, item)
+	end
+	local state = self:followedState(player)
+	if not state then
+		return 0
+	end
+	local f = self:folOf(player)
+	local msg = item.msg
+	if k == "lost" then
+		self:followLost(player)
+	elseif k == "hello" then
+		if f.req then
+			return 0 -- the open request's RES decides
+		end
+		if msg.n == state.n then
+			if msg.head ~= Ledger.shortHead(state) then
+				self:followLost(player, "rewritten", msg.n, 0)
+			else
+				f.trusted = true
+			end
+		else
+			self:followLost(player) -- missed spins (or an account this client cannot place)
+		end
+	elseif k == "spin" or k == "gam" then
+		return self:followRequest(player, state, f, item)
+	elseif k == "res" then
+		return self:followRes(player, state, f, msg)
+	end
+	return 0
+end
+
+-- A SPIN or GAM of a followed player.
+function Session:followRequest(player, state, f, item)
+	local msg, k = item.msg, item.k
+	local g = k == "gam" and msg.g or 0
+	if f.req then
+		self:followLost(player) -- a new request before the RES
+		return 0
+	end
+	if (k == "spin" and msg.n ~= state.n + 1) or (k == "gam" and (msg.n ~= state.n or msg.g ~= state.g + 1)) then
+		self:followLost(player)
+		return 0
+	end
+	if msg.head ~= Ledger.shortHead(state) then
+		self:followLost(player, "rewritten", msg.n, g)
+		return 0
+	end
+	f.trusted = true
+	if msg.level ~= state.settings.L then
+		self:followLost(player, "bad_entry", msg.n, g)
+		return 0
+	end
+	if msg.level == 0 then
+		local entry
+		if k == "spin" then
+			entry = { type = "S", n = msg.n, stake = msg.stake, A = 0, status = "ok", contribs = "" }
+		else
+			entry = { type = "G", n = msg.n, g = msg.g, A = 0, status = "ok", contribs = "" }
+		end
+		return self:followApply(player, state, entry, msg.n, g) and 1 or 0
+	end
+	f.req = item.live
+	return 0
+end
+
+-- The RES of a followed level 1/2 request: rebuild the contributions from the kept WIT values.
+function Session:followRes(player, state, f, msg)
+	local req = f.req
+	f.req = nil
+	if not req or req.kind ~= msg.kind or req.n ~= msg.n or req.g ~= msg.g then
+		self:followLost(player)
+		return 0
+	end
+	local list = {}
+	if msg.who ~= "-" then
+		for i = 1, #msg.who, 4 do
+			local tag = sub(msg.who, i, i + 3)
+			local match
+			for name, value in pairs(req.wits) do
+				if sub(value, 1, 4) == tag then
+					if match then
+						match = false
+						break
+					end
+					match = name
+				end
+			end
+			if not match then
+				self:followLost(player)
+				return 0
+			end
+			list[#list + 1] = { name = match, value = req.wits[match], lot = Engine.lot(match, player, req.kind, req.n, req.g) }
+		end
+	end
+	local entry = requestEntry({ kind = req.kind, n = req.n, g = req.g, stake = req.amount, A = req.A }, msg.status,
+		Engine.contribs(list))
+	local info = Ledger.apply(state, entry)
+	if not info then
+		self:followLost(player, "bad_entry", msg.n, msg.g)
+		return 1
+	end
+	if Ledger.shortHead(state) ~= msg.head then
+		self:followLost(player, "bad_res", msg.n, msg.g)
+		return 1
+	end
+	self:followCommit(player, state, Ledger.encode(entry))
+	return 1
+end
+
+-- A complete purchase: { text, buyId, head (64 hex before it), anchors }.
+function Session:followBuy(player, item)
+	local rec = self:followRecord(player)
+	local state = self:followedState(player)
+	if state and state.buyIds[item.buyId] then
+		return 0 -- heard twice (the issuing officer)
+	end
+	local entry = Ledger.decode(item.text)
+	if not entry then
+		return 0
+	end
+	if item.anchors == 0 and item.head == Ledger.start(self.guild, player).head then
+		-- Starting point 1: the account starts here.
+		local start = Ledger.start(self.guild, player)
+		local s = Ledger.copy(start)
+		if not Ledger.apply(s, entry) then
+			return 0
+		end
+		self:followStart(player, s, 1, start, { item.text })
+		return 1
+	end
+	if not state then
+		return 0
+	end
+	local f = self:folOf(player)
+	if f.req then
+		self:followLost(player)
+		return 0
+	end
+	if item.head ~= state.head or item.anchors ~= state.anchors then
+		self:followLost(player, "rewritten", state.n, 0)
+		return 0
+	end
+	return self:followApply(player, state, entry, state.n, 0) and 1 or 0
+end
+
+-- A PAY from an officer: a step when it fits the followed state, else starting point 2.
+function Session:followPay(player, item)
+	local msg = item.msg
+	local state = self:followedState(player)
+	local f = self:folOf(player)
+	if state and state.payIds[msg.payId] then
+		return 0
+	end
+	if state and not f.req and msg.anchors == state.anchors + 1 then
+		local entry = {
+			type = "P", payId = msg.payId, officer = item.officer, amount = msg.amount, balanceAfter = msg.balanceAfter,
+			time = msg.time,
+		}
+		local trial = Ledger.copy(state)
+		if Ledger.apply(trial, entry) and trial.head == msg.head then
+			f.state = trial
+			self:followCommit(player, trial, Ledger.encode(entry))
+			local rec = self:followRecord(player)
+			if type(rec.entries) == "table" then
+				rec.base, rec.entries = Ledger.snapshot(trial), {}
+			end
+			return 1
+		end
+	end
+	-- Starting point 2: the key of the player's last purchase and the checkpoint key.
+	local keys = self.store.keys and self.store.keys[self.guild]
+	local k = type(keys) == "table" and keys[player]
+	local b = type(k) == "table" and type(k.purchase) == "string" and Ledger.decode(k.purchase)
+	local started = false
+	if b and b.type == "B" then
+		local s = Ledger.restore(self.guild, player, {
+			head = msg.head, count = item.count or 0, anchors = msg.anchors, balance = msg.balanceAfter, n = msg.n,
+			g = 0, pending = 0, purchase = k.purchase, buyIds = { b.buyId }, payIds = { msg.payId },
+		})
+		if s and s.settings and Ledger.checkpointKey(msg.n, s.K, s.line) == msg.ck then
+			started = self:followStart(player, s, item.count)
+		end
+	end
+	if not started and state then
+		self:followLost(player)
+	end
+	return 0
+end
+
+-- PAYREQ heard from anyone: its count gives the count after the PAY. self.payreqs[reqId].
+function Session:hearPayReq(sender, msg)
+	local now = self.env.now()
+	for id, r in pairs(self.payreqs) do
+		if now - r.time > REQUEST_TIMEOUT * 3 then
+			self.payreqs[id] = nil
+			self.alertsIn[id] = nil
+		end
+	end
+	if not self.payreqs[msg.reqId] then
+		self.payreqs[msg.reqId] = { player = sender, count = msg.count, head = msg.head, officer = msg.officer, time = now }
+	end
+end
+
+-- The view the UI and the payout check read: { n, balance, lost, count, hasEntries } or nil.
+function Session:followed(player)
+	local rec = self:followRecord(player)
+	if not rec then
+		return nil
+	end
+	return {
+		n = rec.snap.n, balance = rec.snap.balance, lost = rec.lost == true, count = rec.count,
+		hasEntries = type(rec.entries) == "table",
+	}
+end
+
 -- Samples (docs/follow-spec.md section 2) ------------------------------------------------------
 -- store.samples[guild][witness] = { commit, seen, rows, time, old = { commit, seen, rows, time } }
 
@@ -1755,6 +2182,73 @@ function Session:alerts(player)
 	return out
 end
 
+-- A PAYREQ of another player this client holds alerts for: up to 3 ALERT messages, newest first,
+-- after a random delay of 0..3 s. The officer addressed collects its own alerts itself.
+function Session:scheduleAlerts(sender, msg)
+	if sender == self.me or msg.officer == self.me then
+		return
+	end
+	local list = self:alerts(sender)
+	if #list == 0 then
+		return
+	end
+	local rows = {}
+	for i = 1, math.min(ALERT_SEND, #list) do
+		rows[i] = list[i]
+	end
+	local due = self.env.now() + randomBelow(self.env, ALERT_DELAY * 1000 + 1) / 1000
+	self.alertOut[#self.alertOut + 1] = { reqId = msg.reqId, player = sender, due = due, rows = rows }
+end
+
+function Session:pumpAlerts()
+	local env, now = self.env, self.env.now()
+	for i = #self.alertOut, 1, -1 do
+		local b = self.alertOut[i]
+		if now >= b.due then
+			if env.budget() >= SPIN_BUDGET then
+				table.remove(self.alertOut, i)
+				for _, a in ipairs(b.rows) do
+					self:send("ALERT", { reqId = b.reqId, player = b.player, code = a.code, n = a.n, g = a.g, time = a.time })
+				end
+			elseif now - b.due > ALERT_GIVE_UP then
+				table.remove(self.alertOut, i)
+			end
+		end
+	end
+end
+
+-- An ALERT from another client, kept in memory per reqId of a heard PAYREQ for the officer's
+-- report: self.alertsIn[reqId] = { { by, player, code, n, g, time }, … }.
+function Session:hearAlert(sender, msg)
+	local r = self.payreqs[msg.reqId]
+	if sender == self.me or not r or r.player ~= msg.player then
+		return
+	end
+	local list = self.alertsIn[msg.reqId]
+	if not list then
+		list = {}
+		self.alertsIn[msg.reqId] = list
+	end
+	if #list >= ALERT_IN_MAX then
+		return
+	end
+	for _, a in ipairs(list) do
+		if a.by == sender and a.code == msg.code and a.n == msg.n and a.g == msg.g then
+			return
+		end
+	end
+	list[#list + 1] = { by = sender, player = msg.player, code = msg.code, n = msg.n, g = msg.g, time = msg.time }
+end
+
+-- The ALERT messages heard for a payout request, as Verify's `alerts` input takes them.
+function Session:heardAlerts(reqId)
+	local out = {}
+	for i, a in ipairs(self.alertsIn[reqId] or {}) do
+		out[i] = { by = a.by, player = a.player, code = a.code, n = a.n, g = a.g, time = a.time }
+	end
+	return out
+end
+
 -- At creation: alerts, samples and commits older than 14 days go.
 function Session:cleanFollow()
 	local now = self.env.now()
@@ -1852,6 +2346,16 @@ function Session:tick()
 	self:pumpLog()
 	self:verifyStep()
 	self:osync()
+	self:followTick()
+	self:pumpAlerts()
+	if not self.witPrune or now - self.witPrune >= TICKER_WIT_AGE then
+		self.witPrune = now
+		for key, at in pairs(self.witSent) do
+			if now - at > 60 then
+				self.witSent[key] = nil -- no RES came for that request
+			end
+		end
+	end
 end
 
 -- Messages -----------------------------------------------------------------------------------
@@ -1906,6 +2410,7 @@ function Session:onMessage(sender, text)
 		if sender ~= self.me then
 			self:checkReveal(sender, msg.reveal)
 			self:commits()[sender] = { commit = msg.commit, time = env.now() }
+			self:followQueue(sender, { k = "hello", msg = msg })
 		end
 		if not self.noticed and type(env.version) == "string" and newerVersion(msg.version, env.version) then
 			self.noticed = true
@@ -1914,13 +2419,13 @@ function Session:onMessage(sender, text)
 	elseif kind == "SPIN" then
 		self:alive(sender)
 		self:hear(sender, msg.n, msg.head, { n = msg.n, g = 0, head = msg.head })
-		self:hearRequest(sender, msg, "spin")
+		self:followQueue(sender, { k = "spin", msg = msg, live = self:hearRequest(sender, msg, "spin") })
 		self:onTickerSpin(sender, msg)
 		self:answerRequest(sender, msg, "spin")
 	elseif kind == "GAM" then
 		self:alive(sender)
 		self:hear(sender, msg.n, msg.head, { n = msg.n, g = msg.g, head = msg.head })
-		self:hearRequest(sender, msg, "gam")
+		self:followQueue(sender, { k = "gam", msg = msg, live = self:hearRequest(sender, msg, "gam") })
 		self:answerRequest(sender, msg, "gam")
 	elseif kind == "WIT" then
 		self:alive(sender)
@@ -1932,9 +2437,12 @@ function Session:onMessage(sender, text)
 		if sender ~= self.me then
 			self:markWitness(sender, msg)
 			self:onTickerRes(sender, msg)
+			self:followQueue(sender, { k = "res", msg = msg })
 		end
 	elseif kind == "PAYREQ" then
 		self:alive(sender)
+		self:hearPayReq(sender, msg)
+		self:scheduleAlerts(sender, msg)
 		self:onPayReq(sender, msg)
 	elseif kind == "LOGREQ" then
 		self:alive(sender)
@@ -1952,9 +2460,15 @@ function Session:onMessage(sender, text)
 		-- PAY carries the full head; anchors keep the short one.
 		self:storeAnchor(msg.player, { anchors = msg.anchors, head = sub(msg.head, 1, 32), time = msg.time, by = sender })
 		self:markSeen(msg.player, msg.payId)
+		local r = self.payreqs[msg.reqId]
+		local count = r and r.player == msg.player and r.count + 1 or nil
+		self:followQueue(msg.player, { k = "pay", msg = msg, officer = sender, count = count }, true)
 		if msg.player == self.me then
 			self:onPay(sender, msg)
 		end
+	elseif kind == "ALERT" then
+		self:alive(sender)
+		self:hearAlert(sender, msg)
 	elseif kind == "REJECT" then
 		if not env.isOfficer(sender) then
 			return

@@ -2351,3 +2351,446 @@ t.test("settle early with the lottery: only the drawn names are waited for", fun
 	t.eq(#events(p, "result"), 1, "every drawn witness answered: settled at 0.3 s")
 	t.eq(lastEntry(p).status, "ok", "ok")
 end)
+
+-- Following (docs/follow-spec.md section 3) ----------------------------------------------------
+
+-- Every session ticks `rounds` times without moving the clock, flushing in between.
+local function catchUp(w, rounds)
+	for _ = 1, rounds or 20 do
+		for _, session in ipairs(w.sessions) do
+			session:tick()
+		end
+		flush(w)
+	end
+end
+
+local function followRec(s, player)
+	return s.env.store.follow and s.env.store.follow[GUILD] and s.env.store.follow[GUILD][player]
+end
+
+local function playerState(p)
+	return Ledger.replay(GUILD, "Pia", account(p, "Pia").entries)
+end
+
+local function codes(s, player)
+	local out = {}
+	for _, a in ipairs(s.session:alerts(player)) do
+		out[#out + 1] = a.code
+	end
+	return table.concat(out, ",")
+end
+
+t.test("following from account creation at level 0: a third client holds the player's state", function()
+	local w, o, p, tom = payWorld()
+	play(w, p, 30)
+	catchUp(w)
+	local state = playerState(p)
+	for _, s in ipairs({ tom, o }) do
+		local f = s.session:followed("Pia")
+		t.ok(f, "followed")
+		t.eq(f.n, state.n, "n")
+		t.eq(f.balance, state.balance, "balance")
+		t.eq(f.count, state.count, "count")
+		t.eq(f.lost, false, "not lost")
+		t.eq(followRec(s, "Pia").snap.head, state.head, "head")
+	end
+	t.eq(tom.session:followed("Pia").hasEntries, false, "a member keeps no entries")
+	t.eq(o.session:followed("Pia").hasEntries, true, "the officer keeps the entries")
+	local rec = followRec(o, "Pia")
+	t.eq(#rec.entries, state.count, "entries since the start of the account")
+	t.eq(rec.base.count, 0, "base is the empty account")
+	t.eq(p.session:followed("Pia"), nil, "the own account is never followed")
+	t.eq(codes(tom, "Pia"), "", "no alerts")
+	-- The record survives a restart and following goes on.
+	local tom2 = replaceSession(w, tom, addSession(w, "Tom", { store = tom.env.store }))
+	play(w, p, 5)
+	catchUp(w)
+	state = playerState(p)
+	t.eq(tom2.session:followed("Pia").n, state.n, "n after the restart")
+	t.eq(followRec(tom2, "Pia").snap.head, state.head, "head after the restart")
+end)
+
+t.test("following at level 1 by a third client", function()
+	local w, o, p, others = witnessWorld(LINE_W1, { "Tom", "Uma", "Vic" }, { tokens = 5000 })
+	local g = p.session:game()
+	for _ = 1, 25 do
+		if g:state() == "gamble" then
+			assert(g:gamble())
+		else
+			assert(g:spin())
+		end
+		flush(w)
+		settle(w)
+		w.now = w.now + 1.1
+	end
+	catchUp(w)
+	local state = playerState(p)
+	for _, s in ipairs({ o, others.Tom, others.Vic }) do
+		local f = s.session:followed("Pia")
+		t.eq(f and f.n, state.n, "n")
+		t.eq(f and f.lost, false, "not lost")
+		t.eq(followRec(s, "Pia").snap.head, state.head, "head")
+		t.eq(codes(s, "Pia"), "", "no alerts")
+	end
+end)
+
+t.test("a missed SPIN gives lost without an alert; a PAY restarts following", function()
+	local w, o, p, tom = payWorld()
+	play(w, p, 5)
+	catchUp(w)
+	-- Tom misses one SPIN.
+	local skip = true
+	local real = tom.session.onMessage
+	tom.session.onMessage = function(s, sender, text)
+		local m = Proto.decode(text)
+		if skip and m and m.type == "SPIN" then
+			skip = false
+			return
+		end
+		return real(s, sender, text)
+	end
+	play(w, p, 5)
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").lost, true, "lost")
+	t.eq(codes(tom, "Pia"), "", "no alert")
+	local before = tom.session:followed("Pia").n
+	t.ok(before < playerState(p).n, "the snapshot stays at the last checked state")
+	local reqId = assert(p.session:requestPayout("Olga", 100))
+	untilReady(w, o, reqId)
+	assert(o.session:confirm(reqId))
+	flush(w)
+	catchUp(w)
+	local state = playerState(p)
+	local f = tom.session:followed("Pia")
+	t.eq(f.lost, false, "following again")
+	t.eq(f.n, state.n, "n")
+	t.eq(f.balance, state.balance, "balance")
+	t.eq(f.count, state.count, "count from the PAYREQ plus one")
+	t.eq(followRec(tom, "Pia").snap.head, state.head, "head")
+	play(w, p, 5)
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").n, playerState(p).n, "and it goes on")
+	t.eq(followRec(tom, "Pia").snap.head, playerState(p).head, "head")
+end)
+
+t.test("a followed PAY and a second purchase are steps; the officer's base moves to the PAY", function()
+	local w, o, p, tom = payWorld()
+	play(w, p, 6)
+	catchUp(w)
+	local reqId = assert(p.session:requestPayout("Olga", 100))
+	untilReady(w, o, reqId)
+	assert(o.session:confirm(reqId))
+	flush(w)
+	catchUp(w)
+	local state = playerState(p)
+	for _, s in ipairs({ tom, o }) do
+		local f = s.session:followed("Pia")
+		t.eq(f.lost, false, "not lost")
+		t.eq(f.balance, state.balance, "balance after the payout")
+		t.eq(f.count, state.count, "count")
+		t.eq(followRec(s, "Pia").snap.head, state.head, "head")
+	end
+	local rec = followRec(o, "Pia")
+	t.eq(#rec.entries, 0, "entries emptied")
+	t.eq(rec.base.head, state.head, "base after the payout")
+	assert(o.session:grant("Pia", 500))
+	flush(w)
+	play(w, p, 3)
+	catchUp(w)
+	state = playerState(p)
+	t.eq(tom.session:followed("Pia").balance, state.balance, "second purchase followed")
+	t.eq(followRec(tom, "Pia").snap.head, state.head, "head")
+	t.eq(#followRec(o, "Pia").entries, state.count - rec.base.count, "officer entries since the payout")
+	t.eq(codes(tom, "Pia"), "", "no alerts")
+end)
+
+t.test("a PAY starts following on a client that knew only the purchase key", function()
+	local w, o, p, tom = payWorld()
+	play(w, p, 5)
+	catchUp(w)
+	tom.env.store.follow = nil -- e.g. a client that followed nothing yet
+	local tom2 = replaceSession(w, tom, addSession(w, "Tom", { store = tom.env.store }))
+	local reqId = assert(p.session:requestPayout("Olga", 100))
+	untilReady(w, o, reqId)
+	assert(o.session:confirm(reqId))
+	flush(w)
+	catchUp(w)
+	local state = playerState(p)
+	local f = tom2.session:followed("Pia")
+	t.ok(f, "followed from the PAY")
+	t.eq(f.n, state.n, "n")
+	t.eq(f.balance, state.balance, "balance")
+	t.eq(f.count, state.count, "count from the PAYREQ")
+	t.eq(followRec(tom2, "Pia").snap.head, state.head, "head")
+	-- A wrong ck starts nothing.
+	tom2.env.store.follow = nil
+	local tom3 = replaceSession(w, tom2, addSession(w, "Tom", { store = tom2.env.store }))
+	local pay = sentOf(w, "PAY")[1].msg
+	pay.ck = string.rep("0", 16)
+	inject(w, "Olga", "PAY", pay)
+	catchUp(w)
+	t.eq(tom3.session:followed("Pia"), nil, "no start")
+end)
+
+t.test("a SPIN with another head raises rewritten and the stream is lost", function()
+	local w, _, p, tom = payWorld()
+	play(w, p, 3)
+	catchUp(w)
+	local state = playerState(p)
+	inject(w, "Pia", "SPIN", { n = state.n + 1, stake = 10, level = 0, head = ZERO_HEAD, A = 0 })
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").lost, true, "lost")
+	t.eq(codes(tom, "Pia"), "rewritten", "rewritten")
+	local a = tom.session:alerts("Pia")[1]
+	t.eq(a.n, state.n + 1, "alert n")
+	t.eq(a.g, 0, "alert g")
+	t.eq(followRec(tom, "Pia").snap.head, state.head, "the last checked state stays")
+end)
+
+t.test("a HELLO with the same n and another head raises rewritten; a higher n is lost only", function()
+	local w, _, p, tom = payWorld()
+	play(w, p, 3)
+	catchUp(w)
+	local state = playerState(p)
+	hello(w, "Pia", { n = state.n, head = Ledger.shortHead(state), commit = string.rep("c", 32) })
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").lost, false, "a matching HELLO")
+	hello(w, "Pia", { n = state.n + 2, head = ZERO_HEAD, commit = string.rep("c", 32) })
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").lost, true, "higher n: lost")
+	t.eq(codes(tom, "Pia"), "", "without an alert")
+	-- Another follower hears the same n with another head.
+	local w2, _, p2, tom2 = payWorld()
+	play(w2, p2, 3)
+	catchUp(w2)
+	local s2 = playerState(p2)
+	hello(w2, "Pia", { n = s2.n, head = ZERO_HEAD, commit = string.rep("c", 32) })
+	catchUp(w2)
+	t.eq(codes(tom2, "Pia"), "rewritten", "rewritten")
+	t.eq(tom2.session:followed("Pia").lost, true, "lost")
+end)
+
+t.test("after a restart a mismatch before the first match is lost without an alert", function()
+	local w, _, p, tom = payWorld()
+	play(w, p, 3)
+	catchUp(w)
+	local tom2 = replaceSession(w, tom, addSession(w, "Tom", { store = tom.env.store }))
+	local state = playerState(p)
+	-- e.g. a payout Tom missed while he was away.
+	hello(w, "Pia", { n = state.n, head = ZERO_HEAD, commit = string.rep("c", 32) })
+	catchUp(w)
+	t.eq(tom2.session:followed("Pia").lost, true, "lost")
+	t.eq(codes(tom2, "Pia"), "", "no alert")
+end)
+
+-- A level 1 world where Tom follows and the bus can be edited.
+t.test("a RES with a wrong head raises bad_res", function()
+	local w, _, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local g = p.session:game()
+	assert(g:spin())
+	flush(w)
+	settle(w)
+	catchUp(w)
+	t.eq(others.Tom.session:followed("Pia").n, 1, "followed the first spin")
+	w.now = w.now + 3
+	assert(g:spin())
+	-- Rewrite the RES head on its way to the others.
+	w.drop = function(text)
+		local m = Proto.decode(text)
+		if m and m.type == "RES" then
+			local fields = { kind = m.kind, n = m.n, g = m.g, status = m.status, who = m.who, head = ZERO_HEAD }
+			for _, s in ipairs(w.sessions) do
+				if s ~= p.session then s:onMessage("Pia", assert(Proto.encode("RES", fields))) end
+			end
+			return true
+		end
+	end
+	flush(w)
+	settle(w)
+	w.drop = nil
+	catchUp(w)
+	t.eq(codes(others.Tom, "Pia"), "bad_res", "bad_res")
+	t.eq(others.Tom.session:followed("Pia").lost, true, "lost")
+	t.eq(others.Tom.session:alerts("Pia")[1].n, 2, "spin 2")
+end)
+
+t.test("a witness left out of a RES although it answered in time raises omitted", function()
+	local w, _, p, others = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local tomValue
+	-- Pia's client leaves Tom out: his WIT never reaches her.
+	local real = p.session.onMessage
+	p.session.onMessage = function(s, sender, text)
+		local m = Proto.decode(text)
+		if m and m.type == "WIT" and sender == "Tom" then
+			tomValue = m.value
+			return
+		end
+		return real(s, sender, text)
+	end
+	assert(p.session:game():spin())
+	flush(w)
+	settle(w, 0.4)
+	t.eq(#events(p, "result"), 0, "still collecting")
+	settle(w, 1.1)
+	t.ok(tomValue, "Tom answered")
+	t.eq(codes(others.Tom, "Pia"), "omitted", "Tom raises omitted")
+	t.eq(codes(others.Uma, "Pia"), "", "Uma was included")
+	-- A WIT sent less than 0.5 s before the RES raises nothing.
+	local w2, _, p2, others2 = witnessWorld(LINE_W1, { "Tom", "Uma" })
+	local real2 = p2.session.onMessage
+	p2.session.onMessage = function(s, sender, text)
+		local m = Proto.decode(text)
+		if m and m.type == "WIT" and sender == "Tom" then return end
+		return real2(s, sender, text)
+	end
+	w2.now = w2.now + 3
+	assert(p2.session:game():spin())
+	w2.now = w2.now + 1.2
+	flush(w2)
+	settle(w2, 0.31)
+	t.eq(#events(p2, "result"), 1, "settled")
+	t.eq(codes(others2.Tom, "Pia"), "", "too late to count")
+end)
+
+t.test("an officer's entries are dropped above 3000; the state is still followed", function()
+	local w, o, p = payWorld()
+	play(w, p, 3)
+	catchUp(w)
+	local rec = followRec(o, "Pia")
+	while #rec.entries < 2999 do
+		rec.entries[#rec.entries + 1] = "x"
+	end
+	local g = p.session:game()
+	local function spinOnce()
+		if g:state() == "gamble" then g:take() end
+		w.now = w.now + 2
+		assert(g:spin())
+		flush(w)
+		catchUp(w)
+	end
+	spinOnce()
+	t.eq(#followRec(o, "Pia").entries, 3000, "3000 kept")
+	spinOnce()
+	t.eq(followRec(o, "Pia").entries, nil, "dropped")
+	t.eq(o.session:followed("Pia").hasEntries, false, "hasEntries")
+	t.eq(o.session:followed("Pia").n, playerState(p).n, "still followed")
+	t.eq(o.session:followed("Pia").lost, false, "not lost")
+end)
+
+t.test("load: at most 8 followed steps per tick, at most 50 waiting per player", function()
+	local w, _, p, tom = payWorld({ tokens = 100000 })
+	catchUp(w)
+	local n0 = tom.session:followed("Pia").n
+	play(w, p, 20)
+	tom.session:tick()
+	t.eq(tom.session:followed("Pia").n - n0 <= 8, true, "at most 8 in one tick")
+	catchUp(w)
+	t.eq(tom.session:followed("Pia").n, playerState(p).n, "the rest on later ticks")
+	-- More than 50 waiting: lost.
+	local spins = 0
+	local g = p.session:game()
+	while spins < 51 do
+		w.now = w.now + 2
+		if g:state() == "gamble" then g:take() end
+		assert(g:spin())
+		spins = spins + 1
+		flush(w)
+	end
+	tom.session:tick()
+	t.eq(tom.session:followed("Pia").lost, true, "lost")
+	t.eq(codes(tom, "Pia"), "", "without an alert")
+end)
+
+t.test("followStart: a replayed state becomes the follow record", function()
+	local w, o, p = payWorld()
+	play(w, p, 4)
+	catchUp(w)
+	o.env.store.follow = nil
+	local state = playerState(p)
+	o.session:followStart("Pia", state, state.count)
+	local f = o.session:followed("Pia")
+	t.eq(f.n, state.n, "n")
+	t.eq(f.count, state.count, "count")
+	t.eq(f.hasEntries, true, "officer: empty entries")
+	t.eq(#followRec(o, "Pia").entries, 0, "empty")
+	t.eq(followRec(o, "Pia").base.head, state.head, "base is the state")
+	play(w, p, 2)
+	catchUp(w)
+	t.eq(o.session:followed("Pia").n, playerState(p).n, "followed on")
+	t.eq(#followRec(o, "Pia").entries, playerState(p).count - state.count, "entries since the start")
+end)
+
+-- Alerts (docs/follow-spec.md section 4) ------------------------------------------------------
+
+t.test("alerts are stored once per player, code, n and g, at most 200, for 14 days", function()
+	local w, _, _, tom = payWorld()
+	local s = tom.session
+	s:addAlert("Pia", "rewritten", 3, 0)
+	s:addAlert("Pia", "rewritten", 3, 0)
+	s:addAlert("Pia", "rewritten", 3, 1)
+	t.eq(#s:alerts("Pia"), 2, "once per key")
+	t.eq(s:alerts("Pia")[1].g, 1, "newest first")
+	for i = 1, 250 do
+		s:addAlert("Pia", "bad_entry", i, 0)
+	end
+	t.eq(#tom.env.store.alerts[GUILD], 200, "at most 200")
+	w.now = w.now + 14 * DAY
+	addSession(w, "Tom", { store = tom.env.store })
+	t.eq(#tom.env.store.alerts[GUILD], 0, "older than 14 days dropped")
+end)
+
+t.test("on a PAYREQ, clients with alerts send up to 3 ALERT messages; the officer keeps them per reqId", function()
+	local w, o, p, tom = payWorld()
+	local uma = addSession(w, "Uma")
+	play(w, p, 3)
+	catchUp(w)
+	for n = 1, 4 do
+		tom.session:addAlert("Pia", "rewritten", n, 0)
+	end
+	tom.session:addAlert("Paul", "bad_res", 1, 0)
+	uma.session:addAlert("Pia", "omitted", 2, 0)
+	o.session:addAlert("Pia", "bad_entry", 2, 0)
+	local reqId = assert(p.session:requestPayout("Olga", 50))
+	flush(w)
+	t.eq(#sentOf(w, "ALERT"), 0, "not at once")
+	for _ = 1, 4 do
+		w.now = w.now + 1
+		for _, s in ipairs(w.sessions) do s:tick() end
+		flush(w)
+	end
+	local fromTom = sentOf(w, "ALERT", "Tom")
+	t.eq(#fromTom, 3, "three from Tom")
+	t.eq(fromTom[1].msg.n, 4, "newest first")
+	t.eq(fromTom[1].msg.reqId, reqId, "reqId")
+	t.eq(fromTom[1].msg.player, "Pia", "player")
+	t.eq(#sentOf(w, "ALERT", "Uma"), 1, "one from Uma")
+	t.eq(#sentOf(w, "ALERT", "Olga"), 0, "the addressed officer sends none")
+	t.eq(#sentOf(w, "ALERT", "Pia"), 0, "the player sends none")
+	local heard = o.session:heardAlerts(reqId)
+	t.eq(#heard, 4, "Olga keeps four")
+	local by = {}
+	for _, a in ipairs(heard) do by[a.by] = (by[a.by] or 0) + 1 end
+	t.eq(by.Tom, 3, "by Tom")
+	t.eq(by.Uma, 1, "by Uma")
+	t.eq(heard[1].code, "rewritten", "code")
+	t.eq(type(heard[1].time), "number", "time")
+	t.eq(#o.session:heardAlerts("ffffffffffffffff"), 0, "nothing for another request")
+end)
+
+t.test("ALERT batches wait for a budget of 3", function()
+	local w, _, p, tom = payWorld()
+	tom.session:addAlert("Pia", "rewritten", 1, 0)
+	w.budget = 2
+	assert(p.session:requestPayout("Olga", 50))
+	flush(w)
+	for _ = 1, 4 do
+		w.now = w.now + 1
+		tom.session:tick()
+		flush(w)
+	end
+	t.eq(#sentOf(w, "ALERT"), 0, "no budget")
+	w.budget = 10
+	tom.session:tick()
+	flush(w)
+	t.eq(#sentOf(w, "ALERT", "Tom"), 1, "sent once the budget is back")
+end)
