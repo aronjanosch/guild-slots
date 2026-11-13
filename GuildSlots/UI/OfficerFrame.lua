@@ -92,11 +92,21 @@ end
 ---------------------------------------------------------------------------------------------
 -- Settings form
 
+-- The mode switch in the place of the L field: "Open" (L=0) and "Witnessed" (L=1, with W).
+-- A guild info with L=2 is shown as it is until the switch is clicked (docs/follow-spec.md
+-- section 7).
+local MODE_LABELS = { [0] = "MODE_OPEN", [1] = "MODE_WITNESSED", [2] = "MODE_LEVEL2" }
+
+local function showMode()
+	W.mode.label:SetText(L[MODE_LABELS[W.level] or "MODE_OPEN"])
+	W.mode:setSelected(W.level ~= 0)
+end
+
 -- Builds the line from the form. Returns line, settings or nil, field, code.
 local function formLine()
 	local parts = { "GSLOTS1" }
 	for _, k in ipairs(FIELDS) do
-		local v = (W.fields[k]:GetText() or ""):gsub("%s", "")
+		local v = k == "L" and tostring(W.level or 0) or (W.fields[k]:GetText() or ""):gsub("%s", "")
 		if v == "" or v:find("[;=|%c]") then
 			return nil, k
 		end
@@ -130,9 +140,7 @@ local function updateForm()
 	end
 	W.currentLine = line
 	W.line:SetText(line)
-	if s.L ~= 0 then
-		note(W.formNote, L.NOTE_LEVEL)
-	elseif s.E[#s.E] > 10 * s.E[1] then
+	if s.E[#s.E] > 10 * s.E[1] then
 		note(W.formNote, L.WARN_SPREAD, c.lose)
 	elseif W.proposed then
 		note(W.formNote, tablesNote())
@@ -156,9 +164,14 @@ local function prefill()
 		if k == "E" then
 			v = table.concat(v, ",")
 		end
-		W.fields[k]:SetText(tostring(v))
+		if k == "L" then
+			W.level = v
+		else
+			W.fields[k]:SetText(tostring(v))
+		end
 	end
 	W.filling = false
+	showMode()
 	updateForm()
 end
 
@@ -625,14 +638,26 @@ local function buildForm(parent)
 		local label = Skin.textIn(part, part, { x + F.label[1], top + F.label[2], F.label[3], F.label[4] }, "label",
 			fs.label, c.muted, "LEFT")
 		label:SetText(L["F_" .. k])
-		local e = Skin.editBox(part, F.field[3], F.field[4], "number", fs.lineField + 1)
-		Skin.rect(e.holder, part, { x + F.field[1], top + F.field[2], F.field[3], F.field[4] })
-		e:SetScript("OnTextChanged", function()
-			if not W.filling then
+		local r = { x + F.field[1], top + F.field[2], F.field[3], F.field[4] }
+		if k == "L" then
+			-- From Witnessed or a shown level 2 the switch goes to Open, from Open to Witnessed.
+			W.mode = Skin.button(part, "toggle", F.field[3], F.field[4], function()
+				W.level = W.level == 0 and 1 or 0
+				showMode()
 				updateForm()
-			end
-		end)
-		W.fields[k] = e
+			end, { size = fs.small })
+			Skin.rect(W.mode, part, r)
+			W.level = 0
+		else
+			local e = Skin.editBox(part, F.field[3], F.field[4], "number", fs.lineField + 1)
+			Skin.rect(e.holder, part, r)
+			e:SetScript("OnTextChanged", function()
+				if not W.filling then
+					updateForm()
+				end
+			end)
+			W.fields[k] = e
+		end
 	end
 
 	W.line = Skin.editBox(part, F.line[3], F.line[4], "numberMedium", fs.lineField)
