@@ -146,6 +146,34 @@ function Engine.spin(K, n, contribs, tbl)
 	return uint32be(R, 1) % #r[1], uint32be(R, 5) % #r[2], uint32be(R, 9) % #r[3]
 end
 
+-- One round of a lines table (docs/table-t2-spec.md section 5): the base game plus every free
+-- game it awards. One HMAC without free games, one more per free game. No input checks: the
+-- ledger passes a valid table, stake and cap.
+function Engine.round(K, n, contribs, tbl, stake, cap)
+	local nText = dec(n)
+	local R = hmacRaw(K, "spin|" .. nText .. "|" .. contribs)
+	local function stopsFrom(H, strips)
+		local stops = {}
+		for r = 1, #strips do
+			stops[r] = uint32be(H, 4 * r - 3) % #strips[r]
+		end
+		return stops
+	end
+	local round = ns.Tables.playRound(tbl, stake, cap, {
+		base = function()
+			return stopsFrom(R, tbl.reels)
+		end,
+		symbol = function()
+			return uint32be(R, 21) % #tbl.expanding
+		end,
+		free = function(i)
+			return stopsFrom(hmacRaw(K, "free|" .. nText .. "|" .. dec(i) .. "|" .. contribs), tbl.freeReels)
+		end,
+	})
+	round.n = n
+	return round
+end
+
 function Engine.gamble(K, n, g, contribs)
 	local R = hmacRaw(K, "gam|" .. dec(n) .. "|" .. dec(g) .. "|" .. contribs)
 	return byte(R, 1) < 128

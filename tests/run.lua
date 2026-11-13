@@ -30,7 +30,7 @@ if unsigned then
 	bit = wrapped
 end
 
-local CORE = { "Sha256", "Tables", "Settings", "Engine", "Ledger", "Verify" }
+local CORE = { "Sha256", "Tables", "Settings", "Engine", "Ledger", "Verify", "Proto", "Pack" }
 local ns = {}
 for _, name in ipairs(CORE) do
 	local path = "GuildSlots/Core/" .. name .. ".lua"
@@ -41,7 +41,7 @@ for _, name in ipairs(CORE) do
 	end
 end
 -- Pure files outside Core (no WoW API), loaded after Core.
-local PURE = { "Game/Solo.lua", "UI/Anim.lua" }
+local PURE = { "Game/Solo.lua", "Game/Guild.lua", "UI/Anim.lua", "UI/Plan.lua", "UI/Layout.lua", "Net/Queue.lua" }
 for _, file in ipairs(PURE) do
 	assert(loadfile("GuildSlots/" .. file))("GuildSlots", ns)
 end

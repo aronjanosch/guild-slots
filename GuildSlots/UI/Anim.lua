@@ -186,6 +186,13 @@ function Anim.cells(x, n)
 	return out
 end
 
+-- Stop index and row of cell j (-2..2) around position x, like cells(x, n)[j + 3], without
+-- building a table (for per-frame use).
+function Anim.cell(x, n, j)
+	local i0 = floor(x)
+	return (i0 + j) % n, j - (x - i0)
+end
+
 -- Visible part of a cell centred on `row` (height 1) inside the window [-half, half].
 -- Returns top, bottom as fractions 0..1 of the cell measured from its top, or nil.
 function Anim.clip(row, half)
@@ -220,4 +227,112 @@ function Anim.formatNumber(v, sep)
 		out = out:sub(#sep + 1)
 	end
 	return (neg and "-" or "") .. out
+end
+
+-- Candidate shown at time t of a shuffle that steps through `count` candidates, slowing down,
+-- and lands on `final` (1..count) at `dur`.
+function Anim.shuffle(t, dur, count, final)
+	if t >= dur then
+		return final
+	end
+	local steps = 2 * count + 3
+	local k = floor(steps * Anim.easeOutQuad(t / dur))
+	return (final - 1 - steps + k) % count + 1
+end
+
+-- A cheap pseudo-random value 0..1 per particle and channel, the same on every call.
+local function noise(i, ch)
+	local v = sin(i * 12.9898 + ch * 78.233) * 43758.5453
+	return v - floor(v)
+end
+
+-- Particle i, t seconds after its launch, with a lifetime `life`: returns x, y (in units of the
+-- spread, y up, starting at 0, 0) and alpha. Thrown upwards and sideways, falls back, fades.
+function Anim.particle(i, t, life)
+	local u = t / life
+	if u < 0 then u = 0 elseif u > 1 then u = 1 end
+	local vx = noise(i, 1) * 2 - 1
+	local vy = 1.2 + 0.8 * noise(i, 2)
+	return vx * u, vy * u - 2.5 * u * u, 1 - u * u
+end
+
+-- Flipbook: frame (1..count) shown t seconds after the start at `fps`; loop wraps around,
+-- otherwise the last frame holds.
+function Anim.frameAt(t, fps, count, loop)
+	if t <= 0 then
+		return 1
+	end
+	local i = floor(t * fps + 1e-9)
+	if loop then
+		return i % count + 1
+	end
+	return (i < count - 1 and i or count - 1) + 1
+end
+
+-- Texture coordinates (left, right, top, bottom) of frame i of a sprite sheet with cols x rows
+-- frames, read row by row.
+function Anim.gridCoord(i, cols, rows)
+	local c = (i - 1) % cols
+	local r = floor((i - 1) / cols)
+	return c / cols, (c + 1) / cols, r / rows, (r + 1) / rows
+end
+
+-- Banner scale while it pops in over `dur`: 0.2 -> 1.12 (at 60 %) -> 1.
+function Anim.pop(t, dur)
+	local u = dur > 0 and t / dur or 1
+	if u <= 0 then
+		return 0.2
+	end
+	if u >= 1 then
+		return 1
+	end
+	if u < 0.6 then
+		return 0.2 + 0.92 * Anim.easeOutQuad(u / 0.6)
+	end
+	return 1.12 - 0.12 * Anim.easeOutQuad((u - 0.6) / 0.4)
+end
+
+-- Card turning over in `dur`: horizontal scale 1 -> 0 -> 1, and whether the front shows (from
+-- the middle on).
+function Anim.flip(t, dur)
+	local u = dur > 0 and t / dur or 1
+	if u >= 1 then
+		return 1, true
+	end
+	if u < 0 then u = 0 end
+	return math.abs(cos(pi * u)), u >= 0.5
+end
+
+-- A w x h region showing a size x size texture centred on it, turned by `angle` (radians)
+-- about the centre: the eight SetTexCoord values (UL, LL, UR, LR corners, x then y). Rotation
+-- by texture coordinates works in every client and needs no clipping, as long as the region's
+-- half diagonal is below half the texture size.
+function Anim.rays(angle, w, h, size)
+	local c, s = cos(angle), sin(angle)
+	local hx, hy = w / 2 / size, h / 2 / size
+	-- corner offsets (dx, dy) in texture units, y down; sampled at R(-angle) * offset
+	local ax, ay = -hx * c - hy * s, hx * s - hy * c -- upper left (-hx, -hy)
+	local bx, by = -hx * c + hy * s, hx * s + hy * c -- lower left (-hx, hy)
+	return 0.5 + ax, 0.5 + ay, 0.5 + bx, 0.5 + by, 0.5 - bx, 0.5 - by, 0.5 - ax, 0.5 - ay
+end
+
+-- Visible part of the segment [a, b] inside [lo, hi] as fractions of the segment (start, end),
+-- or nil when nothing shows.
+function Anim.span(a, b, lo, hi)
+	local va = a < lo and lo or a
+	local vb = b > hi and hi or b
+	if vb - va <= 1e-6 then
+		return nil
+	end
+	return (va - a) / (b - a), (vb - a) / (b - a)
+end
+
+-- Coin i of the coin rain, t seconds into its fall of `life` seconds: x (0..1 across the
+-- window), y (0 top, 1 bottom; starts above, ends below), size class 1..3 and flipbook phase
+-- 0..7. Falls straight down and speeds up a little.
+function Anim.coin(i, t, life)
+	local u = t / life
+	local x = noise(i, 3)
+	local y = -0.12 + 1.26 * (0.55 * u + 0.45 * u * u) + 0.06 * noise(i, 6)
+	return x, y, 1 + floor(noise(i, 4) * 3), floor(noise(i, 5) * 8)
 end

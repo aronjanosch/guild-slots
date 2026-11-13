@@ -1,4 +1,4 @@
-"""Independent reference implementation of docs/core-spec.md, sections 4-6.
+"""Independent reference implementation of docs/core-spec.md, sections 4-6, and of docs/table-t2-spec.md.
 
 Python 3 standard library only. Written strictly from the spec text.
 Names are `str`; every hash input is the UTF-8 encoding of the text.
@@ -71,14 +71,43 @@ PAIR = {"K": 1, "S": 2, "G": 3, "T": 5, "W": 10, "M": 20, "D": 50}
 TRIPLE = {"K": 5, "S": 10, "G": 15, "T": 30, "W": 60, "M": 150, "D": 500}
 
 
+# ---- table T2 (docs/table-t2-spec.md)
+
+T2_BASE = ("KTMKDSGTCDTGWTGWSKMSKDGSWKDWLMSCTKDGSTWCB "
+           "KTGWSKWGKTWGKSWGMKSTWGSMGKTDSLCWKMTBCDWG "
+           "WGDSMTWDSMWSKTSDTGKWCSTGMWSGTKGCDKMDLGWCSWMLKTGKWTLSBDM "
+           "TGSWMGTMWTKWSGWKTGSTKSMWKGSMKGWKGWSMKTWGTWGBMLSTCD "
+           "WKSBKGSWTGMWKTMGWTGKDSBLTCGKM").split()
+T2_FREE = ("SKGTWGKSTWKGWKSMTKGWDSMKDTGMSWDTKBTWLSGKC "
+           "SWKSDKSTWGTKGMKTCSKWSMWCTKGWTDMGSTWGLSDMGSKWLTGKMLKSCWTB "
+           "GTDGSKWTSWKSGTKSGTLWSGWKTWDGTMKDTKSDGLSGKTDCTWKGWMBTDKBMWSC "
+           "SDGSKMWGTKGSWDKTGDCMSWTGWKTWKCGSTDWMGWCKSBGDMSLDWCTKL "
+           "WGSTWSTGKSTGWTGKWGSKTSKGTBKWSMTGSTWDKTSKWGCMDSCKBDWLGST").split()
+T2_LINES = [[1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [2, 2, 2, 2, 2], [0, 1, 2, 1, 0], [2, 1, 0, 1, 2],
+            [1, 2, 2, 2, 1], [1, 0, 0, 0, 1], [2, 2, 1, 0, 0], [0, 0, 1, 2, 2], [0, 1, 1, 1, 0]]
+T2_PAYS = {
+    "K": {3: 5, 4: 25, 5: 100}, "S": {3: 5, 4: 25, 5: 100}, "G": {3: 5, 4: 25, 5: 100},
+    "T": {3: 5, 4: 40, 5: 150}, "W": {3: 5, 4: 40, 5: 150},
+    "M": {2: 5, 3: 30, 4: 100, 5: 750}, "D": {2: 5, 3: 30, 4: 100, 5: 750},
+    "C": {2: 5, 3: 40, 4: 400, 5: 2000}, "L": {2: 10, 3: 100, 4: 1000, 5: 5000},
+}
+T2_SCATTER = {3: 2, 4: 20, 5: 200}
+T2_EXPAND = "KSGTWMDCL"
+T2_MAX_FREE = 50
+T2_AWARD = 10
+
+
 class Tables:
     _stats = {}
 
     @staticmethod
     def get(tid):
+        if tid == "T2":
+            return {"id": "T2", "kind": "lines", "reels": T2_BASE, "freeReels": T2_FREE, "rows": 3,
+                    "lines": T2_LINES, "pays": T2_PAYS, "scatter": T2_SCATTER, "lineCount": 10}
         if tid != "T1":
             return None
-        return {"id": "T1", "reels": [STRIP, STRIP, STRIP], "pair": PAIR, "triple": TRIPLE}
+        return {"id": "T1", "kind": "classic", "reels": [STRIP, STRIP, STRIP], "pair": PAIR, "triple": TRIPLE}
 
     @staticmethod
     def symbols(tbl, s1, s2, s3):
@@ -197,6 +226,8 @@ def settings_parse(line):
             s["T"] = v
         elif k == "X":
             s["X"] = number(v, 1, 1000000000)
+    if s["T"] == "T2" and any(x % 10 for x in s["E"]):
+        raise Err("bad_settings")
     s["Z"] = 2 * s["W"] + 3
     return s
 
@@ -259,6 +290,98 @@ def spin_stops(K, n, contr, tbl):
     R = hmac_raw(K, "|".join(["spin", str(n), contr]))
     ns = [len(x) for x in tbl["reels"]]
     return tuple(int.from_bytes(R[4 * i:4 * i + 4], "big") % ns[i] for i in range(3))
+
+
+def t2_window(strips, stops):
+    """Window of five reels: per reel [top, middle, bottom], wrapping around the strip."""
+    out = []
+    for st, s in zip(strips, stops):
+        n = len(st)
+        out.append([st[(s - 1) % n], st[s % n], st[(s + 1) % n]])
+    return out
+
+
+def t2_line(syms, pays):
+    """One line of five symbols -> (target, count, pay in line bets); target None for all books."""
+    target = None
+    for c in syms:
+        if c != "B":
+            target = c
+            break
+    if target is None:
+        return None, 0, 0
+    count = 0
+    for c in syms:
+        if c == target or c == "B":
+            count += 1
+        else:
+            break
+    pay = pays[target].get(count, 0) if count >= 2 else 0
+    return target, count, pay
+
+
+def t2_evaluate(tbl, stops, stake, X=None):
+    """Window result (spec section 4). X None = base game; else free game on tbl['freeReels']."""
+    if stake % tbl["lineCount"]:
+        raise Err("bad_stake")
+    line_bet = stake // tbl["lineCount"]
+    win_ = t2_window(tbl["freeReels"] if X is not None else tbl["reels"], stops)
+    lines = []
+    for li, rows in enumerate(tbl["lines"], 1):
+        target, count, pay = t2_line([win_[r][rows[r]] for r in range(5)], tbl["pays"])
+        if pay > 0:
+            lines.append({"line": li, "symbol": target, "count": count, "win": pay * line_bet})
+    b = sum(col.count("B") for col in win_)
+    scatter = {"count": b, "win": tbl["scatter"].get(min(b, 5), 0) * stake}
+    res = {"stops": list(stops), "window": win_, "lines": lines, "scatter": scatter}
+    total = sum(x["win"] for x in lines) + scatter["win"]
+    if X is not None:
+        reels = [r + 1 for r in range(5) if X in win_[r]]
+        pay = tbl["pays"][X].get(len(reels), 0)
+        if pay > 0:
+            res["expand"] = {"reels": reels, "count": len(reels), "win": pay * line_bet * tbl["lineCount"]}
+            total += res["expand"]["win"]
+    res["win"] = total
+    res["retrigger"] = b >= 3
+    return res
+
+
+def _stops5(R, strips):
+    return [int.from_bytes(R[4 * i:4 * i + 4], "big") % len(strips[i]) for i in range(5)]
+
+
+def t2_round(K, n, contr, tbl, stake, cap):
+    """One round (spec section 5/6). K text or keyed function f(msg, raw) -> bytes."""
+    def h(msg):
+        return K(msg, True) if callable(K) else hmac_raw(K, msg)
+
+    R = h("|".join(["spin", str(n), contr]))
+    stops = _stops5(R, tbl["reels"])
+    base = t2_evaluate(tbl, stops, stake)
+    base_win = base["win"]
+    rd = {"kind": "lines", "n": n, "stake": stake, "lineBet": stake // tbl["lineCount"], "stops": stops,
+          "window": base["window"], "lines": base["lines"], "scatter": base["scatter"], "base": base_win}
+    total = base_win
+    if base["scatter"]["count"] >= 3:
+        X = T2_EXPAND[int.from_bytes(R[20:24], "big") % 9]
+        awarded = T2_AWARD
+        games = []
+        i = 0
+        fwin = 0
+        while i < awarded:
+            i += 1
+            F = h("|".join(["free", str(n), str(i), contr]))
+            g = t2_evaluate(tbl, _stops5(F, tbl["freeReels"]), stake, X)
+            games.append(g)
+            fwin += g["win"]
+            if g["retrigger"]:
+                awarded = min(awarded + T2_AWARD, T2_MAX_FREE)
+        rd["free"] = {"symbol": X, "awarded": len(games), "win": fwin, "games": games}
+        total += fwin
+    if cap > 0 and total > cap:
+        total = cap
+    rd["win"] = total
+    return rd
 
 
 def gamble_won(K, n, g, contr):
@@ -407,19 +530,24 @@ def apply(st, e):
         S = st.settings
         if e["n"] != st.n + 1:
             raise Err("bad_number")
-        if e["stake"] not in S["E"]:
+        if e["stake"] not in S["E"] or (st.tbl["kind"] == "lines" and e["stake"] % st.tbl["lineCount"]):
             raise Err("bad_stake")
         _check_contribs(st, e, "spin", e["n"], 0)
         upd = {"n": e["n"], "g": 0}
         if e["status"] == "ok":
             if st.balance < e["stake"]:
                 raise Err("no_funds")
-            stops = spin_stops(st.K, e["n"], e["contribs"], st.tbl)
-            win = Tables.win(st.tbl, e["stake"], S["C"], *stops)
+            if st.tbl["kind"] == "lines":
+                rd = t2_round(st.K, e["n"], e["contribs"], st.tbl, e["stake"], S["C"])
+                win = rd["win"]
+                info.update(round=rd, multiplier=Fraction(win, e["stake"]), win=win)
+            else:
+                stops = spin_stops(st.K, e["n"], e["contribs"], st.tbl)
+                win = Tables.win(st.tbl, e["stake"], S["C"], *stops)
+                info.update(stops=stops, multiplier=Tables.multiplier(st.tbl, *stops), win=win)
             upd["balance"] = st.balance - e["stake"] + win
             can = S["G"] > 0 and win > 0 and (S["C"] == 0 or 2 * win <= S["C"])
             upd["pending"] = win if can else 0
-            info.update(stops=stops, multiplier=Tables.multiplier(st.tbl, *stops), win=win)
         else:
             upd["pending"] = 0
     elif t == "G":

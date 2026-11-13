@@ -1,21 +1,24 @@
 local _, ns = ...
 
 -- One reel: a column of three visible symbol slots that scrolls through the real strip.
--- Motion comes from ns.Anim; this file only places textures.
+-- Motion comes from ns.Anim; this file only places textures. Highlights (winning cells, dimming,
+-- expansions) are drawn by the slot window on top of the reels.
 --
 -- Clipping is done by hand (cropping each icon's height and texture coordinates), so it
 -- works without SetClipsChildren. SetClipsChildren is still enabled where it exists.
+-- setPosition runs every frame while the reel turns and builds no tables.
 
 local Reel = {}
 Reel.__index = Reel
 ns.Reel = Reel
 
 local Anim, Theme = ns.Anim, ns.Theme
-local HALF = 1.5 -- visible rows above and below the payline row centre
+local HALF = 1.5 -- visible rows above and below the middle row centre
+local ICONS = 5 -- icons placed around the position (rows -2..2)
 
 -- parent: frame; strip: list of symbol ids (1-based, stop i is strip[i + 1]).
 function Reel.new(parent, strip)
-	local size, colors = Theme.size, Theme.colors
+	local size = Theme.size
 	local cell = size.cell
 	local f = CreateFrame("Frame", nil, parent)
 	f:SetSize(cell, cell * 3)
@@ -23,30 +26,24 @@ function Reel.new(parent, strip)
 		pcall(f.SetClipsChildren, f, true)
 	end
 
-	local bg = f:CreateTexture(nil, "BACKGROUND")
-	bg:SetAllPoints(f)
-	bg:SetColorTexture(colors.cell[1], colors.cell[2], colors.cell[3], 1)
-
-	-- Highlight behind the payline symbol, shown on a win.
-	local glow = f:CreateTexture(nil, "BORDER")
-	glow:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -cell - 2)
-	glow:SetSize(cell - 4, cell - 4)
-	glow:SetColorTexture(colors.accent[1], colors.accent[2], colors.accent[3], 0.25)
-	glow:Hide()
+	-- The reel background is one texture behind all reels (slot window); each reel only adds
+	-- its shade (darker at the top and bottom) over the symbols.
+	local shade = f:CreateTexture(nil, "OVERLAY")
+	shade:SetAllPoints(f)
+	shade:SetTexture(Theme.tex.reelShade)
+	shade:SetAlpha(Theme.reelShadeAlpha or 0.8)
 
 	local self = setmetatable({
 		frame = f,
+		shade = shade,
 		strip = strip,
 		n = #strip,
-		glow = glow,
 		icons = {},
 		x = 0, -- current position (float stop index)
 		plan = nil,
-		mode = nil, -- nil, "win" or "dim"
-		level = 0, -- highlight strength 0..1
 	}, Reel)
 
-	for i = 1, 5 do
+	for i = 1, ICONS do
 		local tex = f:CreateTexture(nil, "ARTWORK")
 		tex:SetWidth(cell - 2 * size.iconInset)
 		self.icons[i] = tex
@@ -55,33 +52,34 @@ function Reel.new(parent, strip)
 	return self
 end
 
--- Places the five icons for position x (see Anim.cells) and crops them to the window.
+-- Places the five icons for position x (see Anim.cell) and crops them to the window.
 function Reel:setPosition(x)
 	self.x = x
 	local cell, inset = Theme.size.cell, Theme.size.iconInset
 	local crop = Theme.iconCrop
+	local symbols, strip, n = Theme.symbols, self.strip, self.n
 	local iconH = (cell - 2 * inset) / cell -- icon height in rows
-	local cells = Anim.cells(x, self.n)
-	for i, c in ipairs(cells) do
+	local u0, u1, v0, v1 = crop[1], crop[2], crop[3], crop[4]
+	for i = 1, ICONS do
+		local index, row = Anim.cell(x, n, i - 3)
 		local tex = self.icons[i]
-		local top, bottom = Anim.clip(c.row / iconH, HALF / iconH)
+		local top, bottom = Anim.clip(row / iconH, HALF / iconH)
 		if top then
-			tex:SetTexture(Theme.symbols[self.strip[c.index + 1]])
-			local u0, u1, v0, v1 = crop[1], crop[2], crop[3], crop[4]
+			-- float noise must not push the coordinates past the art's edge
+			if top < 0 then top = 0 end
+			if bottom > 1 then bottom = 1 end
+			tex:SetTexture(symbols[strip[index + 1]])
 			tex:SetTexCoord(u0, u1, v0 + (v1 - v0) * top, v0 + (v1 - v0) * bottom)
 			-- Rows from the window top (row -HALF) to the visible top edge of the icon.
-			local visTop = c.row - iconH / 2 + top * iconH + HALF
+			local visTop = row - iconH / 2 + top * iconH + HALF
 			tex:ClearAllPoints()
 			tex:SetPoint("TOP", self.frame, "TOP", 0, -visTop * cell)
 			tex:SetHeight(math.max(0.01, (bottom - top) * iconH * cell))
-			tex.row = c.row
 			tex:Show()
 		else
-			tex.row = nil
 			tex:Hide()
 		end
 	end
-	self:applyHighlight()
 end
 
 -- Sets the current stop without animation.
@@ -90,10 +88,18 @@ function Reel:setStop(stop)
 	self:setPosition(stop)
 end
 
--- Starts a spin to `target`; times are relative to `now` (seconds of the window clock).
-function Reel:spin(now, target, stopAt)
+-- Changes the strip (base or free games) and shows `stop` on it.
+function Reel:setStrip(strip, stop)
+	self.strip = strip
+	self.n = #strip
+	self:setStop((stop or 0) % self.n)
+end
+
+-- Starts a spin to `target` at window time `t0` (may lie a little in the future); stopAt is
+-- the landing time relative to t0.
+function Reel:spin(t0, target, stopAt)
 	local t = Theme.timing
-	self.t0 = now
+	self.t0 = t0
 	self.landedFired = false
 	self.plan = Anim.plan({
 		start = math.floor(self.x + 0.5) % self.n,
@@ -110,7 +116,6 @@ function Reel:spin(now, target, stopAt)
 		bounce = t.bounce,
 		overshoot = t.overshoot,
 	})
-	self:setMode(nil)
 end
 
 function Reel:quickStop(now, delay)
@@ -119,7 +124,8 @@ function Reel:quickStop(now, delay)
 	end
 end
 
--- Advances the reel. Returns "landed" once when it lands, "done" once the bounce ends.
+-- Advances the reel. Returns "landed" once when it lands, "done" once the bounce ends (with
+-- true as second value when the landing happened in the same frame).
 function Reel:update(now)
 	local p = self.plan
 	if not p then
@@ -142,36 +148,4 @@ end
 
 function Reel:isSpinning()
 	return self.plan ~= nil
-end
-
--- mode nil: normal; "win": payline symbol glows; "dim": everything dimmed.
-function Reel:setMode(mode)
-	self.mode = mode
-	self.level = 0
-	self:applyHighlight()
-end
-
--- level 0..1 drives the win pulse.
-function Reel:setLevel(level)
-	self.level = level
-	self:applyHighlight()
-end
-
-function Reel:applyHighlight()
-	local mode, dim = self.mode, Theme.timing.dimAlpha
-	for _, tex in ipairs(self.icons) do
-		local a = 1
-		if mode == "dim" then
-			a = dim
-		elseif mode == "win" and tex.row and math.abs(tex.row) > 0.5 then
-			a = dim
-		end
-		tex:SetAlpha(a)
-	end
-	if mode == "win" then
-		self.glow:SetAlpha(0.35 + 0.65 * self.level)
-		self.glow:Show()
-	else
-		self.glow:Hide()
-	end
 end

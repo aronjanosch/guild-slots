@@ -3,6 +3,7 @@
 Usage: python3 tools/ref/gen_vectors.py [output]   (default tests/vectors.lua)
 """
 import copy
+import json
 import os
 import sys
 from fractions import Fraction
@@ -58,6 +59,8 @@ def lua(v, ind=0):
         raise ValueError("None")
     if isinstance(v, int):
         return str(v)
+    if isinstance(v, float):
+        return repr(v)
     if isinstance(v, str):
         return lua_str(v)
     if isinstance(v, (list, tuple)):
@@ -794,6 +797,234 @@ def contrib_cases():
     return cases
 
 
+# ---------------------------------------------------------------- table T2 vectors (docs/table-t2-spec.md)
+
+T2_LINE = "GSLOTS1;L=0;W=2;R=1;E=10,50,100;G=3;C=0;T=T2;X=1000"
+T2_STAKES = [10, 20, 50, 100, 250, 1000, 10000, 1000000]
+T2_CONTRIBS = ["", "", "", "Mira:0123456789abcdef", "Zed:fedcba9876543210,abe:0011223344556677"]
+SEARCH_LIMIT = 6000000
+
+
+def _t2_books(tbl):
+    """Per-reel table: number of books in the window for every stop (a cheap pre-filter for searches)."""
+    out = []
+    for st in tbl["reels"]:
+        n = len(st)
+        out.append([sum(1 for r in (-1, 0, 1) if st[(s + r) % n] == "B") for s in range(n)])
+    return out
+
+
+def _line_cells(rd, line):
+    return [rd["window"][r][R.T2_LINES[line - 1][r]] for r in range(5)]
+
+
+def _games(rd):
+    return rd["free"]["games"] if "free" in rd else []
+
+
+def _is_five_wild(rd):
+    return any(x["count"] == 5 and "B" in _line_cells(rd, x["line"]) for x in rd["lines"])
+
+
+def _is_five_plain(rd):
+    return any(x["count"] == 5 and "B" not in _line_cells(rd, x["line"]) for x in rd["lines"])
+
+
+def _is_lead_wild(rd):
+    return any(x["count"] >= 3 and _line_cells(rd, x["line"])[0] == "B" for x in rd["lines"])
+
+
+def _is_five_books_line(rd):
+    return any(_line_cells(rd, li) == ["B"] * 5 for li in range(1, 11))
+
+
+def _expand_gap(rd):
+    for g in _games(rd):
+        if "expand" in g:
+            rs = g["expand"]["reels"]
+            if rs != list(range(rs[0], rs[0] + len(rs))):
+                return True
+    return False
+
+
+# name -> (predicate on the round, number wanted, minimum books in the base window for a cheap pre-filter)
+T2_RARE = [
+    ("free", lambda rd: "free" in rd, 6, 3),
+    ("scatter4", lambda rd: rd["scatter"]["count"] == 4, 2, 4),
+    ("scatter5", lambda rd: rd["scatter"]["count"] >= 5, 1, 5),
+    ("retrigger", lambda rd: any(g["retrigger"] for g in _games(rd)), 3, 3),
+    ("retrigger_more", lambda rd: rd.get("free", {}).get("awarded", 0) >= 30, 1, 3),
+    ("expand", lambda rd: any("expand" in g for g in _games(rd)), 5, 3),
+    ("expand_gap", _expand_gap, 2, 3),
+    ("expand_big", lambda rd: any("expand" in g and g["expand"]["count"] >= 4 for g in _games(rd)), 1, 3),
+    ("five_wild", _is_five_wild, 3, 0),
+    ("five_plain", _is_five_plain, 2, 0),
+    ("lead_wild", _is_lead_wild, 3, 0),
+    ("five_books_line", _is_five_books_line, 1, 5),
+    ("limit50", lambda rd: rd.get("free", {}).get("awarded", 0) >= 50, 1, 3),
+    ("big", lambda rd: rd["win"] >= 200 * rd["stake"], 1, 3),
+]
+
+
+def t2_search(name, pred, want, min_books, tbl, books, limit=SEARCH_LIMIT):
+    """Try spin numbers 1.. with a fixed key until `want` rounds satisfy pred; -> (K, [n..], tries)."""
+    K = R.sha_hex("gsvec|t2|" + name)
+    found = []
+    tries = 0
+    for n in range(1, limit):
+        tries = n
+        if min_books:
+            st = R._stops5(R.hmac_raw(K, "spin|%d|" % n), tbl["reels"])
+            if sum(books[r][st[r]] for r in range(5)) < min_books:
+                continue
+        rd = R.t2_round(K, n, "", tbl, 10, 0)
+        if pred(rd):
+            found.append(n)
+            if len(found) >= want:
+                break
+    return K, found, tries
+
+
+def build_t2_rounds():
+    tbl = R.Tables.get("T2")
+    books = _t2_books(tbl)
+    rounds = []
+    report = {}
+
+    def add(K, n, contr, stake, cap):
+        rd = R.t2_round(K, n, contr, tbl, stake, cap)
+        rounds.append({"K": K, "n": n, "contribs": contr, "stake": stake, "cap": cap, "round": rd})
+        return rd
+
+    for name, pred, want, min_books in T2_RARE:
+        K, found, tries = t2_search(name, pred, want, min_books, tbl, books)
+        report[name] = (len(found), want, tries)
+        for i, n in enumerate(found):
+            add(K, n, "", T2_STAKES[(i + 1) % len(T2_STAKES)], 0)
+    # capped wins: a plain line win and a free-game round, cut by caps around the win
+    for name, pick, min_books in (("cap_base", lambda rd: "free" not in rd and rd["win"] >= 100, 0),
+                                  ("cap_free", lambda rd: "free" in rd and rd["win"] >= 200, 3)):
+        K, found, tries = t2_search(name, pick, 2, min_books, tbl, books)
+        report[name] = (len(found), 2, tries)
+        for j, n in enumerate(found):
+            stake = T2_STAKES[j]
+            full = R.t2_round(K, n, "", tbl, stake, 0)["win"]
+            for cap in (full // 2, full - 1, full, full + 1):
+                add(K, n, "", stake, cap)
+    # bulk: varied keys, stakes, contributions, a few caps
+    r = Rng("t2bulk")
+    i = 0
+    while len(rounds) < 240:
+        K = r.hex(32)
+        n = [1, 2, 3, 2 ** 31, 2 ** 31 - 1][i % 5] if i < 10 else 1 + r.int(100000)
+        contr = T2_CONTRIBS[i % len(T2_CONTRIBS)]
+        stake = T2_STAKES[r.int(len(T2_STAKES))]
+        cap = [0, 0, 0, 0, 100, 500, 5000][r.int(7)]
+        add(K, n, contr, stake, cap)
+        i += 1
+    return rounds, report
+
+
+def build_t2_account(t, which):
+    r = Rng("t2acc%d%d" % (which, t))
+    feats = set()
+    if which == 0:
+        ac = Acct("t2a", guild="Gilde Fünf-Walzen", player="Sören Ähre")
+        ac.add(mk_buy(r, 5000, T2_LINE))
+        E = [10, 50, 100]
+        rounds_n = 70
+    else:
+        ac = Acct("t2b", guild="Gilde Ω-T2", player="Zoë")
+        ac.add(mk_buy(r, 40000, "GSLOTS1;L=1;W=2;R=1;E=10,100,1000;G=2;C=3000;T=T2;X=500", officer=OFFICER2))
+        E = [10, 100, 1000]
+        rounds_n = 50
+    for i in range(rounds_n):
+        if which == 0 and i == 30:
+            ac.add(mk_pay(r, ac.st.balance // 3, ac.st.balance, time=T0 + 100))
+            ac.add(mk_buy(r, 1500, "GSLOTS1;L=0;E=10,50,100;G=3;C=800;T=T2", officer=OFFICER2, time=T0 + 200))
+            feats.add("second_buy")
+        stake = E[r.int(3)] if which == 0 else E[[0, 1, 1, 2, 0][r.int(5)]]
+        if ac.st.balance < stake:
+            stake = E[0]
+        if ac.st.balance < stake:
+            return None, feats
+        A = 20 if which else 0
+        info = spin(ac, stake, A=A, count=3 if which else 0)
+        rd = info["round"]
+        if "free" in rd:
+            feats.add("free")
+        if info["win"] > 0:
+            feats.add("win")
+        while ac.st.pending > 0 and r.int(10) < 8:
+            gi = gamble(ac, A=A, count=3 if which else 0)
+            feats.add("gwon" if gi["won"] else "lost")
+    need = {"win", "gwon", "lost", "free"} | ({"second_buy"} if which == 0 else set())
+    return (ac if need <= feats else None), feats
+
+
+def t2_account_record(ac):
+    return {"guild": ac.guild, "player": ac.player, "entries": ac.texts, "balance": ac.st.balance,
+            "head": ac.st.head}
+
+
+def build_t2_invalid():
+    out = []
+    r = Rng("t2inv")
+    base = {"guild": GUILD, "player": PLAYER}
+    for line, note in (("GSLOTS1;E=10,15;T=T2", "T2 with a stake that is not a multiple of 10"),
+                       ("GSLOTS1;E=5;T=T2", "T2 with stake 5"), ("GSLOTS1;T=T2;E=10,20,35", "T before E, same rule")):
+        out.append(dict(base, entries=[R.encode(mk_buy(r, 1000, line))], index=1, code="bad_settings", note=note))
+    ac, _ = fresh(T2_LINE, tokens=1000, seed_label="t2inv")
+    for stake, note in ((5, "stake 5 is not in E"), (20, "stake 20 is not in E (E = 10,50,100)"),
+                        (15, "stake 15 is not in E")):
+        prefix_case(out, ac, S_(1, stake), "bad_stake", note)
+    ac2, _ = fresh("GSLOTS1;E=10,20;T=T2;G=0", tokens=1000, seed_label="t2inv2")
+    prefix_case(out, ac2, S_(1, 30), "bad_stake", "stake 30 is a multiple of 10 but not in E")
+    prefix_case(out, ac2, S_(1, 20, A=2), "bad_contribs", "level 0: A must be 0, also for T2")
+    return out
+
+
+def load_t2_stats():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "t2_stats.json")
+    if not os.path.exists(path):
+        raise SystemExit("tools/ref/t2_stats.json missing: run python3 tools/ref/t2_stats.py first")
+    with open(path) as f:
+        j = json.load(f)
+    return {"rtp": j["rtp"], "hit": j["hit"], "variance": j["variance"], "freeRate": j["freeRate"]}, j
+
+
+def build_t2_all():
+    stats, j = load_t2_stats()
+    rounds, report = build_t2_rounds()
+    assert len(rounds) >= 200
+    accounts = []
+    for which in (0, 1):
+        for t in range(3000):
+            ac, _ = build_t2_account(t, which)
+            if ac is not None:
+                accounts.append(t2_account_record(ac))
+                break
+        else:
+            raise RuntimeError("no T2 account %d" % which)
+    invalid = build_t2_invalid()
+    for c in invalid:
+        st, code, idx = R.replay(c["guild"], c["player"], c["entries"])
+        assert st is None and (code, idx) == (c["code"], c["index"]), (c, code, idx)
+    for a in accounts:
+        st, code, idx = R.replay(a["guild"], a["player"], a["entries"])
+        assert st is not None and st.balance == a["balance"] and st.head == a["head"]
+    return {"stats": stats, "rounds": rounds, "accounts": accounts, "invalid": invalid}, report, j
+
+
+T2_HEADER = """-- Generated by tools/ref/gen_vectors.py from the Python reference. Do not edit.
+-- stats: rtp and freeRate exact (tools/ref/t2_stats.py); hit and variance simulated over %(rounds)d rounds,
+--   standard error hit %(hit_se).3g, variance %(var_se).3g.
+-- rounds[*]: K (64 hex), n, contribs, stake, cap, round = Engine.round(K, n, contribs, T2, stake, cap).
+-- accounts[*]: replay(guild, player, entries) gives `balance` and the full 64-hex `head`.
+-- invalid[*]: replay must fail at `index` with `code`.
+"""
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -869,6 +1100,16 @@ def main():
     L = data["ledger"]
     print("engine:", {k: len(v) for k, v in e.items()})
     print("ledger:", {k: len(v) for k, v in L.items()})
+    if len(sys.argv) > 1:
+        return  # an explicit output path writes only the T1 vectors
+    out2 = os.path.join(here, "..", "..", "tests", "vectors_t2.lua")
+    d2, report, j = build_t2_all()
+    hdr = T2_HEADER % {"rounds": j["sim"]["rounds"], "hit_se": j["se"]["hit"], "var_se": j["se"]["variance"]}
+    with open(out2, "wb") as f:
+        f.write((hdr + "return " + lua(d2) + "\n").encode("utf-8"))
+    print("t2:", {k: len(v) for k, v in d2.items()})
+    for k, (got, want, tries) in report.items():
+        print("  rare %-16s found %d of %d (tried %d)" % (k, got, want, tries))
 
 
 if __name__ == "__main__":

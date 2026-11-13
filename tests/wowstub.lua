@@ -6,6 +6,10 @@
 --   stub.combat, stub.mouseOver, stub.locale   switches
 --   stub.sounds, stub.chat  what was played / printed
 --   stub.unknown            method names called that the stub does not model (no-ops)
+--   stub.off                set of optional method names to hide, like a client without them
+--                           (CreateLine, SetRotation, SetClipsChildren, SetBlendMode, ...)
+--   stub.fontsFail          SetFont with a file under Interface\AddOns fails (returns false)
+--   stub.files              every add-on texture or font file set, path -> count
 --
 -- Arguments of the modelled methods are checked (numbers, anchor names), so a nil passed by
 -- a typo fails here instead of in the client.
@@ -15,9 +19,15 @@ local stub = {
 	mouseOver = false,
 	locale = "enUS",
 	sounds = {},
+	playing = {}, -- handle -> file of file sounds not stopped by StopSound
 	chat = {},
 	unknown = {},
+	hardware = 0, -- depth of simulated hardware events
+	blocked = {}, -- protected calls made outside a hardware event
 	frames = {},
+	off = {},
+	fontsFail = false,
+	files = {},
 }
 
 local POINTS = {
@@ -35,6 +45,7 @@ local function isNum(v) return type(v) == "number" and v == v end
 local Object = {}
 local meta = {
 	__index = function(self, k)
+		if stub.off[k] then return nil end
 		local m = Object[k]
 		if m then return m end
 		if type(k) == "string" and k:match("^[A-Z]") then
@@ -148,8 +159,26 @@ function Object:CreateFontString(name, layer)
 	return new("FontString", name, self)
 end
 
-function Object:SetTexture(path)
+-- A file under Interface\AddOns\GuildSlots must exist (relative to the repo root).
+local function addonFile(path, what)
+	if type(path) ~= "string" or not path:find("^Interface\\AddOns\\") then
+		return false
+	end
+	check(path:find("^Interface\\AddOns\\GuildSlots\\"), what .. ": foreign add-on path " .. path)
+	local rel = path:gsub("^Interface\\AddOns\\", ""):gsub("\\", "/")
+	local fh = io.open(rel)
+	check(fh, what .. ": file missing: " .. rel)
+	fh:close()
+	stub.files[path] = (stub.files[path] or 0) + 1
+	return true
+end
+
+local WRAPS = { CLAMP = true, REPEAT = true, CLAMPTOBLACKADDITIVE = true, CLAMPTOBLACK = true, CLAMPTOWHITE = true, MIRROR = true }
+function Object:SetTexture(path, wrapH, wrapV)
 	check(path == nil or type(path) == "string" or isNum(path), "SetTexture: bad path")
+	check(wrapH == nil or WRAPS[wrapH], "SetTexture: bad horizontal wrap")
+	check(wrapV == nil or WRAPS[wrapV], "SetTexture: bad vertical wrap")
+	addonFile(path, "SetTexture")
 	self._texture = path
 end
 function Object:GetTexture() return self._texture end
@@ -157,30 +186,98 @@ function Object:SetColorTexture(r, g, b, a)
 	check(isNum(r) and isNum(g) and isNum(b) and (a == nil or isNum(a)), "SetColorTexture needs numbers")
 	self._texture = "color"
 end
-function Object:SetTexCoord(a, b, c, d)
+function Object:SetTexCoord(a, b, c, d, e, f, g, h)
+	if e ~= nil then -- eight values: UL, LL, UR, LR corners
+		local all = { a, b, c, d, e, f, g, h }
+		for i = 1, 8 do
+			check(isNum(all[i]) and all[i] >= -1e-9 and all[i] <= 1 + 1e-9, "SetTexCoord: corner value out of range")
+		end
+		self._coord = all
+		return
+	end
 	check(isNum(a) and isNum(b) and isNum(c) and isNum(d), "SetTexCoord needs four numbers")
 	check(a >= 0 and b <= 1 and c >= 0 and d <= 1 and a <= b and c <= d, "SetTexCoord out of range")
 	self._coord = { a, b, c, d }
 end
-function Object:SetVertexColor(r, g, b) check(isNum(r) and isNum(g) and isNum(b), "SetVertexColor needs numbers") end
+function Object:GetTexCoord()
+	local c = self._coord or { 0, 1, 0, 1 }
+	return unpack(c)
+end
+function Object:SetVertexColor(r, g, b, a)
+	check(isNum(r) and isNum(g) and isNum(b) and (a == nil or isNum(a)), "SetVertexColor needs numbers")
+	self._vertex = { r, g, b, a or 1 }
+end
+function Object:GetVertexColor()
+	local v = self._vertex or { 1, 1, 1, 1 }
+	return v[1], v[2], v[3], v[4]
+end
+local BLENDS = { ADD = true, BLEND = true, ALPHAKEY = true, DISABLE = true, MOD = true }
+function Object:SetBlendMode(m) check(BLENDS[m], "SetBlendMode: bad mode " .. tostring(m)); self._blend = m end
+function Object:SetRotation(r) check(isNum(r), "SetRotation needs a number") end
+function Object:SetDrawLayer(layer, sub)
+	check(LAYERS[layer], "SetDrawLayer: bad layer " .. tostring(layer))
+	check(sub == nil or (isNum(sub) and sub >= -8 and sub <= 7), "SetDrawLayer: bad sublevel")
+end
+function Object:SetScale(s) check(isNum(s) and s > 0, "SetScale needs a positive number"); self._scale = s end
+function Object:GetScale() return self._scale or 1 end
+
+-- Lines (CreateLine)
+function Object:CreateLine(name, layer, template, sublevel)
+	check(layer == nil or LAYERS[layer], "CreateLine: bad layer " .. tostring(layer))
+	check(sublevel == nil or (isNum(sublevel) and sublevel >= -8 and sublevel <= 7), "CreateLine: bad sublevel")
+	return new("Line", name, self)
+end
+local function linePoint(self, key, relPoint, rel, x, y)
+	check(self._kind == "Line", key .. " on a non-line")
+	check(POINTS[relPoint], key .. ": bad point " .. tostring(relPoint))
+	check(type(rel) == "table", key .. ": bad relative frame")
+	check(isNum(x) and isNum(y), key .. ": bad offset")
+	self[key] = { relPoint, rel, x, y }
+end
+function Object:SetStartPoint(relPoint, rel, x, y) linePoint(self, "_start", relPoint, rel, x, y) end
+function Object:SetEndPoint(relPoint, rel, x, y) linePoint(self, "_end", relPoint, rel, x, y) end
+function Object:SetThickness(n) check(isNum(n) and n > 0, "SetThickness needs a number"); self._thickness = n end
 
 function Object:SetText(t)
 	check(t == nil or type(t) == "string" or isNum(t), "SetText: bad value")
 	self._text = t and tostring(t) or nil
+	-- Like the client: an edit box reports a scripted change with userInput = false.
+	if self._kind == "EditBox" and self._scripts.OnTextChanged then
+		self._scripts.OnTextChanged(self, false)
+	end
 end
 function Object:GetText() return self._text end
 function Object:SetTextColor(r, g, b) check(isNum(r) and isNum(g) and isNum(b), "SetTextColor needs numbers") end
 function Object:SetFont(path, size, flags)
 	check(type(path) == "string" and isNum(size), "SetFont: bad arguments")
+	check(flags == nil or type(flags) == "string", "SetFont: bad flags")
+	if addonFile(path, "SetFont") and stub.fontsFail then
+		return false
+	end
 	self._font = path
 	return true
 end
-function Object:GetFont() return self._font, 12, "" end
-function Object:SetFontObject(o) check(type(o) == "table", "SetFontObject: bad object") end
+function Object:GetFont()
+	if not self._font then return nil end
+	return self._font, 12, ""
+end
+function Object:SetShadowOffset(x, y) check(isNum(x) and isNum(y), "SetShadowOffset needs numbers") end
+function Object:SetShadowColor(r, g, b, a)
+	check(isNum(r) and isNum(g) and isNum(b) and (a == nil or isNum(a)), "SetShadowColor needs numbers")
+end
+function Object:SetFontObject(o)
+	check(type(o) == "table", "SetFontObject: bad object")
+	self._font = "object"
+end
 function Object:SetJustifyH(j) check(j == "LEFT" or j == "CENTER" or j == "RIGHT", "SetJustifyH: bad value") end
 
 function Object:Click(button)
-	if self._scripts.OnClick then self._scripts.OnClick(self, button or "LeftButton", false) end
+	stub.hardware = stub.hardware + 1
+	local ok, err = pcall(function()
+		if self._scripts.OnClick then self._scripts.OnClick(self, button or "LeftButton", false) end
+	end)
+	stub.hardware = stub.hardware - 1
+	if not ok then error(err, 0) end
 end
 function Object:EnableKeyboard(on)
 	check(not stub.combat, "EnableKeyboard called in combat")
@@ -201,6 +298,35 @@ function Object:StopMovingOrSizing() end
 function Object:SetClampedToScreen() end
 function Object:SetToplevel() end
 function Object:SetClipsChildren() end
+function Object:SetJustifyV(j) check(j == "TOP" or j == "MIDDLE" or j == "BOTTOM", "SetJustifyV: bad value") end
+function Object:SetWordWrap() end
+
+-- EditBox
+function Object:SetAutoFocus(on) self._autoFocus = on and true or false end
+function Object:SetMaxLetters(n) check(isNum(n), "SetMaxLetters needs a number") end
+function Object:SetTextInsets(l, r, t, b)
+	check(isNum(l) and isNum(r) and isNum(t) and isNum(b), "SetTextInsets needs four numbers")
+end
+function Object:SetFocus()
+	self._focus = true
+	if self._scripts.OnEditFocusGained then self._scripts.OnEditFocusGained(self) end
+end
+function Object:ClearFocus()
+	local had = self._focus
+	self._focus = false
+	if had and self._scripts.OnEditFocusLost then self._scripts.OnEditFocusLost(self) end
+end
+function Object:HasFocus() return self._focus and true or false end
+function Object:HighlightText() self._highlighted = true end
+function Object:SetCursorPosition(n) check(isNum(n), "SetCursorPosition needs a number") end
+
+-- Simulates the user typing into an edit box: the text is replaced and OnTextChanged runs
+-- with userInput = true.
+function stub.type(box, t)
+	check(box._kind == "EditBox", "stub.type needs an edit box")
+	box._text = t
+	if box._scripts.OnTextChanged then box._scripts.OnTextChanged(box, true) end
+end
 
 -- Globals --------------------------------------------------------------------------------
 
@@ -218,6 +344,7 @@ GameFontNormal = new("Font", nil, nil)
 SOUNDKIT = {
 	IG_MAINMENU_OPTION_CHECKBOX_ON = 856, IG_MAINMENU_OPEN = 850, U_CHAT_SCROLL_BUTTON = 1115,
 	LOOT_WINDOW_COIN_SOUND = 120, READY_CHECK = 8960, IG_QUEST_FAILED = 847,
+	IG_QUEST_LOG_OPEN = 875, RAID_WARNING = 8959, UI_EPICLOOT_TOAST = 31578,
 }
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, msg) stub.chat[#stub.chat + 1] = msg end }
 
@@ -230,7 +357,111 @@ function PlaySound(id, channel)
 	stub.sounds[#stub.sounds + 1] = id
 	return true
 end
+function PlaySoundFile(file, channel)
+	check(type(file) == "string" and file:find("^Interface\\AddOns\\GuildSlots\\"), "PlaySoundFile needs an addon path")
+	local rel = file:gsub("^Interface\\AddOns\\", ""):gsub("\\", "/")
+	local fh = io.open(rel)
+	check(fh, "sound file missing: " .. rel)
+	fh:close()
+	stub.sounds[#stub.sounds + 1] = file
+	stub.playing[#stub.sounds] = file
+	return true, #stub.sounds
+end
+function StopSound(handle)
+	stub.playing[handle] = nil
+end
+function stub.isPlaying(name)
+	for _, file in pairs(stub.playing) do
+		if file:find(name, 1, true) then return true end
+	end
+	return false
+end
+-- Addon metadata read from the TOC on disk ("## Version: x" -> GetAddOnMetadata(name, "Version")).
+C_AddOns = {
+	GetAddOnMetadata = function(name, field)
+		check(type(name) == "string" and type(field) == "string", "GetAddOnMetadata: bad arguments")
+		local fh = io.open(name .. "/" .. name .. ".toc")
+		if not fh then return nil end
+		local value
+		for line in fh:lines() do
+			local k, v = line:match("^## ([%w%-]+):%s*(.-)%s*$")
+			if k == field then value = v end
+		end
+		fh:close()
+		return value
+	end,
+}
 C_Timer = { After = function(_, fn) stub.timers = stub.timers or {}; table.insert(stub.timers, fn) end }
+
+-- Guild and addon-message API ------------------------------------------------------------
+--   stub.guildName, stub.playerName, stub.playerGUID, stub.infoText, stub.serverTime
+--   stub.roster      list of { name, rankName, rankIndex, level, class, zone, note, officerNote, online }
+--   stub.sendCode    result code SendAddonMessage returns (default 0)
+--   stub.sent        { { prefix, text, channel, target }, ... } every call, accepted or not
+--   stub.prefixes    registered prefixes
+--   stub.rosterRequests  count of C_GuildInfo.GuildRoster calls
+--   stub.deliver(prefix, text, channel, sender)   fire CHAT_MSG_ADDON
+stub.guildName = "Test Guild"
+stub.playerName = "Alice Smith"
+stub.playerGUID = "Player-1-00000001"
+stub.infoText = ""
+stub.serverTime = 1700000000
+stub.roster = {}
+stub.sendCode = 0
+stub.sent = {}
+stub.prefixes = {}
+stub.rosterRequests = 0
+
+function IsInGuild() return stub.guildName ~= nil end
+function GetGuildInfo(unit)
+	check(unit == "player", "GetGuildInfo: only 'player' is modelled")
+	return stub.guildName
+end
+function GetUnitName(unit, showServer)
+	check(unit == "player", "GetUnitName: only 'player' is modelled")
+	return stub.playerName
+end
+function UnitName(unit)
+	check(unit == "player", "UnitName: only 'player' is modelled")
+	return (stub.playerName:match("^(%S+)"))
+end
+function UnitGUID(unit) return stub.playerGUID end
+function GetServerTime() return stub.serverTime end
+function debugprofilestop() return clock * 1000 end
+-- Protected in the client: only readable during a hardware event (click, slash command).
+function GetGuildInfoText()
+	if stub.hardware <= 0 then
+		stub.blocked[#stub.blocked + 1] = "GetGuildInfoText"
+		return nil
+	end
+	return stub.infoText
+end
+function GetNumGuildMembers() return #stub.roster, #stub.roster end
+function GetGuildRosterInfo(i)
+	local m = stub.roster[i]
+	if not m then return nil end
+	return m.name, m.rankName or "Rank", m.rankIndex, m.level or 60, m.class or "Warrior",
+		m.zone or "", m.note or "", m.officerNote or "", m.online and true or false
+end
+C_GuildInfo = C_GuildInfo or {}
+function C_GuildInfo.GuildRoster() stub.rosterRequests = stub.rosterRequests + 1 end
+C_ChatInfo = {
+	RegisterAddonMessagePrefix = function(prefix)
+		check(type(prefix) == "string" and #prefix > 0 and #prefix <= 16, "bad addon prefix")
+		stub.prefixes[#stub.prefixes + 1] = prefix
+		return true
+	end,
+	SendAddonMessage = function(prefix, text, channel, target)
+		check(type(prefix) == "string" and type(text) == "string", "SendAddonMessage: bad prefix or text")
+		check(type(channel) == "string", "SendAddonMessage: bad channel")
+		stub.sent[#stub.sent + 1] = { prefix = prefix, text = text, channel = channel, target = target }
+		return stub.sendCode
+	end,
+}
+
+function stub.deliver(prefix, text, channel, sender)
+	stub.fire("CHAT_MSG_ADDON", prefix, text, channel or "GUILD", sender)
+end
 
 function stub.fire(event, ...)
 	for _, f in ipairs(stub.frames) do
@@ -248,12 +479,26 @@ function stub.tick(dt)
 	end
 end
 
+-- Runs fn as if a click or key press were being handled.
+function stub.asUser(fn, ...)
+	stub.hardware = stub.hardware + 1
+	local ok, err = pcall(fn, ...)
+	stub.hardware = stub.hardware - 1
+	if not ok then error(err, 0) end
+end
+
 function stub.slash(cmd, msg)
 	for key, fn in pairs(SlashCmdList) do
 		for i = 1, 9 do
 			local alias = _G["SLASH_" .. key .. i]
 			if not alias then break end
-			if alias == cmd then return fn(msg or "") end
+			if alias == cmd then
+				stub.hardware = stub.hardware + 1
+				local ok, err = pcall(fn, msg or "")
+				stub.hardware = stub.hardware - 1
+				if not ok then error(err, 0) end
+				return
+			end
 		end
 	end
 	error("unknown slash command " .. cmd)

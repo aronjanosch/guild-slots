@@ -64,6 +64,11 @@ second client, 5) are still open.
 | 15 | 255 bytes, binary-safe | 2026-11-12: 250 and 255 arrive whole. 256 is **cut to 255 without an error** (send result 0), so the addon must check lengths itself. Bytes 1..127 and 128..255 arrive intact, so raw binary works except NUL: `"a\0b"` arrives as `"a"` (cut at the NUL, no error). |
 | 16 | works | 5000 rows (~440 KB) came back complete after `/reload` and after a full client restart. |
 
+Later finding (2026-11-12, real addon): `GetGuildInfoText()` called from an `OnUpdate` timer raised
+`ADDON_ACTION_BLOCKED` ("tried to call the protected function"). The probe had read it from a slash
+command, so reading needs a hardware event (or was blocked by combat; not separated yet). The addon
+reads it only on clicks and slash commands and keeps a copy.
+
 ## Researched, not measured yet (tests 5 and 6)
 
 From the Warcraft Wiki API pages (C_ChatInfo.SendAddonMessage, C_RestrictedActions), November 2026:
