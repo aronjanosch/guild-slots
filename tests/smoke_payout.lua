@@ -248,6 +248,7 @@ local function payoutFlow(locale, unknown)
 	-- The header button counts the open request.
 	assert(W.officerBadge:IsShown() and W.officerBadge.text:GetText() == "1", "header badge counts the request")
 	assert(O.payNoFindings:IsShown(), "no findings")
+	assert(not O.payFollowed:IsShown() and not O.payLuckNone:IsShown(), "the account was transferred")
 	assert(O.payLuckRows[1].badge.text:GetText() == L.LUCK_LOW, "too little data for the luck index")
 	local luck = session:requests()[1].report.luck
 	assert(luck.spins >= 4, "spins counted: " .. tostring(luck.spins))
@@ -405,6 +406,75 @@ local function payoutFlow(locale, unknown)
 	unknownMethods(env2.stub, unknown)
 end
 
+-- A payout of another member whose account the officer's client followed live: nothing is
+-- transferred, the review says so, lists the alerts and has no luck index.
+local function followedFlow(locale, unknown)
+	local env = boot(locale, {})
+	local ns, stub, L = env.ns, env.stub, env.L
+	local Ledger, Proto = ns.Ledger, ns.Proto
+	local session = ns.Main.session()
+	env.pump(20)
+	local GUILD, BOB = "Test Guild", "Bob Jones"
+	local SEED = string.rep("5", 32)
+	-- Bob's account: a purchase from Alice and a few spins, followed by this client.
+	local state = Ledger.start(GUILD, BOB)
+	assert(Ledger.apply(state, { type = "B", buyId = string.rep("b", 16), officer = "Alice Smith", tokens = 500,
+		commit = ns.Engine.commit(SEED), seed = SEED, nonce = string.rep("7", 32), time = 1234, line = LINE }))
+	for n = 1, 6 do
+		assert(Ledger.apply(state, { type = "S", n = n, stake = 10, A = 0, status = "ok", contribs = "" }))
+	end
+	assert(session:followStart(BOB, state, state.count), "follow record")
+	session:addAlert(BOB, "bad_res", 4, 0) -- the officer's own observation
+	local function deliver(sender, msgType, fields)
+		stub.deliver("GSLOTS", assert(Proto.encode(msgType, fields)), "GUILD", sender)
+	end
+	local reqId = string.rep("c", 16)
+	stub.slash("/gs", "officer")
+	local O = ns.OfficerFrame.widgets
+	O.tabPayouts:Click()
+	deliver(BOB, "PAYREQ", { reqId = reqId, officer = "Alice Smith", amount = 100, head = Ledger.shortHead(state),
+		count = state.count })
+	deliver("Dora", "ALERT", { reqId = reqId, player = BOB, code = "rewritten", n = 5, g = 0, time = 1234 })
+	env.pumpUntil(function()
+		local r = session:requests()[1]
+		return r and r.status == "ready"
+	end, "followed request ready")
+	assert(env.count("LOGREQ") == 0, "no LOGREQ")
+	local r = session:requests()[1]
+	assert(r.followed and r.report.luck == nil, "followed without entries")
+	env.pump(70) -- one refresh
+	assert(O.payReport:IsShown(), "report shown")
+	assert(O.payFollowed:IsShown() and O.payFollowed:GetText() == L.PAY_FOLLOWED, "followed line")
+	assert(O.payLight.text:GetText() == L.LIGHT_yellow, "alerts make it yellow")
+	assert(O.payBalance:GetText() == fmt(ns, state.balance), "followed balance")
+	-- The alerts: sender, what, spin number.
+	local lines = {}
+	for _, row in ipairs(O.payFindingRows) do
+		if row.text:IsShown() then lines[#lines + 1] = row.text:GetText() end
+	end
+	local function has(text)
+		for _, line in ipairs(lines) do
+			if line == text then return true end
+		end
+		return false
+	end
+	assert(has(string.format(L.PAY_ALERT_ROW, L.FIND_alert_rewritten, "Dora", 5)), "Dora's alert: "
+		.. table.concat(lines, " | "))
+	assert(has(string.format(L.PAY_ALERT_ROW, L.FIND_alert_bad_res, "Alice Smith", 4)), "the own alert")
+	-- No luck index: the luck block says so instead of empty rows.
+	assert(O.payLuckNone:IsShown() and O.payLuckNone:GetText() == L.LUCK_FOLLOWED, "no luck index line")
+	assert(not O.payLuckRows[1].badge:IsShown() and not O.paySpins:IsShown(), "no empty luck rows")
+	assert(O.payConfirm.enabled, "can confirm")
+	O.payConfirm:Click()
+	O.payConfirm:Click()
+	assert(session:requests()[1].status == "paid", "paid")
+	env.pump(30)
+	assert(env.count("PAY") == 1, "PAY sent")
+	assert(session:followed(BOB).balance == state.balance - 100, "record after the payout")
+	assert(#stub.blocked == 0, "protected call outside a hardware event: " .. tostring(stub.blocked[1]))
+	unknownMethods(stub, unknown)
+end
+
 -- A member below officer rank: only the Settings tab.
 local function memberFlow(locale, unknown)
 	local env = boot(locale, { rank = 3 })
@@ -430,6 +500,7 @@ for _, locale in ipairs({ "enUS", "deDE" }) do
 	local unknown = {}
 	local ok, err = xpcall(function()
 		payoutFlow(locale, unknown)
+		followedFlow(locale, unknown)
 		memberFlow(locale, unknown)
 	end, debug.traceback)
 	if ok then
