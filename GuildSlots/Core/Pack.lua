@@ -8,7 +8,8 @@ local _, ns = ...
 --   @<name>                    adds a name to the dictionary (index 1, 2, ...)
 --   S<stake>|<A>|<o|v>|<list>  spin n + 1 with status and contributions <value64><index>,...
 --   G<A>|<o|v>|<list>          gamble step g + 1 of the current spin, same list form
--- A partial log starts with three lines: ^<head 64 hex>|<n>, the payout text, the purchase text.
+-- A partial log (the entries after entry number `from`) starts with a line >`from`
+-- (docs/follow-spec.md section 5); its short forms number on from a start n the caller passes.
 -- Pure Lua 5.1. decode never raises, whatever the input.
 
 local Engine = ns.Engine
@@ -180,14 +181,17 @@ end
 
 -- Encode ------------------------------------------------------------------------------------------
 
-function Pack.encode(entries, header)
+-- from: number of entries before these (nil or 0 for a whole account); n: the spin number after
+-- entry `from` (only used with from).
+function Pack.encode(entries, from, n)
 	local items = {}
-	if header then
-		items[1] = "^" .. header.head .. "|" .. dec(header.n)
-		items[2] = header.payout
-		items[3] = header.purchase
+	local g = 0
+	if from and from > 0 then
+		items[1] = ">" .. dec(from)
+		n = n or 0
+	else
+		n = 0
 	end
-	local n, g = header and header.n or 0, 0
 	local kind, stake, count = nil, nil, 0 -- the run being collected: "s" or "g"
 	local dict, names = {}, 0 -- name -> dictionary index
 
@@ -271,38 +275,31 @@ end
 
 -- Decode ------------------------------------------------------------------------------------------
 
--- The header of a partial log and the position right after its third line, or nil.
-local function readHeader(text)
-	local head, nText, payout, purchase, after = match(text, "^%^([^\n|]*)|([^\n]*)\n([^\n]*)\n([^\n]*)()")
-	if not head or #head ~= 64 or find(head, "[^0-9a-f]") then
-		return nil
-	end
-	local n = number(nText)
-	if not n or n > MAX_SPIN or sub(payout, 1, 2) ~= "P|" or sub(purchase, 1, 2) ~= "B|" then
-		return nil
-	end
-	return { head = head, n = n, payout = payout, purchase = purchase }, after
-end
-
--- Returns entries, header (nil for a whole account), or nil, code.
-function Pack.decode(text, limit)
+-- Returns entries, from (nil for a whole account), or nil, code. startN: the spin number after
+-- entry `from` of a partial log (default 0); a whole account always starts at 0.
+function Pack.decode(text, limit, startN)
 	if type(text) ~= "string" then
+		return nil, "bad_pack"
+	end
+	startN = startN or 0
+	if type(startN) ~= "number" or startN % 1 ~= 0 or startN < 0 or startN > MAX_SPIN then
 		return nil, "bad_pack"
 	end
 	limit = limit or Pack.MAX_ENTRIES
 	local entries = {}
-	local header, pos = nil, 1
+	local from, pos = nil, 1
 	local n, g = 0, 0
-	if sub(text, 1, 1) == "^" then
-		header, pos = readHeader(text)
-		if not header then
+	if sub(text, 1, 1) == ">" then
+		local fromText, after = match(text, "^>([^\n]*)()")
+		from = number(fromText)
+		if not from or from < 1 or from > MAX_SPIN then
 			return nil, "bad_pack"
 		end
-		if pos > #text then
-			return entries, header
+		if after > #text then
+			return entries, from
 		end
-		pos = pos + 1 -- the "\n" after the purchase line
-		n = header.n
+		pos = after + 1 -- the "\n" after the marker
+		n = startN
 	elseif text == "" then
 		return entries
 	end
@@ -403,7 +400,7 @@ function Pack.decode(text, limit)
 		end
 		pos = nl + 1
 	end
-	return entries, header
+	return entries, from
 end
 
 function Pack.split(text, size)

@@ -2,8 +2,10 @@
 
 Scope: at level 1 and 2 a spin or gamble step needs random contributions from other clients
 ("witnesses"). This file adds the wire messages, the player and witness sides of the session, the
-witness log, the audit at a payout (Verify check 7), a payout that transfers the account from a
-checkpoint instead of from the start, and the UI changes.
+witness log, the checkpoint key a payout carries, and the UI changes.
+
+`docs/follow-spec.md` changes this file (commits, following, alerts, payouts from a followed state);
+where both speak, follow-spec wins.
 
 `docs/core-spec.md` already fixes and tests the pure parts: `Engine.witnessValue`, `Engine.lot`,
 `Engine.drawn`, `Engine.contribs`, the entry forms with `A`, `status` and `contribs`, the ledger's
@@ -23,10 +25,6 @@ All on `GUILD`, prefix `GSLOTS`, like every other message.
 |---|---|---|
 | `WIT` | witness | `player` (name), `kind` (`spin` or `gam`), `n` (1..2^31), `g` (0..5; 0 for a spin), `value` (16 hex) |
 | `RES` | player | `kind`, `n`, `g`, `status` (`ok` or `void`), `who` (see below), `head` (32 hex, short head after the entry) |
-| `AUD` | officer | `reqId` (16 hex), `witness` (name), `player` (name), `from` (0..2^31, lowest spin number of interest), `items` (see below, or `-`) |
-| `AUDR` | witness | `reqId` (16 hex), `player` (name), `items` (see below, or `-`) |
-| `CSYNC` | officer | `player` (name), `anchors` (1..2^31), `head` (32 hex), `balance` (0..2^53-1), `n` (0..2^31), `ck` (16 hex), `time` (server seconds) |
-| `LOGREQ` (changed) | officer | `reqId`, `player`, **`from`** (0..2^31: the `anchors` number of the checkpoint the officer holds, 0 = whole account) |
 | `PAY` (changed) | officer | `reqId`, `payId`, `player`, `amount`, `balanceAfter`, `time`, `head`, `anchors`, **`n`** (0..2^31, the account's spin number at the payout), **`ck`** (16 hex, section 6) |
 | `LOG` (changed) | player | `payload` is 1..**220** bytes |
 
@@ -34,20 +32,11 @@ All on `GUILD`, prefix `GSLOTS`, like every other message.
   the order of the contributions (sorted by name), 0..32 characters; `-` when there are none. A
   witness whose value starts with one of the 4-character groups counts itself as included. (Names do
   not fit: eight names can exceed 255 bytes. `WIT` is public, so the tags reveal nothing.)
-- `items` in `AUD`: up to 8 items joined with `,`. An item is `s<n>` (spin) or `g<n>.<g>` (gamble
-  step). Canonical decimals.
-- `items` in `AUDR`: up to 8 items joined with `,`. An item is `<AUD item>=<value 16 hex><flag>` or
-  `<AUD item>=-` (no record). `flag` is `+` (the witness saw a `RES` that included it), `-` (saw a
-  `RES` that did not include it) or `?` (saw no `RES`).
-- `decode` checks the item grammar and returns `items` as the text (the session parses it with
-  `Proto.auditItems(text) -> { { kind =, n =, g =, value =, flag = }, … }` or nil; `value`/`flag`
-  are nil for an `AUD` list; `-` gives an empty list).
+- `HELLO`, `PAY.head`, `LOGREQ` and the new `ALERT`: see `docs/follow-spec.md` section 1.
 
 ## 2. Witness side (`Game/Guild.lua`)
 
-New in `env` (all optional): `witnessWindow` (seconds the player collects, default 1.5),
-`auditWindow` (seconds the officer waits for `AUDR`, default 12), `auditMax` (witnesses asked per
-payout, default 6).
+New in `env` (optional): `witnessWindow` (seconds the player collects, default 1.5).
 
 ### Session secret and witness log
 
@@ -56,7 +45,8 @@ store.secret           = { S = 32 hex, time = server seconds when created }
 store.witness[guild]   = { { player, kind, n, g, amount, head, value, time, res = nil | "in" | "out" | "void_in" | "void_out" }, … }
 ```
 
-- `S` is created with `randomHex(32)` when missing or older than 14 days. Rows are kept 14 days and
+- `S` is created with `randomHex(32)` when missing or older than 14 days (follow-spec section 2:
+  at session creation, at most 24 hours). Rows are kept 14 days and
   at most 5000 per guild (oldest dropped); the cleanup runs at session creation.
 - A row is identified by `(player, kind, n, g)`.
 
@@ -84,13 +74,7 @@ value appear as one of the 4-character groups of `who`. The first `RES` for a ro
 
 ### Answering `AUD`
 
-On an `AUD` whose `witness` is the own name, sent by an officer, at most 5 per sender per minute:
-send one `AUDR` with the same `reqId` and `player`. Its items, at most 8 in total:
-
-1. One item per `AUD` item, in order: `=<value><flag>` from the row (`+` for `in`/`void_in`, `-` for
-   `out`/`void_out`, `?` without `res`), or `=-` without a row.
-2. Then, while there is room: rows of that player with `n >= from` and `res` of `out`, `void_in` or
-   `void_out` that the `AUD` did not name, newest first.
+Removed; see `docs/follow-spec.md`.
 
 ## 3. Player side (`Game/Guild.lua`)
 
@@ -161,118 +145,36 @@ New item forms next to the existing ones (`=`, `s`, `g`):
 a name gets its `@` item right before the first item that uses it. `decode(encode(x)) == x` still
 holds for every list of valid entry texts.
 
-**Header for a partial log.** `Pack.encode(entries, header)` with
-`header = { head = <64 hex>, n = <number>, payout = <P entry text>, purchase = <B entry text> }`
-writes three lines before the items: `^<head>|<n>`, the payout text, the purchase text.
-`Pack.decode(text, limit)` returns `entries, header` (`header` nil for a whole account). The
-running `n` of the short forms starts at the header's `n`, `g` at 0.
+**Partial log.** The header is removed; see `docs/follow-spec.md` section 5 (`from` marker).
 
 `Pack.split` takes chunks of **220** bytes by default.
 
-## 6. Checkpoints: a payout from the last payout on
+## 6. Checkpoint key and payout size
 
-An account never restarts, and entries with contributions cost 30 to 150 bytes each. So the officer
-asks only for what came after the last payout it can vouch for.
+Checkpoints (`store.checks`, `CSYNC`, the partial-log header, `Ledger.resume`, Verify
+`resume`/`checkpoint`) are replaced by `docs/follow-spec.md` sections 3 to 5. What stays:
 
-### The checkpoint
+- When an officer confirms a payout, the replayed state after the payout entry gives
 
-When an officer confirms a payout, the replayed state after the payout entry gives
+  ```
+  ck = first 16 hex of Sha256.hex("GS1|CK|" | n | K | line)
+  ```
 
-```
-ck = first 16 hex of Sha256.hex("GS1|CK|" | n | K | line)
-```
-
-with `n` the account's spin number, `K` and `line` the key and the stored settings line of the
-purchase in force (`Engine.dec` for `n`). One implementation serves the session and Verify:
-`Ledger.checkpointKey(n, K, line) -> 16 hex`, which hashes the text
-`"GS1|CK|" .. dec(n) .. "|" .. K .. "|" .. line`. `PAY` carries `n` and `ck`. Every client that stores the
-anchor of a `PAY` (payout-spec, "Anchors") also stores
-
-```
-store.checks[guild][player] = { anchors, head, balance = balanceAfter, n, ck, time, by }
-```
-
-when `anchors` is higher than the stored one. `CSYNC`: with the `OSYNC` round an officer's client
-also sends one `CSYNC` per stored checkpoint it authored (`by` = own name), newest first, at most
-30; a client accepts a `CSYNC` from an officer when its `anchors` is higher than what it has.
-
-### Asking and sending
-
-- Officer: `LOGREQ.from` = `anchors` of the stored checkpoint for that player, or 0.
-- Player, on `LOGREQ` with `from > 0`: when the own account's entry number `from` among the B and P
-  entries is a payout, send a partial log: header `head` = full head **before** that payout entry,
-  `n` = spin number at that point, `payout` = that entry's text, `purchase` = the text of the
-  purchase in force at that point; then the entries after the payout. In every other case
-  (`from = 0`, no such entry, not a payout) send the whole account.
-- `PAYREQ.count` stays the number of entries of the whole account, `PAYREQ.head` the current short
-  head.
-- Transport: `LOG` chunks are spread over three prefixes, `GSLOTS`, `GSLOTS2` and `GSLOTS3`
-  (round robin, each with its own send queue and budget, since the server counts per prefix).
-  The extra prefixes carry nothing but `LOG`; a receiver treats a `LOG` the same whatever prefix
-  brought it. `Comm.LOG_PREFIXES` is the list, so a client that gets disconnected under this load
-  can be cut back to one.
+  with `n` the account's spin number, `K` and `line` the key and the stored settings line of the
+  purchase in force (`Engine.dec` for `n`): `Ledger.checkpointKey(n, K, line) -> 16 hex`, which
+  hashes the text `"GS1|CK|" .. dec(n) .. "|" .. K .. "|" .. line`. `PAY` carries `n` and `ck`.
+- Check 3: `known[id]` may be a number, the anchors number at which that purchase or payout was
+  first seen. A purchase or payout whose position (the state's `anchors` after it) differs from
+  that number is red `replayed`. `store.seen[guild][player][id]` stores that number from now on
+  (`BUY2.anchors + 1`, `PAY.anchors`); an old `true` keeps its meaning.
 - Size: at most **600** chunks (payout-spec said 200). A request lives `300 + 1.2 * total` seconds
-  on both sides (with three prefixes the transfer itself takes about `total / 3` seconds) once `total` is known (the player knows it when packing, the officer from the first
+  on both sides once `total` is known (the player knows it when packing, the officer from the first
   `LOG`); `confirm` is allowed until 30 s before that.
 
-### Resuming the ledger (`Core/Ledger.lua`)
+## 7. Audit at a payout
 
-```
-Ledger.resume(guild, player, cp) -> state or nil, code
-cp = { head = <64 hex, before the payout>, n, payout = <P text>, purchase = <B text>, anchors = <count after the payout>, count = <entries before the suffix> or nil }
-```
-
-Decodes both texts (`bad_entry`), checks the purchase's commit (`bad_commit`) and settings line
-(`bad_settings`), and returns the state right after the payout: `head = Sha256.hex(cp.head | payout
-text)`, `balance = balanceAfter`, `n = cp.n`, `g = 0`, `pending = 0`, key, settings and table from
-the purchase, `anchors = cp.anchors`, `count = cp.count or 0`, `payIds` holding the payout's id,
-`buyIds` holding the purchase's id. Entries are then applied with `Ledger.apply` as usual.
-
-### Verify with a checkpoint (`Core/Verify.lua`)
-
-New input: `resume = <header from Pack.decode>` and `checkpoint = <stored checkpoint>`; `entries`
-is then the suffix.
-
-- `checkpoint` missing while `resume` is given, or `Ledger.resume` fails, or the short head after
-  the payout differs from `checkpoint.head`, or the payout's `balanceAfter` differs from
-  `checkpoint.balance`, or `resume.n` differs from `checkpoint.n`, or `ck` recomputed from
-  `resume.n` and the purchase differs from `checkpoint.ck`: red `checkpoint_mismatch` (check 1), the
-  replay does not run, `balance` and `state` are nil.
-- Otherwise the replay starts from the resumed state. Entry indexes in findings count within the
-  suffix. Check 1 (anchor) and the other checks work on the resumed state as before; an `anchor`
-  equal to the checkpoint itself is satisfied by the header.
-- Check 3 gains: `known[id]` may be a number, the anchors number at which that purchase or payout
-  was first seen. A purchase or payout in the suffix whose position (the state's `anchors` after it)
-  differs from that number is red `replayed`. `store.seen[guild][player][id]` stores that number
-  from now on (`BUY2.anchors + 1`, `PAY.anchors`); an old `true` keeps its meaning.
-- Check 4: a `heard` at or before the checkpoint's `n` is not checked.
-- The purchase of the header counts as known for check 2 and 3 (the checkpoint vouches for it).
-
-### Session (`Game/Guild.lua`)
-
-The officer decodes the log; with a header it passes `resume` and the stored checkpoint to Verify.
-`PAYREQ.count` is compared with `header count + suffix length` only for a whole account; for a
-partial log the head check after the replay (`PAYREQ.head`) is the binding one. `confirm` computes
-`n` and `ck` from the state after the payout entry and stores the checkpoint itself.
-
-## 7. Audit at a payout (Verify check 7)
-
-After the log is decoded and before Verify runs, when the account (or suffix) holds contributions:
-
-1. Count contributions per witness name over the entries. Take the witnesses that are in `online()`
-   and are not the player, most contributions first (ties by name), at most `auditMax`.
-2. Send each one `AUD`: `from` = the spin number of the first entry in the log (the header's `n + 1`
-   for a partial log, 1 otherwise), `items` = that witness's 8 newest contributions in the log.
-   Status `auditing`.
-3. Collect `AUDR` with the `reqId` from those witnesses until all answered or `auditWindow` passed.
-   Each item becomes an audit row `{ kind, n, g, witness = sender, value, answered }`: for an item
-   the `AUD` named, `value` as answered (nil for `=-`) and `answered = false`; for an item the
-   witness added, `value` and `answered = true`.
-4. Run Verify with `audit = rows`. Without contributions or without witnesses online the audit is
-   skipped and `audit` is an empty list.
-
-The report's `unconfirmed` is shown to the officer. Request status order on the officer side:
-`fetching`, `auditing`, `checking`, `ready`.
+Replaced by alerts; see `docs/follow-spec.md` section 4. Verify's `audit` input stays and gets an
+empty list.
 
 ## 8. UI
 
@@ -287,26 +189,20 @@ The report's `unconfirmed` is shown to the officer. Request status order on the 
   officer". The spin button is disabled in both.
 - **Officer window, settings form.** Level 1 and 2 can be chosen; `W` is editable at level 1. The
   note that says they are not built goes away. The self-test switch gets the label "Test only".
-- **Payout review.** Status `auditing` ("Asking witnesses…"). New finding texts:
-  `witness_mismatch`, `omitted`, `void_with_answers`, `witness_not_officer`, `checkpoint_mismatch`,
-  `replayed`. A line "Unconfirmed spins: N" when the account has contributions.
+- **Payout review.** See `docs/follow-spec.md` section 7.
 - Texts in enUS and deDE. German terms: Würfler (witness), ungültig (void).
 
 ## 9. Tests
 
-- `tests/test_proto.lua`: every new and changed message, item grammar, limits, round trips.
-- `tests/test_pack.lua`: dictionary forms, header, round trips with mixed levels.
-- `tests/test_core.lua` or a new file: `Ledger.resume`, Verify with a checkpoint (green, each
-  mismatch, `replayed`).
+- `tests/test_proto.lua`: every new and changed message, limits, round trips.
+- `tests/test_pack.lua`: dictionary forms, round trips with mixed levels.
+- `tests/test_verify.lua`: `replayed`.
 - `tests/test_guild.lua` (fake bus, fake clock): a level-1 spin with three witnesses; the lottery
   with more clients than `Z`; too few witnesses gives a void entry and the stake stays; level 2 with
   and without an officer; a second `SPIN` for the same number with another stake gets no answer; a
   restart with an open request writes a void; gamble steps; the stored account replays with
-  `Ledger.replay`; `RES` marks the witness rows; a payout at level 1 with the audit (green; a
-  witness reporting another value gives `witness_mismatch`; an omitted contribution gives
-  `omitted`; a void with enough answers gives `void_with_answers`); a second payout that transfers
-  only the suffix and ends green; a wrong checkpoint; `CSYNC` to a client that was offline; the
-  ticker at level 1.
+  `Ledger.replay`; `RES` marks the witness rows; the ticker at level 1. Payouts with a followed
+  state: `docs/follow-spec.md` section 8.
 - Smoke tests for the windows (`tests/smoke_guild.lua`, `tests/smoke_payout.lua`) at level 1.
 
 ## Deviations from the design (milestone 5)
@@ -316,33 +212,24 @@ The report's `unconfirmed` is shown to the officer. Request status order on the 
 | `RES` | names of the included witnesses | 4-hex tags of their values | eight names can exceed 255 bytes |
 | Repeated request | same answer for the same request | no answer when stake or head changed | a retry with other terms after seeing the result must not get new randomness |
 | Open request at restart | not covered | written as void | same reason |
-| `AUD` / `AUDR` | whisper, list per witness | GUILD, 8 items, the witness adds what `RES` left out | whisper unmeasured; one message per witness keeps the budget |
-| Log range | since the last payout | since the last payout the officer holds a checkpoint for, else all | the cut needs a state both sides agree on; `PAY` now carries it |
+| Log range | since the last payout | see `docs/follow-spec.md` section 5 | |
 | `Z` at the witness | from the request | from the witness's own guild info | the witness does not know the player's account |
 
 ## Clarifications (core)
 
-Decisions made while building the pure core (sections 1, 5 and 6); the tests pin them.
+Decisions made while building the pure core (sections 1, 5 and 6); the tests pin them. Those about
+the removed audit messages, the partial-log header and `Ledger.resume` are gone with them.
 
 - **`ck` text.** `"GS1|CK|" .. dec(n) .. "|" .. K .. "|" .. line` (one bar after `CK`, `K` as 64 hex), exported as `Ledger.checkpointKey`.
-- **Audit items.** `Proto.auditItems` gives `kind = "spin"` or `"gam"`, `g = 0` for a spin, gamble `g` 1..5 (as in `GAM`), `n` 1..2^31; an item `=-` gives `value` and `flag` nil.
-- **No mixed lists.** A list holds only `AUD` items or only answers; `AUD` accepts only the first and `AUDR` only the second; `-` is valid in both.
-- **Long audit messages.** Eight items with long names and large numbers can exceed 255 bytes; `encode` then returns `too_long` and the sender has to send fewer items.
 - **`LOG` size.** A 220-byte payload fits in 255 bytes while `total` has at most five digits; `seq`/`total` still decode up to 2^31 so a too large log can be refused.
 - **Dictionary forms.** `S`/`G` items are used only when the decoder rebuilds the text byte for byte (canonical numbers, `ok`/`void`, contributions `name:16 lowercase hex` with valid names, in any order); everything else stays `=`. A level-0 `void` spin uses `S`.
 - **Pack checks.** Pack does not range-check `A` or stakes (the ledger does); a repeated `@` name, an index outside the dictionary, or a value whose first character is above `P` (15) is `bad_pack`.
-- **Header form.** `head` is 64 lowercase hex, `n` 0..2^31; the second and third lines must start with `P|` and `B|` (Ledger.resume checks the rest); with no entries the text ends after the purchase line. `encode` does not validate the header.
-- **`Ledger.resume` codes.** A malformed `cp` (head, `n`, `anchors` below 2, `count`) or a payout text that is not a `P` / purchase text that is not a `B` gives `bad_entry`.
-- **Mismatch report.** With `checkpoint_mismatch` the report holds only that finding: light red, `unconfirmed = 0`, no `balance`, `state`, `luck` or `lookahead`.
-- **Anchor below the checkpoint.** An anchor with fewer `anchors` than the checkpoint counts as covered by it (no finding); one equal to it is compared with the short head after the payout.
 - **`replayed` everywhere.** A numeric `known[id]` is checked on whole accounts as well; a number equal to the position counts as known, `true` keeps its meaning.
-- **Check 4 at the checkpoint.** A `heard` with `n` at or below the checkpoint's `n` is skipped whatever its `g` (the payout ends any gamble of spin `n`).
-- **Header purchase and time.** No check 2 or 3 findings for the header's purchase or payout; the `isOfficer` time for level-2 witnesses starts at the payout's `time`.
 - **Session numbers for now.** `Game/Guild.lua` keeps 200 chunks per request until the session ticket raises it to 600; `Pack.split` already cuts 220 bytes.
 
 ## Clarifications (session)
 
-- `store.secret` is created on the first answer, not at session creation; a stale one is dropped at creation.
+- `store.secret` is created at session creation (follow-spec section 2); a stale one is replaced there.
 - Witness rows are also capped at 5000 when a row is added, not only at creation.
 - Witness count check: `count` = names in `online()` other than the sender, plus the own name if missing; `A` passes when `2A >= count` and `A <= 2 * count`.
 - The witness rate limit counts sent answers per player per whole second (`floor(env.now())`).

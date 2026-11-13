@@ -868,9 +868,23 @@ t.test("witness rows and the secret: cleanup at session creation", function()
 	w.now = w.now + 14 * 86400
 	local again = addSession(w, "Tom", { store = store })
 	t.eq(#store.witness[GUILD], 0, "rows older than 14 days dropped")
-	t.eq(store.secret, nil, "old secret dropped")
+	-- The fake randomHex of a new session repeats its sequence, so the time shows the new secret.
+	t.eq(store.secret.time, w.now, "a new secret at session creation")
 	again.session:onMessage("Pia", assert(Proto.encode("SPIN", { n = 2, stake = 10, level = 1, head = ZERO_HEAD, A = 1 })))
-	t.ok(store.secret and store.secret.S ~= S, "a new secret on the next answer")
+	t.eq(store.witness[GUILD][1].value, Engine.witnessValue(store.secret.S, "Pia", "spin", 2, 0, 10, ZERO_HEAD),
+		"answers with the secret made at creation")
+end)
+
+t.test("the session secret exists from session creation and HELLO carries its commit", function()
+	local w = newWorld()
+	local o = addSession(w, "Olga")
+	local S = o.env.store.secret.S
+	t.eq(#S, 32, "secret before any answer")
+	o.session:tick()
+	flush(w)
+	local hello = w.log[1].msg
+	t.eq(hello.commit, Engine.witnessCommit(S), "commit of the secret")
+	t.eq(hello.reveal, "-", "nothing revealed yet")
 end)
 
 t.test("a restart with an open request writes a void and sends RES on the first tick", function()
@@ -1066,7 +1080,7 @@ t.test("HELLO on the first tick and then every 120..140 s", function()
 	p.session:tick()
 	flush(w)
 	t.eq(sentTypes(w), "HELLO,HELLO", "two HELLOs")
-	t.eq(w.log[1].text, "1|HELLO|0.3.0|0|-", "no account yet")
+	t.eq(w.log[1].text, "1|HELLO|0.3.0|0|-|" .. Engine.witnessCommit(o.env.store.secret.S) .. "|-", "no account yet")
 	local online = o.session:online()
 	t.eq(#online, 2, "both online, own echo included")
 	t.eq(online[1].name, "Olga", "sorted by name")
@@ -1107,12 +1121,12 @@ t.test("a newer version raises one update notice per session", function()
 		end
 		return c
 	end
-	inject(w, "Pia", "HELLO", { version = "0.9.1", n = 0, head = "-" })
-	inject(w, "Pia", "HELLO", { version = "0.9", n = 0, head = "-" })
+	inject(w, "Pia", "HELLO", { version = "0.9.1", n = 0, head = "-", commit = string.rep("c", 32), reveal = "-" })
+	inject(w, "Pia", "HELLO", { version = "0.9", n = 0, head = "-", commit = string.rep("c", 32), reveal = "-" })
 	t.eq(notices(), 0, "older versions")
-	inject(w, "Pia", "HELLO", { version = "0.10.0", n = 0, head = "-" })
+	inject(w, "Pia", "HELLO", { version = "0.10.0", n = 0, head = "-", commit = string.rep("c", 32), reveal = "-" })
 	t.eq(notices(), 1, "0.10.0 is newer than 0.9.2")
-	inject(w, "Paul", "HELLO", { version = "1.0", n = 0, head = "-" })
+	inject(w, "Paul", "HELLO", { version = "1.0", n = 0, head = "-", commit = string.rep("c", 32), reveal = "-" })
 	t.eq(notices(), 1, "once per session")
 end)
 
@@ -1243,6 +1257,8 @@ t.test("a full payout: officer checks, confirms, the player and a third client h
 	local sent = {}
 	for _, m in ipairs(w.log) do sent[m.msg.type] = m.msg end
 	t.eq(sent.LOGREQ.from, 0, "LOGREQ.from")
+	t.eq(sent.LOGREQ.head, "-", "LOGREQ.head")
+	t.eq(sent.PAY.head, state.head, "PAY carries the full head")
 	t.eq(sent.PAY.n, state.n, "PAY.n")
 	t.ok(state.n > 0, "spins in the account")
 	t.eq(sent.PAY.ck, Ledger.checkpointKey(state.n, state.K, state.line), "PAY.ck")
@@ -1508,7 +1524,7 @@ t.test("a PAY that does not fit the account fails and leaves it as it was", func
 	local count = #account(p, "Pia").entries
 	local function pay(reqId, fields)
 		local f = { reqId = reqId, payId = "00000000000000d9", player = "Pia", amount = 10,
-			balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2, n = 5, ck = string.rep("0", 16) }
+			balanceAfter = balance - 10, time = 5000, head = H32 .. H32, anchors = 2, n = 5, ck = string.rep("0", 16) }
 		for k, v in pairs(fields or {}) do f[k] = v end
 		inject(w, "Olga", "PAY", f)
 	end
@@ -1526,7 +1542,7 @@ t.test("a PAY that does not fit the account fails and leaves it as it was", func
 	assert(o.session:reject(id2))
 	local id3 = assert(p.session:requestPayout("Olga", 10))
 	inject(w, "Otto", "PAY", { reqId = id3, payId = "00000000000000d8", player = "Pia", amount = 10,
-		balanceAfter = balance - 10, time = 5000, head = H32, anchors = 2, n = 5, ck = string.rep("0", 16) })
+		balanceAfter = balance - 10, time = 5000, head = H32 .. H32, anchors = 2, n = 5, ck = string.rep("0", 16) })
 	t.eq(p.session:payout().status, "wait_decision", "other officer ignored")
 	t.eq(p.session:game().balance, balance, "balance unchanged")
 	t.eq(#account(p, "Pia").entries, count, "no entry")
@@ -1539,7 +1555,7 @@ local function payFor(p, reqId, amount, payId)
 		balanceAfter = state.balance - amount, time = 9000 }
 	assert(Ledger.apply(state, entry))
 	return { reqId = reqId, payId = entry.payId, player = "Pia", amount = amount, balanceAfter = entry.balanceAfter,
-		time = entry.time, head = Ledger.shortHead(state), anchors = state.anchors,
+		time = entry.time, head = state.head, anchors = state.anchors,
 		n = state.n, ck = Ledger.checkpointKey(state.n, state.K, state.line) }
 end
 
@@ -2077,7 +2093,7 @@ t.test("a purchase without a complete exchange drops the key of that player", fu
 	flush(w)
 	w.drop = nil
 	w.now = w.now + 100
-	tom.session:onMessage("Olga", assert(Proto.encode("HELLO", { version = "0.3.0", n = 0, head = ZERO })))
+	tom.session:onMessage("Olga", assert(Proto.encode("HELLO", { version = "0.3.0", n = 0, head = ZERO, commit = string.rep("c", 32), reveal = "-" })))
 	t.eq(tom.env.store.keys[GUILD].Pia, nil, "key dropped")
 end)
 

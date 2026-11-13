@@ -719,22 +719,12 @@ t.test("onStep: once per entry, and the run can yield from a coroutine", functio
 	t.eq(report.balance, acc.st.balance)
 end)
 
--- Checkpoints (docs/witness-spec.md section 6) -------------------------------------------------------
+-- Start state (docs/follow-spec.md section 5) -------------------------------------------------------
 
--- Splits the account after the payout at entry `at`: the header Pack.decode would give, the
--- checkpoint an officer stored from that payout's PAY, and the suffix.
-local function split(acc, at)
-	local before = Ledger.replay(GUILD, PLAYER, { unpack(acc.entries, 1, at - 1) })
-	local after = Ledger.replay(GUILD, PLAYER, { unpack(acc.entries, 1, at) })
-	local purchase
-	for i = at - 1, 1, -1 do
-		if acc.entries[i].type == "B" then purchase = acc.entries[i] break end
-	end
-	local resume = { head = before.head, n = before.n, payout = Ledger.encode(acc.entries[at]),
-		purchase = Ledger.encode(purchase) }
-	local checkpoint = { anchors = after.anchors, head = Ledger.shortHead(after), balance = after.balance,
-		n = after.n, ck = Ledger.checkpointKey(after.n, after.K, after.line), time = 1, by = OFF }
-	return resume, checkpoint, { unpack(acc.entries, at + 1) }
+-- The state after entry `at` (a state the officer trusts) and the entries after it.
+local function startAt(acc, at)
+	local start = assert(Ledger.replay(GUILD, PLAYER, { unpack(acc.entries, 1, at) }))
+	return start, { unpack(acc.entries, at + 1) }
 end
 
 -- Purchase, 6 spins, payout (entry 8), 6 spins.
@@ -753,95 +743,79 @@ local function withField(tbl, k, v)
 	return c
 end
 
-t.test("checkpoint: the suffix after a stored checkpoint verifies green", function()
+t.test("start: the entries after a trusted state verify green", function()
 	local acc = paidAccount()
-	local resume, checkpoint, suffix = split(acc, 8)
-	local r = Verify.run(acc:input({ entries = suffix, resume = resume, checkpoint = checkpoint }))
+	local start, rest = startAt(acc, 8)
+	local head = start.head
+	local r = Verify.run(acc:input({ entries = rest, start = start }))
 	t.eq(#r.findings, 0, "no findings (first: " .. tostring(r.findings[1] and r.findings[1].code) .. ")")
 	t.eq(r.light, "green")
 	t.eq(r.balance, acc.st.balance, "balance")
 	t.eq(r.state.head, acc.st.head, "head")
 	t.eq(r.state.n, 12, "n")
-	t.eq(r.luck.spins, 6, "luck over the suffix")
-	t.ok(r.lookahead, "look-ahead from the resumed key")
+	t.eq(r.luck.spins, 6, "luck over the given entries")
+	t.ok(r.lookahead, "look-ahead from the start key")
+	t.eq(start.head, head, "the start state is not changed")
+	t.eq(start.n, 6, "start n unchanged")
 end)
 
-t.test("checkpoint: every disagreement is red checkpoint_mismatch and nothing is replayed", function()
+t.test("start: in the middle of the account, luck over the given entries and indexes from the first", function()
 	local acc = paidAccount()
-	local resume, checkpoint, suffix = split(acc, 8)
-	local function expectMismatch(res, cp, msg)
-		local r = Verify.run(acc:input({ entries = suffix, resume = res, checkpoint = cp }))
-		expectOnly(r, 1, "red", "checkpoint_mismatch", nil, msg)
-		t.eq(r.balance, nil, msg .. ": no balance")
-		t.eq(r.state, nil, msg .. ": no state")
-	end
-	expectMismatch(resume, "nil", "no checkpoint")
-	expectMismatch(withField(resume, "purchase", Ledger.encode(withField(acc.entries[1], "commit", string.rep("0", 64)))),
-		checkpoint, "resume fails")
-	expectMismatch(withField(resume, "head", string.rep("0", 64)), checkpoint, "head before the payout")
-	expectMismatch(resume, withField(checkpoint, "head", string.rep("0", 32)), "stored head")
-	expectMismatch(resume, withField(checkpoint, "balance", checkpoint.balance + 1), "balance")
-	expectMismatch(withField(resume, "n", 5), checkpoint, "header n")
-	expectMismatch(withField(resume, "n", 5), withField(checkpoint, "n", 5), "n agreed but ck of another n")
-	expectMismatch(resume, withField(checkpoint, "ck", string.rep("0", 16)), "ck")
-	expectMismatch(resume, withField(checkpoint, "anchors", 0), "anchors not a checkpoint")
-	-- Another purchase in force gives another ck.
-	local other = account()
-	other:buy(2, "GSLOTS1;L=0")
-	expectMismatch(withField(resume, "purchase", Ledger.encode(other.entries[1])), checkpoint, "another purchase")
+	local start, rest = startAt(acc, 9) -- after spin 7
+	local r = Verify.run(acc:input({ entries = rest, start = start }))
+	t.eq(#r.findings, 0, "green")
+	t.eq(r.luck.spins, 5, "spins 8 to 12")
+	rest[3] = withField(rest[3], "n", 99)
+	expectOnly(Verify.run(acc:input({ entries = rest, start = start })), 5, "red", "bad_number", 3)
 end)
 
-t.test("checkpoint: indexes count within the suffix", function()
+t.test("start: without entries the report has the start state and no luck index", function()
 	local acc = paidAccount()
-	local resume, checkpoint, suffix = split(acc, 8)
-	suffix[3] = withField(suffix[3], "n", 99)
-	local r = Verify.run(acc:input({ entries = suffix, resume = resume, checkpoint = checkpoint }))
-	expectOnly(r, 5, "red", "bad_number", 3)
+	local r = Verify.run(acc:input({ entries = {}, start = acc.st }))
+	t.eq(#r.findings, 0, "green")
+	t.eq(r.balance, acc.st.balance, "balance")
+	t.eq(r.state.head, acc.st.head, "state")
+	t.ok(r.state ~= acc.st, "a copy")
+	t.eq(r.luck, nil, "no luck index")
 end)
 
-t.test("checkpoint: the anchor", function()
+t.test("start: the anchor", function()
 	local acc = paidAccount()
 	acc:buy(2, "GSLOTS1;L=0") -- entry 15, anchors 3
 	acc:spins(2)
-	local resume, checkpoint, suffix = split(acc, 8)
+	local start, rest = startAt(acc, 8)
 	local function run(anchor)
-		return Verify.run(acc:input({ entries = suffix, resume = resume, checkpoint = checkpoint, anchor = anchor }))
+		return Verify.run(acc:input({ entries = rest, start = start, anchor = anchor }))
 	end
-	t.eq(#run({ anchors = 3, head = acc.anchorHead }).findings, 0, "anchor in the suffix")
-	t.eq(#run({ anchors = 2, head = checkpoint.head }).findings, 0, "anchor at the checkpoint itself")
-	t.eq(#run({ anchors = 1, head = string.rep("0", 32) }).findings, 0, "anchor before the checkpoint is covered by it")
-	expectOnly(run({ anchors = 2, head = string.rep("0", 32) }), 1, "red", "anchor_mismatch", nil, "checkpoint anchor, other head")
-	expectOnly(run({ anchors = 3, head = string.rep("0", 32) }), 1, "red", "anchor_mismatch", 7, "wrong head in the suffix")
+	t.eq(#run({ anchors = 3, head = acc.anchorHead }).findings, 0, "anchor in the given entries")
+	t.eq(#run({ anchors = 2, head = Ledger.shortHead(start) }).findings, 0, "anchor at the start itself")
+	t.eq(#run({ anchors = 1, head = string.rep("0", 32) }).findings, 0, "anchor before the start is covered by it")
+	t.eq(#run({ anchors = 2, head = string.rep("0", 32) }).findings, 0, "the start covers its own anchor whatever its head")
+	expectOnly(run({ anchors = 3, head = string.rep("0", 32) }), 1, "red", "anchor_mismatch", 7, "wrong head after the start")
 end)
 
-t.test("checkpoint: the header purchase counts as known and is not asked about", function()
+t.test("start: what lies before it is not asked about", function()
 	local acc = paidAccount()
-	local resume, checkpoint, suffix = split(acc, 8)
-	local r = Verify.run(acc:input({ entries = suffix, resume = resume, checkpoint = checkpoint, known = {},
+	local start, rest = startAt(acc, 8)
+	local r = Verify.run(acc:input({ entries = rest, start = start, known = {},
 		isOfficer = function() return false end }))
-	t.eq(#r.findings, 0, "no check 2 or 3 findings for the header")
+	t.eq(#r.findings, 0, "no check 2 or 3 findings for the purchase and payout before the start")
 end)
 
-t.test("check 3: a purchase seen at another position is red replayed", function()
-	-- Two purchases, spins, payout: the header purchase is the second one. The player then
-	-- appends the first purchase again, which the resumed state has not seen.
+t.test("check 3: a payout seen at another position is red replayed", function()
 	local acc = account()
 	acc:buy(1, "GSLOTS1;L=0")
-	acc:buy(2, "GSLOTS1;L=0")
 	acc:spins(4)
-	acc:pay(1, 100) -- entry 7, anchors 3
+	acc:pay(1, 100) -- entry 6, anchors 2
 	acc:spins(2)
-	local resume, checkpoint, suffix = split(acc, 7)
-	-- The whole account refuses it as dup_buy; the resumed state has not seen it.
-	suffix[3] = acc.entries[1] -- purchase 1 again, anchors 4
-	local known = { [acc.entries[1].buyId] = 1, [acc.entries[2].buyId] = 2, [acc.entries[7].payId] = 3 }
-	local r = Verify.run(acc:input({ entries = suffix, resume = resume, checkpoint = checkpoint, known = known }))
-	expectOnly(r, 3, "red", "replayed", 3)
-	known[acc.entries[1].buyId] = true
-	t.eq(#Verify.run(acc:input({ entries = suffix, resume = resume, checkpoint = checkpoint, known = known })).findings, 0,
+	local start, rest = startAt(acc, 3)
+	local known = { [acc.entries[1].buyId] = 1, [acc.entries[6].payId] = 5 }
+	expectOnly(Verify.run(acc:input({ entries = rest, start = start, known = known })), 3, "red", "replayed", 3)
+	known[acc.entries[6].payId] = true
+	t.eq(#Verify.run(acc:input({ entries = rest, start = start, known = known })).findings, 0,
 		"an old true keeps its meaning")
-	known[acc.entries[1].buyId] = 4
-	t.eq(#Verify.run(acc:input({ entries = suffix, resume = resume, checkpoint = checkpoint, known = known })).findings, 0,
+	known[acc.entries[6].payId] = 2
+	t.eq(#Verify.run(acc:input({ entries = rest, start = start, known = known })).findings, 0,
 		"seen at this very position")
 end)
 
@@ -853,17 +827,67 @@ t.test("check 3: numeric known on a whole account", function()
 	expectOnly(Verify.run(acc:input({ known = known })), 3, "red", "replayed", 7)
 end)
 
-t.test("check 4: a heard request at or before the checkpoint is not checked", function()
+t.test("check 4: a heard request at or before the start is not checked", function()
 	local acc = paidAccount()
-	local resume, checkpoint, suffix = split(acc, 8)
+	local start, rest = startAt(acc, 8)
 	local function run(heard)
-		return Verify.run(acc:input({ entries = suffix, resume = resume, checkpoint = checkpoint, heard = heard }))
+		return Verify.run(acc:input({ entries = rest, start = start, heard = heard }))
 	end
-	t.eq(#run({ n = 3, g = 0, head = string.rep("0", 32) }).findings, 0, "before the checkpoint")
-	t.eq(#run({ n = 6, g = 0, head = string.rep("0", 32) }).findings, 0, "at the checkpoint")
+	t.eq(#run({ n = 3, g = 0, head = string.rep("0", 32) }).findings, 0, "before the start")
+	t.eq(#run({ n = 6, g = 0, head = string.rep("0", 32) }).findings, 0, "at the start")
 	local heads = headsOf(acc)
-	t.eq(#run({ n = 9, g = 0, head = heads[10] }).findings, 0, "in the suffix, on the chain")
-	expectOnly(run({ n = 9, g = 0, head = heads[11] }), 4, "red", "rewritten", 3, "in the suffix, another head")
+	t.eq(#run({ n = 9, g = 0, head = heads[10] }).findings, 0, "after the start, on the chain")
+	expectOnly(run({ n = 9, g = 0, head = heads[11] }), 4, "red", "rewritten", 3, "after the start, another head")
+end)
+
+t.test("the checkpoint inputs are gone", function()
+	local acc = paidAccount()
+	local r = Verify.run(acc:input({ resume = { head = string.rep("0", 64), n = 1 }, checkpoint = {} }))
+	t.eq(#r.findings, 0, "resume and checkpoint are ignored")
+	t.eq(r.balance, acc.st.balance, "whole account replayed")
+end)
+
+-- Alerts (docs/follow-spec.md section 4) -------------------------------------------------------------
+
+t.test("alerts: one yellow finding per distinct code, the list in the report", function()
+	local acc = paidAccount()
+	local alerts = {
+		{ by = "Bob", code = "rewritten", n = 3, g = 0, time = 10 },
+		{ by = "Carol", code = "omitted", n = 4, g = 0, time = 11 },
+		{ by = "Dave", code = "rewritten", n = 5, g = 1, time = 12 },
+	}
+	local r = Verify.run(acc:input({ alerts = alerts }))
+	t.eq(#r.findings, 2, "two codes")
+	t.eq(r.findings[1].code, "alert_rewritten", "first code")
+	t.eq(r.findings[2].code, "alert_omitted", "second code")
+	for _, f in ipairs(r.findings) do
+		t.eq(f.check, 7, "check")
+		t.eq(f.level, "yellow", "level")
+		t.eq(f.index, nil, "no index")
+	end
+	t.eq(r.light, "yellow", "light")
+	t.eq(#r.alerts, 3, "every alert in the report")
+	t.eq(r.alerts[3].by, "Dave", "sender kept")
+	t.eq(r.balance, acc.st.balance, "blocks nothing")
+	for _, code in ipairs({ "bad_entry", "bad_res", "bad_value" }) do
+		r = Verify.run(acc:input({ alerts = { { by = "B", code = code, n = 1, g = 0, time = 1 } } }))
+		expectOnly(r, 7, "yellow", "alert_" .. code, nil, code)
+	end
+end)
+
+t.test("alerts: none, or rows that are not alerts", function()
+	local acc = paidAccount()
+	local r = Verify.run(acc:input())
+	t.eq(#r.alerts, 0, "empty list without the input")
+	r = Verify.run(acc:input({ alerts = { "x", { by = "B", code = "nope" }, { by = "B" } } }))
+	t.eq(#r.findings, 0, "no findings")
+	t.eq(#r.alerts, 0, "dropped")
+	-- A failed replay still reports the alerts.
+	local entries = { unpack(acc.entries) }
+	entries[3] = withField(entries[3], "n", 99)
+	r = Verify.run(acc:input({ entries = entries, alerts = { { by = "B", code = "bad_res", n = 2, g = 0, time = 1 } } }))
+	t.eq(#findings(r, "alert_bad_res"), 1, "alert next to the red finding")
+	t.eq(#r.alerts, 1, "list")
 end)
 
 -- Vectors ----------------------------------------------------------------------------------------

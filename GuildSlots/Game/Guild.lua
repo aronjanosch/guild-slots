@@ -668,14 +668,11 @@ local function witKey(player, kind, n, g)
 	return player .. "|" .. kind .. "|" .. n .. "|" .. g
 end
 
--- Drops a stale secret and old or surplus witness rows, and indexes the rest. Runs at creation.
+-- Replaces a stale secret, drops old or surplus witness rows, and indexes the rest. Runs at
+-- creation; the secret is created here because HELLO carries its commit (docs/follow-spec.md 2).
 function Session:initWitness()
 	local now = self.env.now()
-	local sec = self.store.secret
-	if sec ~= nil and (type(sec) ~= "table" or type(sec.S) ~= "string" or #sec.S ~= 32 or type(sec.time) ~= "number"
-		or now - sec.time >= WITNESS_AGE) then
-		self.store.secret = nil
-	end
+	self:secret()
 	local all = self.store.witness
 	local list = type(all) == "table" and all[self.guild]
 	if type(list) ~= "table" then
@@ -697,7 +694,7 @@ function Session:initWitness()
 	all[self.guild] = out
 end
 
--- The session secret S, created on first use and replaced after 14 days.
+-- The session secret S, created at session creation (or when missing) and replaced after 14 days.
 function Session:secret()
 	local now = self.env.now()
 	local sec = self.store.secret
@@ -1177,7 +1174,7 @@ function Session:onPay(sender, msg)
 	if not info then
 		return self:setPayout("failed", code)
 	end
-	if Ledger.shortHead(trial) ~= msg.head then
+	if trial.head ~= msg.head then
 		return self:setPayout("failed", "head_mismatch")
 	end
 	self:append(entry)
@@ -1281,7 +1278,7 @@ function Session:onPayReq(sender, msg)
 		self:sendReject(r.reqId, sender, "too_large")
 		return self:setReq(r, "failed", "too_large")
 	end
-	if not self:send("LOGREQ", { reqId = r.reqId, player = sender, from = 0 }) then
+	if not self:send("LOGREQ", { reqId = r.reqId, player = sender, from = 0, head = "-" }) then
 		return self:setReq(r, "failed", "send")
 	end
 	event(self, "request", requestCopy(r))
@@ -1414,7 +1411,7 @@ function Session:confirm(reqId)
 	local head = Ledger.shortHead(after)
 	local ok = self:send("PAY", {
 		reqId = r.reqId, payId = entry.payId, player = r.player, amount = entry.amount,
-		balanceAfter = entry.balanceAfter, time = entry.time, head = head, anchors = after.anchors,
+		balanceAfter = entry.balanceAfter, time = entry.time, head = after.head, anchors = after.anchors,
 		n = after.n, ck = Ledger.checkpointKey(after.n, after.K, after.line),
 	})
 	if not ok then
@@ -1554,6 +1551,8 @@ function Session:sendHello()
 		version = self.env.version,
 		n = hasAccount and state.n or 0,
 		head = hasAccount and Ledger.shortHead(state) or "-",
+		commit = Engine.witnessCommit(self:secret()),
+		reveal = "-", -- TODO(follow): reveal the previous secret once it rotates
 	})
 end
 
@@ -1661,7 +1660,8 @@ function Session:onMessage(sender, text)
 			return
 		end
 		self:alive(sender)
-		self:storeAnchor(msg.player, { anchors = msg.anchors, head = msg.head, time = msg.time, by = sender })
+		-- PAY carries the full head; anchors keep the short one.
+		self:storeAnchor(msg.player, { anchors = msg.anchors, head = sub(msg.head, 1, 32), time = msg.time, by = sender })
 		self:markSeen(msg.player, msg.payId)
 		if msg.player == self.me then
 			self:onPay(sender, msg)

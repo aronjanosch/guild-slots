@@ -549,7 +549,7 @@ t.test("replay reports the first failing entry and its index", function()
 	t.eq(st, nil) t.eq(code, "bad_entry") t.eq(index, 2)
 end)
 
--- Checkpoints (docs/witness-spec.md section 6) ----------------------------------------------------
+-- Checkpoint key (docs/witness-spec.md section 6) --------------------------------------------------
 
 t.test("checkpointKey is the first 16 hex of Sha256.hex(GS1|CK|n|K|line)", function()
 	local K = keyOf(REF_BUY)
@@ -559,68 +559,109 @@ t.test("checkpointKey is the first 16 hex of Sha256.hex(GS1|CK|n|K|line)", funct
 	t.eq(Ledger.checkpointKey(0, K, REF_BUY.line), "f118e307b1eff7b5", "n = 0")
 end)
 
--- REF_BUY, spins 1..5 (all lose: 950 left), a payout of 100, then the suffix.
-local function checkpointAccount()
-	local entries = { REF_BUY }
-	for n = 1, 5 do entries[#entries + 1] = spin(n, 10) end
-	local before = new(entries)
-	local p = pay(1, 100, 850)
-	entries[#entries + 1] = p
-	local cp = {
-		head = before.head, n = 5, payout = Ledger.encode(p), purchase = Ledger.encode(REF_BUY), anchors = 2,
-		count = #entries,
-	}
-	return entries, cp
+-- Snapshots (docs/follow-spec.md section 3) ------------------------------------------------------
+
+-- True when v holds only numbers, texts and tables of those (SavedVariables safe, no functions).
+local function plain(v)
+	local kind = type(v)
+	if kind == "number" or kind == "string" or kind == "boolean" then
+		return true
+	elseif kind ~= "table" then
+		return false
+	end
+	for k, x in pairs(v) do
+		if (type(k) ~= "string" and type(k) ~= "number") or not plain(x) then
+			return false
+		end
+	end
+	return true
 end
 
-t.test("resume gives the state right after the payout", function()
-	local entries, cp = checkpointAccount()
-	local full = new(entries)
-	local st, code = Ledger.resume(GUILD, PLAYER, cp)
-	t.ok(st, "resumed: " .. tostring(code))
+-- Applies the same entries to both states and compares head, balance and every scalar after each.
+local function sameFuture(a, b, entries, msg)
+	for i, e in ipairs(entries) do
+		local x, codeX = Ledger.apply(a, e)
+		local y, codeY = Ledger.apply(b, e)
+		t.eq(x ~= nil, y ~= nil, msg .. ": entry " .. i .. " applies alike")
+		t.eq(codeX, codeY, msg .. ": entry " .. i .. " code")
+		for _, k in ipairs(SCALARS) do
+			t.eq(a[k], b[k], msg .. ": entry " .. i .. " field " .. k)
+		end
+	end
+end
+
+t.test("snapshot is a plain table and restore behaves like the original for every later entry", function()
+	local st = new({ REF_BUY, spin(1), spin(2, 50), pay(1, 40, 900), buy(2, "GSLOTS1;E=10,20"), spin(3, 20) })
+	local snap = Ledger.snapshot(st)
+	t.ok(plain(snap), "plain")
+	t.eq(snap.head, st.head, "head")
+	t.eq(snap.purchase, Ledger.encode(buy(2, "GSLOTS1;E=10,20")), "purchase text in force")
+	local back, code = Ledger.restore(GUILD, PLAYER, snap)
+	t.ok(back, "restored: " .. tostring(code))
+	t.eq(back.guild, GUILD, "guild")
+	t.eq(back.player, PLAYER, "player")
 	for _, k in ipairs(SCALARS) do
-		t.eq(st[k], full[k], "field " .. k)
+		t.eq(back[k], st[k], "field " .. k)
 	end
-	t.eq(st.guild, GUILD, "guild")
-	t.eq(st.player, PLAYER, "player")
-	t.eq(st.settings.L, 0, "settings")
-	t.eq(st.tbl, full.tbl, "table")
-	t.eq(st.keyed("x"), full.keyed("x"), "keyed key")
-	t.ok(st.payIds["00000000000f4241"], "payout id known")
-	t.ok(st.buyIds[REF_BUY.buyId], "purchase id known")
-	-- The suffix goes on exactly as on the whole account.
-	for n = 6, 8 do
-		local a, b = Ledger.apply(st, spin(n, 10)), Ledger.apply(full, spin(n, 10))
-		t.ok(a and b, "spin " .. n)
-		t.eq(st.head, full.head, "head after spin " .. n)
-		t.eq(st.balance, full.balance, "balance after spin " .. n)
-	end
-	expectFail(st, pay(1, 1, st.balance - 1), "dup_pay", "the resumed payout id is used")
-	expectFail(st, REF_BUY, "dup_buy", "the resumed purchase id is used")
-	cp.count = nil
-	t.eq(Ledger.resume(GUILD, PLAYER, cp).count, 0, "count defaults to 0")
+	t.eq(back.tbl, st.tbl, "table")
+	t.eq(back.keyed("x"), st.keyed("x"), "keyed key")
+	t.eq(back.settings.E[2], 20, "settings")
+	sameFuture(back, st, {
+		spin(4, 20), spin(5, 50), -- 50 is no longer allowed
+		pay(1, 1, st.balance - 1), -- a used payout id
+		REF_BUY, buy(2), -- used purchase ids
+		pay(2, 10, st.balance - 10), buy(3), spin(5, 10),
+	}, "after the snapshot")
+	-- The snapshot is a copy: changing the state later does not change it.
+	t.ok(snap.head ~= st.head, "snapshot unchanged")
 end)
 
-t.test("resume refuses bad checkpoints", function()
-	local _, base = checkpointAccount()
+t.test("restore in the middle of a gamble", function()
+	local line = "GSLOTS1;G=3"
+	local b = findBuy(line, function(K)
+		return spinMult(K, 1) > 0 and Engine.gamble(K, 1, 1, "") and Engine.gamble(K, 1, 2, "")
+	end)
+	local st = new({ b, spin(1, 10), gam(1, 1) })
+	t.ok(st.pending > 0 and st.g == 1, "mid gamble")
+	local back = assert(Ledger.restore(GUILD, PLAYER, Ledger.snapshot(st)))
+	sameFuture(back, st, { gam(1, 1), gam(1, 2), gam(1, 3), spin(2, 10) }, "mid gamble")
+	t.eq(back.n, 2, "went on")
+end)
+
+t.test("a snapshot before any purchase restores to a fresh account", function()
+	local st = Ledger.start(GUILD, PLAYER)
+	local snap = Ledger.snapshot(st)
+	t.eq(snap.purchase, nil, "no purchase")
+	local back = assert(Ledger.restore(GUILD, PLAYER, snap))
+	sameFuture(back, st, { spin(1), REF_BUY, spin(1) }, "fresh")
+end)
+
+t.test("restore refuses bad snapshots", function()
+	local base = Ledger.snapshot(new({ REF_BUY, spin(1), pay(1, 5, 985) }))
 	local function try(changes, want, msg)
-		local cp = with(base, changes)
-		local st, code = Ledger.resume(GUILD, PLAYER, cp)
+		local snap = with(base, changes)
+		local st, code = Ledger.restore(GUILD, PLAYER, snap)
 		t.eq(st, nil, msg)
 		t.eq(code, want, msg)
 	end
-	try({ payout = "P|x" }, "bad_entry", "payout text")
-	try({ payout = base.purchase }, "bad_entry", "purchase as payout")
-	try({ purchase = base.payout }, "bad_entry", "payout as purchase")
+	try({ purchase = "B|x" }, "bad_entry", "purchase text")
+	try({ purchase = Ledger.encode(pay(1, 5, 985)) }, "bad_entry", "payout as purchase")
 	try({ purchase = Ledger.encode(with(REF_BUY, { commit = buy(2).commit })) }, "bad_commit", "commit")
 	try({ purchase = Ledger.encode(with(REF_BUY, { line = "GSLOTS1;L=7" })) }, "bad_settings", "settings")
+	try({ purchase = Ledger.encode(buy(2)) }, "bad_entry", "purchase not among the purchase ids")
 	try({ head = base.head:sub(1, 32) }, "bad_entry", "short head")
 	try({ head = base.head:upper() }, "bad_entry", "upper head")
 	try({ n = -1 }, "bad_entry", "n below 0")
 	try({ n = 1.5 }, "bad_entry", "fraction")
-	try({ anchors = 1 }, "bad_entry", "anchors below 2")
 	try({ count = "7" }, "bad_entry", "count as text")
-	t.eq(Ledger.resume(GUILD, PLAYER, nil), nil, "nil checkpoint")
+	try({ balance = 9007199254740992 }, "bad_entry", "balance above 2^53-1")
+	try({ pending = -1 }, "bad_entry", "pending below 0")
+	try({ anchors = -1 }, "bad_entry", "anchors below 0")
+	try({ buyIds = { "x" } }, "bad_entry", "bad purchase id")
+	try({ payIds = "x" }, "bad_entry", "pay ids not a list")
+	try({ purchase = false }, "bad_entry", "purchase not a text")
+	t.eq(Ledger.restore(GUILD, PLAYER, nil), nil, "nil snapshot")
+	t.eq(Ledger.resume, nil, "resume is gone")
 end)
 
 t.test("the head depends on guild and player", function()
