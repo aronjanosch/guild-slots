@@ -38,7 +38,7 @@ local function dispatch(name, data)
 end
 
 -- fn(name, data) for the session events ("account", "purchase", "presence", "notice", "payout",
--- "request") plus "session" (created or dropped) and "roster" (guild roster or guild info changed).
+-- "request", "ticker", "result") plus "session" (created or dropped) and "roster" (guild roster or guild info changed).
 function Main.subscribe(fn)
 	listeners[#listeners + 1] = fn
 end
@@ -77,6 +77,8 @@ end
 local function onEvent(name, data)
 	if name == "notice" and type(data) == "table" and data.kind == "update" then
 		chat(string.format(L.UPDATE_NOTICE, tostring(data.version)))
+	elseif name == "notice" and type(data) == "table" and data.kind == "witness_cheat" then
+		chat(string.format(L.WITNESS_CHEAT, tostring(data.name or data.witness or data.from)))
 	end
 	dispatch(name, data)
 end

@@ -146,7 +146,7 @@ local function secondsLeft(s, p)
 		start = clock(s)
 		C.starts[p.reqId] = start
 	end
-	local left = Theme.payout.lifetime - (clock(s) - start)
+	local left = (tonumber(p.life) or Theme.payout.lifetime) - (clock(s) - start)
 	if left < 0 then left = 0 end
 	return math.ceil(left)
 end

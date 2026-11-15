@@ -31,6 +31,9 @@ jobs:
       - name: Run guild mode smoke test
         run: luajit tests/smoke_guild.lua
 
+      - name: Run witnessed account smoke test
+        run: luajit tests/smoke_witness.lua
+
       - name: Run payout smoke test
         run: luajit tests/smoke_payout.lua
 

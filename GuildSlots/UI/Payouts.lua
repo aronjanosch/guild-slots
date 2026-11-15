@@ -3,7 +3,8 @@ local _, ns = ...
 -- The Payouts tab of the officer window (docs/payout-spec.md, officer side): the payout requests
 -- addressed to this officer, newest first, and the review of the selected one: the traffic light
 -- of the recalculation (Core/Verify.lua report), the balance, the findings, the luck index and the
--- look-ahead. The officer pays gold by hand in the game, then confirms here (two clicks), or
+-- look-ahead, and the alerts other members raised (docs/follow-spec.md section 7). The officer
+-- pays gold by hand in the game, then confirms here (two clicks), or
 -- rejects. The add-on never moves gold or items. Statuses and codes it does not know are shown
 -- raw. Layout in Theme.officer.payouts.
 
@@ -75,7 +76,8 @@ local function setBadge(b, status, text)
 end
 
 local function secondsLeft(s, r)
-	local left = Theme.payout.lifetime - (clock(s) - num(r.time))
+	local life = tonumber(r.life) or Theme.payout.lifetime
+	local left = life - (clock(s) - num(r.time))
 	if left < 0 then left = 0 end
 	return math.ceil(left)
 end
@@ -140,9 +142,43 @@ local function fillList(s, list)
 	W.payNone:SetShown(#list == 0)
 end
 
+-- "Rewritten history reported by Tom (spin 4)" for one alert of the report.
+local function alertText(a)
+	local what = lookup("FIND_alert_", a.code) or string.format(L.FIND_UNKNOWN, tostring(a.code))
+	return string.format(L.PAY_ALERT_ROW, what, tostring(a.by or "?"), num(a.n))
+end
+Payouts.alertText = alertText
+
+-- The rows of the findings panel: { text, level, index }. A finding alert_<code> becomes one row
+-- per alert of that code (sender and spin number); the finding itself when none is listed.
+local function findingRows(report)
+	local out = {}
+	local alerts = type(report.alerts) == "table" and report.alerts or {}
+	for _, f in ipairs(type(report.findings) == "table" and report.findings or {}) do
+		local code = type(f.code) == "string" and f.code:match("^alert_(.+)$")
+		local listed = false
+		if code then
+			for _, a in ipairs(alerts) do
+				if type(a) == "table" and a.code == code then
+					out[#out + 1] = { text = alertText(a), level = f.level }
+					listed = true
+				end
+			end
+		end
+		if not listed then
+			local text = lookup("FIND_", f.code) or string.format(L.FIND_UNKNOWN, tostring(f.code))
+			if type(f.index) == "number" then
+				text = text .. string.format(L.FIND_ENTRY, f.index)
+			end
+			out[#out + 1] = { text = text, level = f.level }
+		end
+	end
+	return out
+end
+
 local function fillFindings(report)
 	local c = Theme.colors
-	local list = type(report.findings) == "table" and report.findings or {}
+	local list = findingRows(report)
 	local rows = W.payFindingRows
 	local n = #rows
 	for i, row in ipairs(rows) do
@@ -153,11 +189,7 @@ local function fillFindings(report)
 			Skin.color(row.text, c.muted)
 			row.text:Show()
 		elseif f then
-			local text = lookup("FIND_", f.code) or string.format(L.FIND_UNKNOWN, tostring(f.code))
-			if type(f.index) == "number" then
-				text = text .. string.format(L.FIND_ENTRY, f.index)
-			end
-			row.text:SetText(text)
+			row.text:SetText(f.text)
 			Skin.color(row.text, f.level == "red" and c.lose or c.text)
 			Skin.color(row.dot, c[LEVEL_COLOR[f.level] or "statusNone"])
 			row.dot:Show()
@@ -177,7 +209,16 @@ local function zText(v)
 	return "–"
 end
 
-local function fillLuck(report)
+local function fillLuck(r, report)
+	-- Followed without entries since the last payout: nothing to judge the luck by.
+	local none = r.followed == true and type(report.luck) ~= "table"
+	W.payLuckNone:SetShown(none)
+	W.paySpins:SetShown(not none)
+	for _, row in ipairs(W.payLuckRows) do
+		row.name:SetShown(not none)
+		row.z:SetShown(not none)
+		row.badge:SetShown(not none)
+	end
 	local luck = type(report.luck) == "table" and report.luck or {}
 	for i, key in ipairs(LUCK) do
 		local row, v = W.payLuckRows[i], luck[key]
@@ -219,8 +260,14 @@ local function fillReport(r, report)
 		W.payAfter:SetText("–")
 		Skin.color(W.payAfter, c.number)
 	end
+	if r.followed then
+		W.payFollowed:SetText(L.PAY_FOLLOWED)
+	elseif r.partial then
+		W.payFollowed:SetText(L.PAY_PARTIAL)
+	end
+	W.payFollowed:SetShown(r.followed == true or r.partial == true)
 	fillFindings(report)
-	fillLuck(report)
+	fillLuck(r, report)
 end
 
 local function fillButtons(r, red)
@@ -380,9 +427,9 @@ end
 
 -- part: the tab's section frame (window x, y from the section top). widgets: the officer
 -- window's widget table (gets payoutsPart, payRows, payNone, payReviewHead, payGold, payHint, payReport,
--- payLight, payLightGlow, payBalance, payAmount, payAfter, payFindingRows, payNoFindings,
--- payLuckRows, paySpins, payLookahead, payNote, payActions, payConfirm, payReject, payBack,
--- payDeclined, payMismatch). callbacks: session(), fmt(n), refresh().
+-- payLight, payLightGlow, payBalance, payAmount, payAfter, payFollowed, payFindingRows, payNoFindings,
+-- payLuckRows, paySpins, payLuckNone, payLookahead, payNote, payActions, payConfirm, payReject,
+-- payBack, payDeclined, payMismatch). callbacks: session(), fmt(n), refresh().
 function Payouts.build(part, widgets, callbacks)
 	W, host = widgets, callbacks
 	W.payoutsPart = part
@@ -455,6 +502,9 @@ function Payouts.build(part, widgets, callbacks)
 
 	local fh = Skin.textIn(rep, part, Pp.findingsHead, "label", fs.section, c.goldLight, "LEFT")
 	fh:SetText(Skin.upper(L.PAY_FINDINGS))
+	-- "Followed live, nothing transferred" (or only the missing entries), right of the heading.
+	W.payFollowed = Skin.textIn(rep, part, Pp.followed, "label", fs.small, c.muted, "RIGHT")
+	W.payFollowed:Hide()
 	local fp = Skin.panel(rep, part, Pp.findings, "inset")
 	W.payFindingRows = {}
 	for i = 1, Pp.fRows do
@@ -480,11 +530,15 @@ function Payouts.build(part, widgets, callbacks)
 		local row = {}
 		local name = Skin.textIn(lp, part, { Pp.lName[1], y, Pp.lName[2], Pp.lRowH }, "label", fs.small, c.text, "LEFT")
 		name:SetText(L["LUCK_" .. key])
+		row.name = name
 		row.z = Skin.textIn(lp, part, { Pp.lZ[1], y, Pp.lZ[2], Pp.lRowH }, "number", fs.listNumber, c.number, "RIGHT")
 		row.badge = Skin.badge(lp, part, { Pp.lBadge[1], y + Pp.lBadge[2], Pp.lBadge[3], Pp.lBadge[4] }, fs.small)
 		W.payLuckRows[i] = row
 	end
 	W.paySpins = Skin.textIn(lp, part, Pp.spins, "label", fs.small, c.muted, "LEFT")
+	W.payLuckNone = wrapped(lp, Pp.luckNone, c.muted, fs.small)
+	W.payLuckNone:SetText(L.LUCK_FOLLOWED)
+	W.payLuckNone:Hide()
 	local ln = wrapped(rep, Pp.luckNote, c.muted, fs.label)
 	ln:SetText(L.LUCK_NOTE)
 	W.payLookahead = Skin.textIn(rep, part, Pp.lookahead, "label", fs.small, c.text, "LEFT")

@@ -429,13 +429,15 @@ Theme.officer = {
 		light = { 22, 162, 128, 52 },
 		lightGlowOut = 14,
 		numLabel = { 164, 150 }, numValue = { 312, 114 }, numY = 162, numH = 18,
-		findingsHead = { 26, 220, 300, 16 },
+		findingsHead = { 26, 220, 136, 16 },
+		followed = { 166, 220, 260, 16 }, -- followed live / partial log, right of the findings heading
 		findings = { 22, 238, 404, 92 },
 		fRowY = 242, fRowH = 21, fRows = 4, fDot = { 36, 7, 8, 8 }, fText = { 52, 368 },
 		luckHead = { 26, 336, 300, 16 },
 		luck = { 22, 354, 404, 96 },
 		lRowY = 358, lRowH = 22, lName = { 36, 120 }, lZ = { 160, 60 }, lBadge = { 232, 0, 180, 22 },
 		spins = { 36, 426, 380, 18 },
+		luckNone = { 36, 366, 380, 60 }, -- instead of the rows when there is no luck index
 		luckNote = { 26, 454, 400, 28 },
 		lookahead = { 26, 484, 400, 16 },
 		note = { 26, 502, 400, 32 },
@@ -596,7 +598,7 @@ Theme.sounds = {
 -- Payouts (milestone 4)
 
 Theme.payout = {
-	lifetime = 300, -- seconds a request stays open (Game/Guild.lua REQUEST_TIMEOUT), for the countdown
+	lifetime = 300, -- seconds a request stays open when its record has no `life` (Game/Guild.lua lifetime)
 	refresh = 1, -- seconds between refreshes of the countdowns and progress while shown
 	-- Status -> badge colour key (Theme.colors) and text colour key. Unknown statuses: statusNone.
 	badge = {

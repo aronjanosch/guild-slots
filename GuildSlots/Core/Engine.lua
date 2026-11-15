@@ -64,6 +64,11 @@ function Engine.witnessValue(S, player, kind, n, g, amount, head)
 	return sub(Sha256.hmac(S, msg), 1, 16)
 end
 
+-- The commit a HELLO carries for the session secret S (docs/follow-spec.md section 2).
+function Engine.witnessCommit(S)
+	return sub(Sha256.hex("GS1|WC|" .. S), 1, 32)
+end
+
 function Engine.lot(witness, player, kind, n, g)
 	local h = Sha256.hex(witness .. "|" .. player .. "|" .. kind .. "|" .. dec(n) .. "|" .. dec(g))
 	return tonumber(sub(h, 1, 8), 16)

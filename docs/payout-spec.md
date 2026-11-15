@@ -4,7 +4,9 @@ Scope: a player asks an officer for a payout, the officer's client fetches the a
 it (`Core/Verify.lua`, checks 1-6 and 8, luck index, look-ahead), the officer confirms or rejects,
 the payout lands in the account, clients keep anchors, officers exchange anchors.
 `docs/core-spec.md` (entries, ledger, Verify) and `docs/guild-spec.md` (wire format, session) stay
-valid; this file extends them. The add-on never moves gold: the officer pays by hand and then
+valid; this file extends them. Milestone 5 changes it: `docs/follow-spec.md` section 5 (payouts from
+a followed state, partial logs, alerts) and `docs/witness-spec.md` section 6 (600 chunks, lifetime);
+the rows and steps below are updated to match. The add-on never moves gold: the officer pays by hand and then
 confirms.
 
 ## 1. Transport
@@ -20,9 +22,9 @@ flow. Accounts are not secret (SPIN is public already).
 |---|---|---|
 | `BUY2` (changed) | player | `buyId` (16 hex), `nonce` (32 hex), `head` (**64** hex, full head before the purchase), `anchors` (number of B and P entries before the purchase, 0..2^31) |
 | `PAYREQ` | player | `reqId` (16 hex), `officer` (name), `amount` (1..2^53-1), `head` (32 hex, current short head), `count` (number of entries, 1..2^31) |
-| `LOGREQ` | officer | `reqId` (16 hex), `player` (name) |
-| `LOG` | player | `reqId` (16 hex), `seq` (1..total), `total` (1..2^31; the officer refuses more than 200), `payload` (the rest of the message, 1..200 bytes, may contain `|`) |
-| `PAY` | officer | `reqId` (16 hex), `payId` (16 hex), `player` (name), `amount`, `balanceAfter` (0..2^53-1), `time` (server seconds), `head` (32 hex, short head after the payout entry), `anchors` (B and P entries including this one) |
+| `LOGREQ` | officer | `reqId` (16 hex), `player` (name), `from` (entries the officer already holds; 0 = whole account), `head` (32 hex short head after entry `from`, or `-` when `from` is 0) |
+| `LOG` | player | `reqId` (16 hex), `seq` (1..total), `total` (1..2^31; the officer refuses more than 600), `payload` (the rest of the message, 1..220 bytes, may contain `|`) |
+| `PAY` | officer | `reqId` (16 hex), `payId` (16 hex), `player` (name), `amount`, `balanceAfter` (0..2^53-1), `time` (server seconds), `head` (64 hex, full head after the payout entry), `anchors` (B and P entries including this one), `n` (spin number), `ck` (16 hex checkpoint key, witness-spec section 6) |
 | `REJECT` | officer | `reqId` (16 hex), `player` (name), `reason` (`declined`, `mismatch`, `expired`, `busy`, `too_large`, `bad_log`) |
 | `OSYNC` | officer | `player` (name), `anchors` (1..2^31), `head` (32 hex), `time` (server seconds of the anchored entry) |
 
@@ -32,12 +34,13 @@ and takes everything after the fifth `|` as `payload` (bytes 1..255 except NUL; 
 ## 3. Packing an account (`Core/Pack.lua`, pure)
 
 ```
-Pack.encode(entries)        -> text         entries = entry text forms in order
-Pack.decode(text)           -> entries or nil, code
-Pack.split(text, size)      -> { chunk, … }  size defaults to 200 bytes
+Pack.encode(entries[, from, n])   -> text            entries = entry text forms in order
+Pack.decode(text[, limit, n])     -> entries, from or nil, code
+Pack.split(text, size)            -> { chunk, … }     size defaults to 220 bytes
 ```
 
-The packed text is a list of items separated by newline (`\n`). Item forms:
+`from`/`n` and the `>` marker of a partial log: follow-spec section 5; the dictionary forms:
+witness-spec section 5. The packed text is a list of items separated by newline (`\n`). Item forms:
 
 - `=<entry text>`: one entry, verbatim.
 - `s<stake>` or `s<stake>*<count>`: `count` consecutive spin entries `S|n|<stake>|0|ok|` (level-0
@@ -76,39 +79,50 @@ Player status: `wait_officer` (PAYREQ sent), `sending` (LOG chunks going out), `
 2. While a request is open (`wait_officer`, `sending`, `wait_decision`) the game is locked:
    `spin()` and `gamble()` return `payout`, `game:status()` returns `payout`. Purchases addressed to
    the player are refused with `busy`.
-3. On `LOGREQ` with the open `reqId` from the chosen officer: pack the whole account, split it into
-   chunks of 200 bytes, send them as `LOG` 1..total (status `sending`, then `wait_decision`). More
-   than 200 chunks: status `failed`, code `too_large`, nothing sent. A refused send keeps the chunk
-   for the next `tick()`; `sent`/`total` show progress.
+3. On `LOGREQ` with the open `reqId` from the chosen officer: pack the whole account, or with
+   `from > 0` only the entries after entry `from` when the own short head after that entry equals
+   `LOGREQ.head` (follow-spec section 5; the replay up to `from` runs at most 500 entries per
+   `tick()`), split it into chunks of 220 bytes, send them as `LOG` 1..total (status `sending`, then
+   `wait_decision`). More than 600 chunks: status `failed`, code `too_large`, nothing sent. A refused
+   send keeps the chunk for the next `tick()`; `sent`/`total` show progress.
 4. On `PAY` with the open `reqId` from the chosen officer: build
    `{ type = "P", payId, officer = sender, amount, balanceAfter, time }`, apply it. Success and the
    short head equals `PAY.head`: status `paid`, event `account`. Otherwise status `failed` with the
    ledger code or `head_mismatch`, and the account stays as it was.
 5. On `REJECT` with the open `reqId` from the chosen officer: status `rejected`, `code = reason`.
-6. No `PAY`/`REJECT` within 300 s of the request: status `expired`. The lock ends.
+6. No `PAY`/`REJECT` within the request's lifetime: status `expired`. The lock ends. The lifetime
+   is `300 + 1.2 * total` seconds, `total` = the number of `LOG` chunks once known (300 s before,
+   and when nothing is transferred).
 
 ### Officer
 
 1. On `PAYREQ` naming the own name as officer, from any sender, when the own name is an officer:
    refuse with `REJECT` `busy` when a request of that player is already open here; else store the
-   request and send `LOGREQ` (status `fetching`). With `allowSelf` the own echo counts.
+   request (status `fetching`). With `allowSelf` the own echo counts. Once the followed messages of
+   that player that arrived before the `PAYREQ` are applied, decide (follow-spec section 5): nothing
+   missing (no `LOGREQ`), `LOGREQ` with `from`/`head` for a partial log, or `LOGREQ` with `from = 0`
+   for the whole account.
 2. Collect `LOG` chunks for the `reqId` from that player. When all `total` chunks are there:
-   `Pack.decode`; failure → `REJECT bad_log`, status `failed`. Then run `Verify.run` in a coroutine,
-   resumed in `tick()` with `stepBudget` entries per tick (`onStep` yields); `progress` is the share
-   done. Verify input: `amount` from the request; `anchor` = `session:anchor(player)`; `known` = ids
-   in `store.seen` for that player; `heard` = `store.heard` for that player; `isOfficer(name)` from
-   `env.isOfficer` (time ignored). Status `ready` with `report`.
+   `Pack.decode`; failure → `REJECT bad_log`, status `failed`. Then (or at once when nothing is
+   missing) run `Verify.run` in a coroutine, started at least 4 s after the `PAYREQ` arrived (so the
+   `ALERT` messages are in) and resumed in `tick()` with `stepBudget` entries per tick (`onStep`
+   yields); `progress` is the share done. Verify input: `amount` from the request; `start` and the
+   entries per follow-spec section 5; `anchor` = `session:anchor(player)`; `known` = ids in
+   `store.seen` for that player; `heard` = `store.heard` for that player; `alerts` = the heard
+   `ALERT` messages plus the own stored alerts about the player; `audit` = empty;
+   `isOfficer(name)` from `env.isOfficer` (time ignored). Status `ready` with `report`.
    The request's `head`/`count` must match the fetched account (short head, number of entries),
    else `REJECT mismatch`, status `failed`.
-3. `confirm(reqId)`: only in `ready` and before the request is 270 s old (`expired` otherwise, with
-   a `REJECT expired`); refuses with `amount_too_high` when the amount exceeds the report's balance
+3. `confirm(reqId)`: only in `ready` and until 30 s before the end of the request's lifetime
+   (`expired` otherwise, with a `REJECT expired`); refuses with `amount_too_high` when the amount exceeds the report's balance
    and with `no_replay` when the replay failed (the officer can still pay by hand, the add-on just
    cannot write a payout it cannot calculate). `payId = randomHex(16)`, `time = floor(now())`,
    `balanceAfter = balance - amount`; applies the payout entry to a copy of the replayed state to get
-   the head after; sends `PAY`; status `paid`; stores the anchor and the id. Everything else
+   the head after; sends `PAY`; status `paid`; stores the anchor and the id; moves the follow record
+   to the state after the payout. Everything else
    (including a red report) does not block: the officer decides.
 4. `reject(reqId, reason)`: sends `REJECT`, status `rejected`.
-5. Requests older than 300 s without a decision become `expired`. Finished requests stay listed
+5. Requests older than their lifetime without a decision become `expired`. Finished requests stay listed
    (last 50, in `store.requests`, without the account text).
 
 ### Anchors and first-hand knowledge
@@ -168,8 +182,8 @@ Rules fixed after the first implementation; the tests in `tests/test_guild.lua` 
 - **Size limits.** `Pack.MAX_ENTRIES = 100000` is the default limit of `Pack.decode(text, limit)`; the
   officer decodes with `limit = count`. A `PAYREQ` with `count` above `Pack.MAX_ENTRIES`, or a first
   `LOG` announcing `total > 200`, gets `REJECT too_large` and the request ends `failed`/`too_large`
-  (that is the reading of the `too_large` reason). A log that unpacks to more than `count` entries is
-  `mismatch`; any other unpack failure is `bad_log`.
+  (that is the reading of the `too_large` reason; the limit is 600 since milestone 5). A log that
+  unpacks to more than `count` entries is `mismatch`; any other unpack failure is `bad_log`.
 - **Head check.** `count` is compared right after unpacking, `head` after the replay and only when the
   replay succeeded; a failed replay gives a red report and `confirm` refuses with `no_replay`.
 - **`live` in `store.heard`.** `HELLO` carries the head after the last entry, check 4 needs the head
@@ -190,7 +204,7 @@ Rules fixed after the first implementation; the tests in `tests/test_guild.lua` 
 | BUY2 | short head | full head and the anchor count | listeners can then compute the anchor after the purchase |
 | PAY | payId, player, amount, balance after, head, number | plus `reqId` and `time` | binds the payout to the request; the entry stores the officer's time |
 | OSYNC | own purchases and payouts since a time, plus anchors | newest own anchor per player | the anchor is what check 1 needs; unknown ids only turn yellow |
-| Request lifetime | 30 s per step | 300 s per request, game locked meanwhile | the officer has to look at the report and pay by hand |
+| Request lifetime | 30 s per step | 300 s per request plus 1.2 s per LOG chunk, game locked meanwhile | the officer has to look at the report and pay by hand |
 
 ## Known limits of version 1
 

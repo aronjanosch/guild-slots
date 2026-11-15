@@ -10,8 +10,9 @@ local addonName, ns = ...
 -- UI/Layout.lua, the paytable from UI/Paytable.lua, the cash-out overlay (guild mode) from
 -- UI/Cashout.lua.
 --
--- Phases: "idle" (an open take/gamble offer is S.offer), "round" (a plan plays), "pick" (the
--- gamble card waits for red or black), "flip" (the card turns over).
+-- Phases: "idle" (an open take/gamble offer is S.offer), "wait" (a witnessed spin: the reels run
+-- until the session's `result` event), "round" (a plan plays), "pick" (the gamble card waits for
+-- red or black), "flip" (the card turns over; S.flip.wait while a witnessed step waits).
 --
 -- Engagement pack (v0.7): autoplay (an on/off toggle; UI/Auto.lua decides, a timer here drives it), turbo (a
 -- second timing set, Theme.timingTurbo, for the plan and the reels), anticipation sounds, the
@@ -77,9 +78,19 @@ local function fxOn()
 	return not db or db.fx ~= false
 end
 
+-- A witnessed account (security level 1 or 2): spins wait for the witnesses' answers.
+local function witnessed()
+	return S.mode == "guild" and S.game ~= nil and (tonumber(S.game.level) or 0) > 0
+end
+
+-- Turbo plays solo and open accounts only (docs/follow-spec.md section 7).
+local function turboOn()
+	return db ~= nil and db.turbo == true and not witnessed()
+end
+
 -- The timing set of the running round (fixed when it starts), else the one turbo selects.
 local function tm()
-	return S.tm or Theme.timingFor(db and db.turbo)
+	return S.tm or Theme.timingFor(turboOn())
 end
 
 -- A Theme.sounds entry is a soundkit name, a soundkit id, or a file under the addon folder
@@ -318,7 +329,24 @@ end
 
 -- What the window shows while idle in guild mode when the game cannot be played: message line,
 -- and title / text of the status panel over the reels.
-local STATUS_LINES = { no_account = "ST_NO_ACCOUNT", level = "ST_LEVEL", broken = "ST_BROKEN", payout = "ST_PAYOUT" }
+local STATUS_LINES = {
+	no_account = "ST_NO_ACCOUNT", broken = "ST_BROKEN", payout = "ST_PAYOUT", few_players = "ST_FEW_PLAYERS",
+	no_officer = "ST_NO_OFFICER",
+}
+
+-- The needed witness count of the shown account (game.settings.W).
+local function witnessCount()
+	local s = S.game and S.game.settings
+	return s and tonumber(s.W) or 0
+end
+
+-- The line for a status or refusal key; few_players names the witness count.
+local function keyLine(key)
+	if key == "ST_FEW_PLAYERS" then
+		return string.format(L.ST_FEW_PLAYERS, witnessCount())
+	end
+	return L[key]
+end
 
 local function statusLine()
 	if S.mode ~= "guild" then
@@ -332,7 +360,8 @@ local function statusLine()
 		elseif st == "payout" then
 			return L[key], L.PO_LOCK_TITLE, L.PO_LOCK_SUB
 		end
-		return L[key], L.CANNOT_PLAY, L[key]
+		local line = keyLine(key)
+		return line, L.CANNOT_PLAY, line
 	end
 	if not supported() then
 		return L.UNSUPPORTED_TABLE, L.CANNOT_PLAY, L.UNSUPPORTED_TABLE
@@ -351,8 +380,8 @@ end
 
 -- The short line for a code from spin() or gamble().
 local CODE_LINES = {
-	no_account = "ST_NO_ACCOUNT", level = "ST_LEVEL", broken = "ST_BROKEN", wait = "WAIT",
-	send = "SEND_FAILED", payout = "ST_PAYOUT",
+	no_account = "ST_NO_ACCOUNT", broken = "ST_BROKEN", wait = "WAIT", send = "SEND_FAILED", payout = "ST_PAYOUT",
+	few_players = "ST_FEW_PLAYERS", no_officer = "ST_NO_OFFICER", collecting = "COLLECTING",
 }
 
 local function codeLine(code)
@@ -360,7 +389,7 @@ local function codeLine(code)
 		return S.mode == "guild" and L.NO_TOKENS or L.NO_FUNDS
 	end
 	local key = CODE_LINES[code]
-	return key and L[key] or string.format(L.SPIN_FAILED, tostring(code))
+	return key and keyLine(key) or string.format(L.SPIN_FAILED, tostring(code))
 end
 
 local function symbolName(sym)
@@ -403,10 +432,12 @@ local function refresh()
 		end
 	end
 	W.spin.label:SetText(label)
-	W.spin:setEnabled(phase == "round" or (phase == "idle" and not status))
+	local collecting = game:state() == "collecting"
+	W.spin:setEnabled(phase == "round" or (phase == "idle" and not status and not collecting))
 	W.auto:setEnabled(auto or (not status and supported()))
 	W.auto:setSelected(auto)
 	W.turbo:setSelected(db.turbo and true or false)
+	W.turbo:SetShown(not witnessed())
 
 	-- Stakes, or the take / gamble buttons that replace them.
 	local offer = phase == "idle" and S.offer and game:state() == "gamble"
@@ -792,6 +823,17 @@ local function seatStrips()
 	end
 end
 
+-- A timing set for reels that already turn at full speed: no nudge, (almost) no run-up.
+local runningSets = setmetatable({}, { __mode = "k" })
+local function runningTiming(timing)
+	local t = runningSets[timing]
+	if not t then
+		t = setmetatable({ nudgeTime = 0, nudge = 0, accel = 0.001 }, { __index = timing })
+		runningSets[timing] = t
+	end
+	return t
+end
+
 ---------------------------------------------------------------------------------------------
 -- Step handlers. enter(step, silent) starts a step (silent: skipped, no sounds), update(step, t)
 -- animates it and returns true when it is over, finish(step) leaves its end state.
@@ -822,10 +864,14 @@ H.spin = {
 		if silent then
 			return
 		end
-		if step.game == 0 then
+		local t0, timing = S.now + step.delay, tm()
+		if step.game == 0 and S.running then
+			-- The reels already turn (a witnessed spin waited for its result): no start again.
+			t0, timing = S.now, runningTiming(timing)
+		elseif step.game == 0 then
 			sfx("reelStart")
 		end
-		local t0, timing = S.now + step.delay, tm()
+		S.running = false
 		for r = 1, REELS do
 			W.reels[r]:spin(t0, step.stops[r], step.stopAt[r], timing, step.decel and step.decel[r])
 		end
@@ -1216,6 +1262,7 @@ local function showResting()
 end
 
 local updateSession -- defined with the session panel below
+local applyGame -- defined with the modes below
 
 local function endRound()
 	S.phase = "idle"
@@ -1305,9 +1352,12 @@ local function startRound(r, before)
 	for i = 1, REELS do
 		S.baseStops[i] = stops and stops[i] or math.floor(W.reels[i].x + 0.5) % W.reels[i].n
 	end
-	S.tm = Theme.timingFor(db.turbo)
+	S.tm = Theme.timingFor(turboOn())
 	S.plan = Plan.build(r.round, S.tm, shownTable())
 	S.si, S.quick = 0, false
+	-- After a wait the reels already run: the base spin goes on from full speed.
+	S.running = S.phase == "wait"
+	S.wait = nil
 	S.phase = "round"
 	S.autoNext = nil
 	Cashout.conceal()
@@ -1322,6 +1372,106 @@ end
 local function quickStop()
 	for i = 1, REELS do
 		W.reels[i]:quickStop(S.now, (i - 1) * tm().quickStagger)
+	end
+end
+
+---------------------------------------------------------------------------------------------
+-- Witnessed spins (docs/witness-spec.md section 8): spin() returns `wait`, the reels run in the
+-- phase "wait" until the session raises `result`; an ok spin then plays as a round from running
+-- reels, a void one stops them on the symbols they showed before.
+
+local WAIT_SPIN = 120 -- seconds the reels may run without a result (the session settles in 1.5 s)
+
+local function startWait(r, before)
+	local game = S.game
+	S.result, S.offer, S.counts, S.messageUntil = nil, false, {}, nil
+	setTotalShown(nil)
+	clearShow()
+	hideExpansions()
+	setBalanceShown(before - game.stake)
+	setWinText(L.COLLECTING, Theme.tones.muted)
+	seatStrips()
+	S.tm = Theme.timingFor(turboOn())
+	local stops = {}
+	for i = 1, REELS do
+		local reel = W.reels[i]
+		stops[i] = math.floor(reel.x + 0.5) % reel.n
+		reel:spin(S.now, stops[i], WAIT_SPIN, S.tm)
+	end
+	S.wait = { before = before, stops = stops, n = r.n }
+	S.phase = "wait"
+	S.autoNext = nil
+	Cashout.conceal()
+	if db.paytable then
+		db.paytable = false
+		SlotFrame.layout()
+	end
+	sfx("reelStart")
+	startSpinSound()
+	refresh()
+end
+
+-- A void spin: the reels brake onto the stops they showed before the spin.
+local function stopWaitVoid(res)
+	local t = tm()
+	local run = runningTiming(t)
+	for i = 1, REELS do
+		W.reels[i]:spin(S.now, S.wait.stops[i], t.decel + 0.1 + (i - 1) * t.quickStagger * 2, run)
+	end
+	S.wait.void = res
+end
+
+-- The void spin's reels are down: back to rest with the notice; nothing is booked.
+local function voidLine(what)
+	if S.game.level == 2 then
+		return what == "spin" and L.VOID_SPIN_OFFICER or L.VOID_STEP_OFFICER
+	end
+	return what == "spin" and L.VOID_SPIN or L.VOID_STEP
+end
+
+local function endWaitVoid()
+	S.wait = nil
+	S.phase = "idle"
+	S.tm = nil
+	stopSpinSound()
+	S.offer = S.game:state() == "gamble"
+	countTo("balance", S.balanceShown, restBalance(), tm().countUp)
+	message(voidLine("spin"), Theme.tones.lose)
+	refresh()
+end
+
+-- Ends a wait at once (window hidden, mode switch): the reels stand where they were; the
+-- result, when it comes, is shown as the settled account.
+local function dropWait()
+	for i = 1, REELS do
+		W.reels[i]:setStop(S.wait.stops[i])
+	end
+	S.wait = nil
+	S.phase = "idle"
+	S.tm = nil
+	stopSpinSound()
+end
+
+local function updateWait(now)
+	local running = false
+	for i = 1, REELS do
+		local reel = W.reels[i]
+		local ev, landedToo = reel:update(now)
+		if ev == "landed" or landedToo then
+			playSound("reelStop")
+		end
+		if reel:isSpinning() then
+			running = true
+		end
+	end
+	if S.wait.void then
+		if not running then
+			endWaitVoid()
+		end
+	elseif not running or S.game:state() ~= "collecting" then
+		-- No result came (the session dropped the request): show the account as it is.
+		dropWait()
+		applyGame()
 	end
 end
 
@@ -1383,6 +1533,10 @@ local function autoStep()
 		stopAuto(err)
 		return
 	end
+	if r.kind == "wait" then
+		startWait(r, before)
+		return
+	end
 	startRound(r, before)
 end
 
@@ -1429,7 +1583,7 @@ function SlotFrame.toggleAuto()
 end
 
 function SlotFrame.spin()
-	if S.phase == "flip" or S.phase == "pick" then
+	if S.phase == "flip" or S.phase == "pick" or S.phase == "wait" then
 		return
 	end
 	if S.phase == "round" then
@@ -1454,6 +1608,10 @@ function SlotFrame.spin()
 	if not r then
 		message(codeLine(err), Theme.tones.lose)
 		refresh()
+		return
+	end
+	if r.kind == "wait" then
+		startWait(r, before)
 		return
 	end
 	startRound(r, before)
@@ -1565,8 +1723,14 @@ function SlotFrame.pick(color)
 	end
 	S.counts = {}
 	setBalanceShown(S.balanceShown)
-	local other = color == "red" and "black" or "red"
-	S.flip = { res = res, t0 = S.now, face = res.won and color or other, turned = false, revealed = false }
+	if res.kind == "wait" then
+		-- A witnessed step: the card stays face down until the result arrives.
+		S.flip = { wait = true, color = color, t0 = S.now, turned = false, revealed = false }
+		setWinText(L.COLLECTING, Theme.tones.muted)
+	else
+		local other = color == "red" and "black" or "red"
+		S.flip = { res = res, t0 = S.now, face = res.won and color or other, turned = false, revealed = false }
+	end
 	S.offer = false
 	S.phase = "flip"
 	W.red:Hide()
@@ -1575,8 +1739,32 @@ function SlotFrame.pick(color)
 	refresh()
 end
 
+-- The result of a waiting step: an ok step turns the card over from now; a void one leaves the
+-- card open while the win is still at stake (docs/witness-spec.md section 8).
+local function flipResult(res)
+	local f = S.flip
+	if res.kind == "gamble" then
+		local other = f.color == "red" and "black" or "red"
+		f.res, f.face, f.wait, f.t0 = res, res.won and f.color or other, false, S.now
+		return
+	end
+	S.flip = nil
+	if (tonumber(res.pending) or 0) > 0 and S.game:state() == "gamble" then
+		openCard(true)
+	else
+		hideCard()
+		S.phase = "idle"
+		S.offer = S.game:state() == "gamble"
+	end
+	message(voidLine("gamble"), Theme.tones.lose)
+	refresh()
+end
+
 local function updateFlip()
 	local f, t = S.flip, Theme.timing
+	if f.wait then
+		return
+	end
 	local dt = S.now - f.t0
 	local w = Theme.layout.card[3]
 	local scale, front = Anim.flip(dt, t.gambleFlip)
@@ -1699,8 +1887,18 @@ end
 local function settle()
 	stopSpinSound()
 	stopRiser()
+	if S.phase == "wait" then
+		-- The session finishes the request; its result is shown as the settled account.
+		dropWait()
+	end
 	if S.phase == "round" then
 		settleRound()
+	end
+	if S.phase == "flip" and S.flip.wait then
+		S.flip = nil
+		S.phase = "idle"
+		hideCard()
+		S.offer = S.game:state() == "gamble"
 	end
 	if S.phase == "flip" then
 		S.flip.t0 = S.now - 100
@@ -1788,6 +1986,8 @@ local function onUpdate(f, elapsed)
 			h.finish(step)
 			advance()
 		end
+	elseif S.phase == "wait" then
+		updateWait(now)
 	end
 
 	for key, c in pairs(S.counts) do
@@ -1799,6 +1999,20 @@ local function onUpdate(f, elapsed)
 
 	if S.phase == "flip" then
 		updateFlip()
+	end
+
+	-- Players age out of the online list without an event: look at the guild status once a
+	-- second and show a change (few_players, no_officer and back).
+	if S.mode == "guild" and S.phase == "idle" and now >= (S.statusAt or 0) then
+		S.statusAt = now + 1
+		local st = S.game:status()
+		if st ~= S.lastStatus then
+			S.lastStatus = st
+			if not S.offer and not S.messageUntil then
+				idleText()
+			end
+			refresh()
+		end
 	end
 
 	-- Autoplay: the next round once the last one is fully shown and the pause is over.
@@ -2229,8 +2443,6 @@ local function buildPills()
 	for _, p in ipairs(pills) do p:Show() end
 	W.pills = pills
 end
-
-local applyGame -- defined with the modes below
 
 local function iconButton(parent, r, icon, onClick)
 	local b = Skin.button(parent, "icon", r[3], r[4], onClick,
@@ -2697,6 +2909,46 @@ function SlotFrame.toggleMode()
 	return SlotFrame.setMode(S.mode == "guild" and "solo" or "guild")
 end
 
+-- The result of a witnessed spin or gamble step (event `result`). The window plays it when it
+-- still waits for it; otherwise (closed, switched to solo meanwhile) it books the round and,
+-- in guild mode at rest, shows the settled account.
+local function onResult(res)
+	local game = currentSession() and currentSession():game()
+	if S.mode == "guild" and S.game == game then
+		if S.phase == "wait" and S.wait and not S.wait.void then
+			if res.kind == "spin" then
+				startRound(res, S.wait.before)
+			elseif res.kind == "void" and res.what == "spin" then
+				stopWaitVoid(res)
+			end
+			return
+		end
+		if S.phase == "flip" and S.flip and S.flip.wait then
+			if res.kind == "gamble" or (res.kind == "void" and res.what == "gamble") then
+				flipResult(res)
+			end
+			return
+		end
+	end
+	-- Late: nobody watched it play.
+	if res.kind == "spin" then
+		S.stats:round("guild", res)
+		updateSession()
+	elseif res.kind == "gamble" then
+		S.stats:gamble("guild", res)
+		updateSession()
+	end
+	if S.mode == "guild" and S.phase == "idle" then
+		applyGame()
+		local stops = res.kind == "spin" and res.round and res.round.stops
+		if stops then
+			for i = 1, REELS do
+				if stops[i] then W.reels[i]:setStop(stops[i]) end
+			end
+		end
+	end
+end
+
 -- Session events from Main.
 local function onMainEvent(name, data)
 	if not W.frame then
@@ -2716,6 +2968,8 @@ local function onMainEvent(name, data)
 		elseif (data.status == "failed" or data.status == "timeout") and not busy then
 			message(string.format(L.BUY_FAILED, tostring(data.code or data.status)), Theme.tones.lose)
 		end
+	elseif name == "result" and type(data) == "table" then
+		onResult(data)
 	elseif name == "ticker" then
 		onTicker(data)
 	elseif name == "payout" then

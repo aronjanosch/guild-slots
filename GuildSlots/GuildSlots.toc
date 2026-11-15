@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Guild Slots
 ## Notes: A slot machine where the guild is the house. Play money only.
-## Version: 0.9.0
+## Version: 0.10.0
 ## SavedVariables: GuildSlotsDB
 
 Core\Sha256.lua

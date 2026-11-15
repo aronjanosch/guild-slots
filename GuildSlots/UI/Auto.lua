@@ -8,8 +8,9 @@ local _, ns = ...
 --   after a fully shown round, a take, or a finished gamble: "wait" while the game still offers
 --   take / gamble (the player decides; autoplay never gambles), else "continue"
 -- Auto.refused(code) -> "retry" | "off"
---   a spin refused with `code`: "retry" for "wait" (guild interval), anything else switches
---   autoplay off (no funds, payout open, ...)
+--   a spin refused with `code`: "retry" for "wait" (guild interval) and "collecting" (a
+--   witnessed request still open), anything else switches autoplay off (no funds, payout open,
+--   too few players, ...)
 
 local Auto = {}
 ns.Auto = Auto
@@ -22,7 +23,7 @@ function Auto.after(game)
 end
 
 function Auto.refused(code)
-	if code == "wait" then
+	if code == "wait" or code == "collecting" then
 		return "retry"
 	end
 	return "off"

@@ -52,16 +52,23 @@ local function reason(v)
 	return REASONS[v] == true
 end
 
--- LOG payload: 1..200 bytes, anything but NUL.
+-- LOG payload: 1..220 bytes, anything but NUL.
 local function payload(v)
-	return type(v) == "string" and #v >= 1 and #v <= 200 and not find(v, "%z")
+	return type(v) == "string" and #v >= 1 and #v <= 220 and not find(v, "%z")
 end
 
+-- ALERT codes (docs/follow-spec.md section 4).
+local ALERT_CODES = { rewritten = true, bad_entry = true, bad_res = true, omitted = true, bad_value = true }
+
 local TYPES = {
+	HI = {}, -- "I just arrived": asks the others for a HELLO
 	HELLO = {
 		field("version", version),
 		field("n", int(0, MAX_SPIN)),
 		field("head", headOrDash),
+		-- docs/follow-spec.md section 2: the commit of the session secret, the previous secret.
+		field("commit", hex(32)),
+		field("reveal", headOrDash),
 	},
 	BUY1 = {
 		field("buyId", hex(16)),
@@ -96,6 +103,27 @@ local TYPES = {
 		field("head", hex(32)),
 		field("A", int(0, 10000)),
 	},
+	-- docs/witness-spec.md section 1. A spin has g 0, a gamble step g 1..5. `who` is "-" or 1..8
+	-- groups of 4 hex.
+	WIT = {
+		field("player", validName),
+		field("kind", function(v) return v == "spin" or v == "gam" end),
+		field("n", int(1, MAX_SPIN)),
+		field("g", int(0, 5)),
+		field("value", hex(16)),
+		valid = function(m) return (m.kind == "spin") == (m.g == 0) end,
+	},
+	RES = {
+		field("kind", function(v) return v == "spin" or v == "gam" end),
+		field("n", int(1, MAX_SPIN)),
+		field("g", int(0, 5)),
+		field("status", function(v) return v == "ok" or v == "void" end),
+		field("who", function(v)
+			return v == "-" or (type(v) == "string" and #v >= 4 and #v <= 32 and #v % 4 == 0 and not find(v, "[^0-9a-f]"))
+		end),
+		field("head", hex(32)),
+		valid = function(m) return (m.kind == "spin") == (m.g == 0) end,
+	},
 	PAYREQ = {
 		field("reqId", hex(16)),
 		field("officer", validName),
@@ -106,6 +134,10 @@ local TYPES = {
 	LOGREQ = {
 		field("reqId", hex(16)),
 		field("player", validName),
+		-- docs/follow-spec.md section 5: entries the officer holds, and its short head after them.
+		field("from", int(0, MAX_SPIN)),
+		field("head", headOrDash),
+		valid = function(m) return (m.from == 0) == (m.head == "-") end,
 	},
 	LOG = {
 		field("reqId", hex(16)),
@@ -124,8 +156,10 @@ local TYPES = {
 		field("amount", int(1, MAX_INT)),
 		field("balanceAfter", int(0, MAX_INT)),
 		field("time", int(0, MAX_INT)),
-		field("head", hex(32)),
+		field("head", hex(64)), -- the full head after the payout entry
 		field("anchors", int(1, MAX_SPIN)),
+		field("n", int(0, MAX_SPIN)),
+		field("ck", hex(16)),
 	},
 	REJECT = {
 		field("reqId", hex(16)),
@@ -136,6 +170,14 @@ local TYPES = {
 		field("player", validName),
 		field("anchors", int(1, MAX_SPIN)),
 		field("head", hex(32)),
+		field("time", int(0, MAX_INT)),
+	},
+	ALERT = {
+		field("reqId", hex(16)),
+		field("player", validName),
+		field("code", function(v) return ALERT_CODES[v] == true end),
+		field("n", int(0, MAX_SPIN)),
+		field("g", int(0, 5)),
 		field("time", int(0, MAX_INT)),
 	},
 }
