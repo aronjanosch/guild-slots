@@ -2164,7 +2164,6 @@ end
 
 -- A complete purchase: { text, buyId, head (64 hex before it), anchors }.
 function Session:followBuy(player, item)
-	local rec = self:followRecord(player)
 	local state = self:followedState(player)
 	if state and state.buyIds[item.buyId] then
 		return 0 -- heard twice (the issuing officer)
