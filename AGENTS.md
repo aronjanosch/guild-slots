@@ -24,8 +24,8 @@ where the guild is the house. Game rules, modes, layout and status: `README.md`.
   `bswap`. LuaJIT's returns signed ones, so every test runs under both (`make test`).
 - Which client APIs exist was measured, not assumed: `docs/forever-api-probe.md`. Check there
   before using a WoW API; add it to `read_globals` in `.luacheckrc`.
-- Every file starts `local _, ns = ...` and exports through `ns.<Module>`; no globals besides
-  `GuildSlotsDB`.
+- Every file starts `local _, ns = ...` and exports through `ns.<Module>`; the only globals it
+  writes are listed under `globals` in `.luacheckrc`.
 
 ## Adding a file
 
@@ -41,8 +41,9 @@ where the guild is the house. Game rules, modes, layout and status: `README.md`.
 ```sh
 make test                                   # unit tests, signed and unsigned bit
 for f in tests/smoke_*.lua; do luajit "$f" || break; done   # windows and protocol against a WoW API stub
-python3 tools/ref/test_ref.py               # self-check of the Python reference (needs numpy)
+uv run --no-project --with numpy python3 tools/ref/test_ref.py   # self-check of the Python reference
 make vectors && git diff --exit-code tests/ # vectors still match the reference
+luacheck GuildSlots                         # lint; CI installs it via luarocks
 ```
 
 What only the live client can show goes into an in-game checklist,
